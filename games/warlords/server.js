@@ -19,7 +19,7 @@ const LATERAL_FREE = 0.8; //     sideways speed (x base) the paddle can give bef
 const MIN_FORWARD = 0.3; //      after a paddle hit at least this fraction of the speed leaves along the normal
 const MAX_EVENTS = 40; //        per snapshot
 const PEAK_WINDOW = 0.12; //     s: a release uses the paddle's fastest recent speed, so letting go isn't punished for a hand that slowed down
-const HOLD_COOLDOWN = 0.4; //    seconds before a paddle can catch again after releasing
+const HOLD_COOLDOWN = 0.5; //    seconds before a paddle can catch again after releasing
 const PICKUP_COOLDOWN = 0.25; // seconds a just-launched ball (drawn blue) cannot be caught, and passes through the paddle that launched it
 
 // ── bots ──
@@ -496,6 +496,8 @@ class WarlordsGame {
           const hit = circleRect(p.x, p.y, BALL_R, r);
           if (hit) { p.x += hit.nx * hit.depth; p.y += hit.ny * hit.depth; }
         }
+        p.x = clamp(p.x, BALL_R, ARENA - BALL_R); // a ball held on a paddle end next to a wall must stay inside the arena
+        p.y = clamp(p.y, BALL_R, ARENA - BALL_R);
         d = launchVec(h.slot, pd.t, h);
         h.peak = Math.max(h.peak, Math.abs(pd.ds));
       }
@@ -528,8 +530,16 @@ class WarlordsGame {
       const pd = w.get(e, PaddleC);
       if (this.fresh.get(e0)?.slot === pd.slot) continue; // just launched from this paddle: pass through it, don't bounce
       for (const r of paddleRects(pd.slot, pd.t)) {
-        const hit = circleRect(p.x, p.y, BALL_R, r);
+        let hit = circleRect(p.x, p.y, BALL_R, r);
         if (!hit) continue;
+        // A ball squeezed between a paddle and a wall (the paddle slid flush against it) would be pushed out the
+        // nearest side, i.e. through the wall and out of the arena. When that happens, let it out the front instead.
+        const ox = p.x + hit.nx * hit.depth;
+        const oy = p.y + hit.ny * hit.depth;
+        if (ox < BALL_R || ox > ARENA - BALL_R || oy < BALL_R || oy > ARENA - BALL_R) {
+          const half = Math.abs(r.fx) * (r.w / 2) + Math.abs(r.fy) * (r.h / 2);
+          hit = { nx: r.fx, ny: r.fy, depth: half + BALL_R - ((p.x - r.x) * r.fx + (p.y - r.y) * r.fy) };
+        }
         return this.#paddleHit(p, v, hit, r, pd, id, e0);
       }
     }

@@ -27,7 +27,7 @@ export const meta = {
       options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }],
     },
     // Balls
-    { type: 'number', key: 'maxBalls', label: 'Max balls', min: 1, max: 8, step: 1, default: 4, group: 'balls' },
+    { type: 'number', key: 'maxBalls', label: 'Max balls', min: 1, max: 8, step: 1, default: 3, group: 'balls' },
     { type: 'number', key: 'ballInterval', label: 'Seconds between new balls', min: 3, max: 30, step: 1, default: 6, group: 'balls' },
     { type: 'number', key: 'ballSpeed', label: 'Ball speed', min: 150, max: 700, step: 10, default: 380, group: 'balls' },
     { type: 'number', key: 'maxSpeedMult', label: 'Top ball speed, x base (speed-up and hold release)', min: 1.2, max: 8, step: 0.1, default: 3.5, group: 'balls' },
@@ -59,8 +59,8 @@ export const BLOCK = 6; //  base = 6x6 cells: the king fills the corner 2x2, 32 
 export const KING_CELLS = 2;
 export const BLOCK_SIZE = BRICK * BLOCK;
 export const GAP = 14; //   keep below 2 * BALL_R or balls can squeeze between the paddle and the base
-export const PADDLE_LEN = 45; // measured along the track (was 90)
-export const PADDLE_THICK = 20; // chunkier, so the paddle is squarer like the Atari original
+export const PADDLE_LEN = 54; // measured along the track (was 45)
+export const PADDLE_THICK = 30; // 1.5x the old 20: chunkier, so the paddle is squarer like the Atari original
 export const BALL_R = 8;
 
 /**
