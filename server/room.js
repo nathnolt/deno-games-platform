@@ -1,11 +1,18 @@
 import { defaultSettings, sanitizeSettings } from '../shared/settings.js';
 
 /**
- * A room is game-agnostic: members, host, readiness, settings and the tick loop.
+ * A room is game-agnostic: members, host, readiness, settings, SEATS and the tick loop.
  * What happens inside a match is delegated to the game's instance.
+ *
+ * Seats (one per `meta.maxPlayers`, shown to the host as one row each):
+ *   mode 'open'   anyone can sit here. If `playerId` is set, that person is sitting in it ("Player").
+ *   mode 'bot'    the game fills it with a bot.
+ *   mode 'closed' nobody plays here.
+ * Members without a seat are spectators. They can join at any time, even mid-game, and just watch.
  */
 export class Room {
-  #members = new Map(); // clientId -> { client, ready, slot }
+  #members = new Map(); // clientId -> { client, ready }
+  #seats; //             [{ mode: 'open' | 'bot' | 'closed', playerId: string | null }]
   #hostId = '';
   #settings;
   #status = 'lobby';
@@ -20,6 +27,8 @@ export class Room {
     this.onChange = onChange;
     this.solo = solo;
     this.#settings = defaultSettings(game.meta);
+    // Solo: the human takes the first seat, bots fill the rest. Multiplayer: everything starts open.
+    this.#seats = Array.from({ length: game.meta.maxPlayers }, (_, i) => ({ mode: solo && i > 0 ? 'bot' : 'open', playerId: null }));
   }
 
   get empty() {
@@ -27,22 +36,25 @@ export class Room {
   }
 
   join(client) {
-    if (this.#status === 'playing') throw new Error('A game is in progress in this room');
-    if (this.#members.size >= (this.solo ? 1 : this.game.meta.maxPlayers)) {
-      throw new Error(this.solo ? 'This is a solo room' : 'Room is full');
-    }
-    const used = new Set([...this.#members.values()].map((m) => m.slot));
-    let slot = 0;
-    while (used.has(slot)) slot++;
-    this.#members.set(client.id, { client, ready: false, slot });
+    if (this.solo && this.#members.size >= 1) throw new Error('This is a solo room');
+    this.#members.set(client.id, { client, ready: false });
     if (!this.#hostId) this.#hostId = client.id;
     client.room = this;
+    // Before the game starts, take the first open seat if there is one; otherwise (or mid-game) just watch.
+    if (this.#status === 'lobby') {
+      const free = this.#seats.findIndex((s) => s.mode === 'open' && !s.playerId);
+      if (free >= 0) this.#seats[free].playerId = client.id;
+    }
     this.broadcastState();
+    // Somebody arriving mid-game gets the game screen straight away, as a spectator.
+    if (this.#status === 'playing') client.send({ t: 'gameStart', room: this.state() });
   }
 
   leave(client) {
     if (!this.#members.has(client.id)) return;
-    if (this.#status === 'playing') this.#instance?.onLeave(client.id);
+    const seat = this.#seatOf(client.id);
+    if (this.#status === 'playing' && seat >= 0) this.#instance?.onLeave(client.id);
+    if (seat >= 0) this.#vacate(seat);
     this.#members.delete(client.id);
     client.room = null;
     client.send({ t: 'room', room: null });
@@ -59,6 +71,57 @@ export class Room {
     this.broadcastState();
   }
 
+  // ── seats ──
+  /** A member sits in an open, empty seat (moving from their current one if any). */
+  takeSeat(client, index) {
+    this.#requireLobby();
+    const seat = this.#seat(index);
+    if (seat.playerId === client.id) return;
+    if (seat.mode !== 'open') throw new Error('That seat is not open');
+    if (seat.playerId) throw new Error('That seat is taken');
+    this.#sit(client.id, index);
+    this.broadcastState();
+  }
+
+  /** A member gives up their seat and watches instead. */
+  spectate(client) {
+    this.#requireLobby();
+    if (this.solo) throw new Error('A solo game needs you in a seat');
+    const seat = this.#seatOf(client.id);
+    if (seat >= 0) this.#vacate(seat);
+    this.broadcastState();
+  }
+
+  /**
+   * Host only. value: 'open' | 'bot' | 'closed' | 'player:<memberId>'
+   * Picking a person seats them here (they leave their old seat; whoever sat here is swapped into it,
+   * or becomes a spectator). Picking bot/closed on an occupied seat turns its player into a spectator.
+   */
+  setSeat(client, index, value) {
+    this.#requireHost(client);
+    this.#requireLobby();
+    const seat = this.#seat(index);
+    if (typeof value !== 'string') throw new Error('Bad seat value');
+    if (value.startsWith('player:')) {
+      const id = value.slice(7);
+      if (!this.#members.has(id)) throw new Error('That player is not in the room');
+      if (seat.playerId === id) return;
+      const oldSeat = this.#seatOf(id);
+      const displaced = seat.playerId;
+      if (oldSeat >= 0) this.#vacate(oldSeat);
+      seat.mode = 'open';
+      seat.playerId = id;
+      if (displaced && oldSeat >= 0) this.#sit(displaced, oldSeat); // swap
+    } else if (value === 'open' || value === 'bot' || value === 'closed') {
+      if (this.solo && value === 'open') throw new Error('A solo game has no open seats');
+      seat.playerId = null; // whoever sat here is sent to the spectators
+      seat.mode = value;
+    } else {
+      throw new Error('Bad seat value');
+    }
+    this.broadcastState();
+  }
+
   setReady(client, ready) {
     const m = this.#members.get(client.id);
     if (m && this.#status === 'lobby') m.ready = ready;
@@ -69,17 +132,23 @@ export class Room {
     this.#requireHost(client);
     if (this.#status !== 'lobby') return;
     const { minPlayers, tickRate } = this.game.meta;
-    if (this.#members.size < minPlayers) throw new Error(`Need at least ${minPlayers} players`);
-    if ([...this.#members.values()].some((m) => m.client.id !== this.#hostId && !m.ready)) {
+    const humans = this.#seated();
+    const bots = this.#seats.flatMap((s, i) => (s.mode === 'bot' ? [i] : []));
+    if (humans.length < 1) throw new Error('At least one person has to sit in a seat');
+    if (humans.length + bots.length < minPlayers) {
+      throw new Error(`Need at least ${minPlayers} seats filled (players or bots)`);
+    }
+    if (humans.some((h) => h.id !== this.#hostId && !this.#members.get(h.id).ready)) {
       throw new Error('Not everyone is ready');
     }
-    const problem = this.game.canStart?.({ players: this.#members.size, settings: this.#settings });
+    const problem = this.game.canStart?.({ players: humans.length, bots: bots.length, settings: this.#settings });
     if (problem) throw new Error(problem);
 
     this.#status = 'playing';
     const state = this.state();
     this.#instance = this.game.create({
-      players: state.players,
+      players: humans,
+      bots,
       settings: this.#settings,
       end: (result) => this.#endGame(result),
     });
@@ -101,12 +170,15 @@ export class Room {
   }
 
   summary() {
+    const seated = this.#seated().length;
     return {
       id: this.id,
       name: this.name,
       gameId: this.game.meta.id,
-      players: this.#members.size,
+      players: seated,
+      spectators: this.#members.size - seated,
       maxPlayers: this.game.meta.maxPlayers,
+      openSeats: this.#seats.filter((s) => s.mode === 'open' && !s.playerId).length,
       status: this.#status,
       solo: this.solo,
     };
@@ -118,12 +190,14 @@ export class Room {
       name: this.name,
       gameId: this.game.meta.id,
       hostId: this.#hostId,
+      // slot = seat index, or -1 for a spectator
       players: [...this.#members.values()].map((m) => ({
         id: m.client.id,
         name: m.client.name,
         ready: m.ready,
-        slot: m.slot,
+        slot: this.#seatOf(m.client.id),
       })),
+      seats: this.#seats.map((s) => ({ mode: s.mode, playerId: s.playerId })),
       settings: this.#settings,
       status: this.#status,
       solo: this.solo,
@@ -132,6 +206,43 @@ export class Room {
 
   broadcastState() {
     this.#broadcast({ t: 'room', room: this.state() });
+  }
+
+  // ── internals ──
+  /** Seated humans as the game receives them: [{ id, name, slot }]. */
+  #seated() {
+    return this.#seats.flatMap((s, slot) => {
+      const m = s.playerId ? this.#members.get(s.playerId) : null;
+      return m ? [{ id: m.client.id, name: m.client.name, slot }] : [];
+    });
+  }
+
+  #seat(index) {
+    const seat = Number.isInteger(index) ? this.#seats[index] : undefined;
+    if (!seat) throw new Error('No such seat');
+    return seat;
+  }
+
+  #seatOf(id) {
+    return this.#seats.findIndex((s) => s.playerId === id);
+  }
+
+  /** Puts a member in seat `index` (which must be free), leaving any seat they had. */
+  #sit(id, index) {
+    const old = this.#seatOf(id);
+    if (old >= 0) this.#vacate(old);
+    this.#seats[index].playerId = id;
+  }
+
+  /** Empties a seat. Solo rooms turn it into a bot seat (an open seat means nothing there). */
+  #vacate(index) {
+    const seat = this.#seats[index];
+    seat.playerId = null;
+    if (this.solo) seat.mode = 'bot';
+  }
+
+  #requireLobby() {
+    if (this.#status !== 'lobby') throw new Error('Seats cannot be changed during a game');
   }
 
   #endGame(result) {

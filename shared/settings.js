@@ -7,11 +7,13 @@
  * @property {string} id
  * @property {string} name
  * @property {string} description
- * @property {number} minPlayers
- * @property {number} maxPlayers
+ * @property {number} minPlayers          minimum number of FILLED seats (humans + bots) needed to start; at least one must be human
+ * @property {number} maxPlayers          number of seats; the room shows one row per seat
+ * @property {string[]} [seatNames]       optional label per seat, e.g. ['Top left', ...]
+ * @property {string[]} [seatColors]      optional CSS color per seat, shown next to its row
  * @property {number} tickRate            server updates per second
  * @property {SettingField[]} settings    drives the generated setup form
- * @property {Record<string, number|boolean|string>} [soloSettings]  if set, the lobby offers "Play solo"
+ * @property {Record<string, number|boolean|string>} [soloSettings]  if set, the lobby offers "Play solo" (you in seat 1, bots in the rest; {} = just the defaults)
  */
 
 export function defaultSettings(meta) {

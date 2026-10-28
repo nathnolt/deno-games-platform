@@ -41,3 +41,12 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .wl-hud { position: absolute; top: .6rem; left: 1rem; display: flex; gap: 1rem; font-weight: 600; pointer-events: none; }
 .wl-banner { position: absolute; top: 40%; left: 0; right: 0; text-align: center; font: 700 2.4rem Palatino, Georgia, serif; pointer-events: none; text-shadow: 0 2px 12px #000; }
 .wl-hint { position: absolute; bottom: .5rem; left: 0; right: 0; text-align: center; color: var(--muted); font-size: .8rem; pointer-events: none; }
+
+.seats { display: flex; flex-direction: column; }
+.seat { display: grid; grid-template-columns: auto 11rem 1fr auto; align-items: center; gap: .6rem; padding: .4rem 0; border-bottom: 1px solid var(--line); }
+.seat.mine { background: rgba(245, 158, 11, .07); }
+.seat-dot { width: .9rem; height: .9rem; border-radius: 50%; }
+.seat-name { font-weight: 600; }
+.seat-select { min-width: 0; width: 100%; }
+.seat-extra { display: flex; gap: .6rem; align-items: center; justify-content: flex-end; min-width: 6rem; }
+@media (max-width: 520px) { .seat { grid-template-columns: auto 1fr; } .seat > :nth-child(n+3) { grid-column: 2; } .seat-extra { justify-content: flex-start; } }

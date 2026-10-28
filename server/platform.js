@@ -76,8 +76,9 @@ export class Platform {
       case 'joinRoom': {
         const room = this.#rooms.get(msg.roomId);
         if (!room || room.solo) throw new Error('Room no longer exists');
+        if (c.room === room) break;
         this.#leave(c);
-        room.join(c);
+        room.join(c); // never refused: no free seat (or a game in progress) just means you watch
         this.#broadcastRooms();
         break;
       }
@@ -86,6 +87,15 @@ export class Platform {
         break;
       case 'setSettings':
         c.room?.setSettings(c, msg.settings);
+        break;
+      case 'takeSeat':
+        c.room?.takeSeat(c, msg.seat);
+        break;
+      case 'spectate':
+        c.room?.spectate(c);
+        break;
+      case 'setSeat':
+        c.room?.setSeat(c, msg.seat, msg.value);
         break;
       case 'setReady':
         c.room?.setReady(c, !!msg.ready);

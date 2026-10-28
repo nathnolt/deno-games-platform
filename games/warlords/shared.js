@@ -6,12 +6,13 @@ export const meta = {
   id: 'warlords',
   name: 'Warlords',
   description: 'Defend your warlord in the corner. Break the others. Last one standing wins the round.',
-  minPlayers: 1, // solo is possible with bots; the server's canStart() checks the real minimum
-  maxPlayers: 4,
+  minPlayers: 2, // filled seats (players + bots) needed to start
+  maxPlayers: 4, // the four corners = four seats
+  seatNames: ['Top left', 'Top right', 'Bottom left', 'Bottom right'],
+  seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'],
   tickRate: 60,
-  soloSettings: { bots: 3 },
+  soloSettings: {}, // Play solo = you in the first seat, bots in the other three (the room's seat rows can change that)
   settings: [
-    { type: 'number', key: 'bots', label: 'Bots (fill empty corners)', min: 0, max: 3, step: 1, default: 0 },
     {
       type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal',
       options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }],

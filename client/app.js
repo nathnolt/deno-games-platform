@@ -134,14 +134,16 @@ class App {
     }
     this.roomListEl.replaceChildren(
       ...this.rooms.map((r) => {
-        const join = el('button', { onclick: () => this.send({ t: 'joinRoom', roomId: r.id }) }, 'Join');
-        join.disabled = r.players >= r.maxPlayers || r.status === 'playing';
+        // Joining is never refused: with no free seat (or a game already running) you join as a spectator.
+        const watch = r.status === 'playing' || r.openSeats === 0;
+        const join = el('button', { onclick: () => this.send({ t: 'joinRoom', roomId: r.id }) }, watch ? 'Watch' : 'Join');
         const gameName = clientGames.get(r.gameId)?.meta.name ?? r.gameId;
+        const watching = r.spectators ? `, ${r.spectators} watching` : '';
         return el(
           'div',
           { class: 'room-row' },
           el('strong', {}, r.name),
-          el('span', { class: 'muted' }, `${gameName}, ${r.players}/${r.maxPlayers} players${r.status === 'playing' ? ', in game' : ''}`),
+          el('span', { class: 'muted' }, `${gameName}, ${r.players}/${r.maxPlayers} seated${watching}${r.status === 'playing' ? ', in game' : ''}`),
           join,
         );
       }),
@@ -155,31 +157,79 @@ class App {
     if (room.solo) return this.buildSoloSetup(room, game);
     const isHost = room.hostId === this.me;
     const mine = room.players.find((p) => p.id === this.me);
+    const seated = mine && mine.slot >= 0;
+    const spectators = room.players.filter((p) => p.slot < 0);
 
-    const players = room.players.map((p) =>
-      el(
-        'li',
-        {},
-        el('span', {}, p.name + (p.id === this.me ? ' (you)' : '')),
-        el('span', { class: p.ready || p.id === room.hostId ? 'ok' : 'muted' }, p.id === room.hostId ? 'host' : p.ready ? 'ready' : 'not ready'),
-      ),
-    );
     const action = isHost
       ? el('button', { class: 'primary', onclick: () => this.send({ t: 'start' }) }, 'Start game')
-      : el('button', { class: 'primary', onclick: () => this.send({ t: 'setReady', ready: !mine?.ready }) }, mine?.ready ? 'Not ready' : 'Ready');
+      : seated
+        ? el('button', { class: 'primary', onclick: () => this.send({ t: 'setReady', ready: !mine.ready }) }, mine.ready ? 'Not ready' : 'Ready')
+        : '';
 
     return el(
       'main',
       { class: 'panel' },
       el('h1', {}, room.name),
       el('p', { class: 'muted' }, `${game.meta.name}: ${game.meta.description}`),
-      el('h2', {}, `Players (${room.players.length}/${game.meta.maxPlayers})`),
-      el('ul', { class: 'players' }, ...players),
+      el('h2', {}, 'Seats'),
+      this.seatsPanel(room, game, isHost),
+      spectators.length
+        ? el('p', { class: 'muted' }, `Watching: ${spectators.map((p) => p.name + (p.id === this.me ? ' (you)' : '')).join(', ')}`)
+        : '',
+      !seated && !isHost ? el('p', { class: 'muted' }, 'You are watching. Press "Sit here" on an open seat to play.') : '',
       el('h2', {}, `${game.meta.name} setup`),
       settingsForm(game.meta, room.settings, isHost, (settings) => this.send({ t: 'setSettings', settings })),
       el('div', { class: 'row' }, action, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave room')),
-      isHost ? el('p', { class: 'muted' }, 'Everyone else must be ready before you can start.') : '',
+      isHost ? el('p', { class: 'muted' }, 'Everyone sitting in a seat must be ready before you can start. Spectators can come and go.') : '',
     );
+  }
+
+  /**
+   * One row per seat (the game's meta.maxPlayers). The host gets a dropdown per seat:
+   * Open / Bot / Closed, or one of the people in the room to seat them there. Everyone else sees who sits where
+   * and can sit in an open seat ("Sit here") or stand up to watch.
+   */
+  seatsPanel(room, game, isHost) {
+    const { seatNames = [], seatColors = [] } = game.meta;
+    const rows = room.seats.map((seat, i) => {
+      const occupant = seat.playerId ? room.players.find((p) => p.id === seat.playerId) : null;
+      const value = occupant ? `player:${occupant.id}` : seat.mode;
+      const who = (p) => p.name + (p.id === this.me ? ' (you)' : '');
+      let control;
+      if (isHost) {
+        const options = [
+          ...(room.solo ? [] : [['open', 'Open']]),
+          ['bot', 'Bot'],
+          ['closed', 'Closed'],
+          ...room.players.map((p) => [`player:${p.id}`, who(p)]),
+        ];
+        control = el('select', { class: 'seat-select', onchange: (e) => this.send({ t: 'setSeat', seat: i, value: e.target.value }) },
+          ...options.map(([v, label]) => el('option', { value: v, textContent: label })));
+        control.value = value;
+      } else {
+        const text = occupant ? who(occupant) : { open: 'Open', bot: 'Bot', closed: 'Closed' }[seat.mode];
+        control = el('span', { class: occupant ? '' : 'muted' }, text);
+      }
+      const extras = [];
+      if (occupant) {
+        extras.push(el('span', { class: occupant.ready || occupant.id === room.hostId ? 'ok' : 'muted' },
+          occupant.id === room.hostId ? 'host' : occupant.ready ? 'ready' : 'not ready'));
+      }
+      if (!room.solo && occupant?.id === this.me && !isHost) {
+        extras.push(el('button', { onclick: () => this.send({ t: 'spectate' }) }, 'Stand up'));
+      } else if (!room.solo && !isHost && seat.mode === 'open' && !occupant) {
+        extras.push(el('button', { onclick: () => this.send({ t: 'takeSeat', seat: i }) }, 'Sit here'));
+      }
+      return el(
+        'div',
+        { class: 'seat' + (occupant?.id === this.me ? ' mine' : '') },
+        el('span', { class: 'seat-dot', style: `background:${seatColors[i] ?? '#64748b'}` }),
+        el('span', { class: 'seat-name' }, `${i + 1}. ${seatNames[i] ?? 'Seat ' + (i + 1)}`),
+        control,
+        el('span', { class: 'seat-extra' }, ...extras),
+      );
+    });
+    return el('div', { class: 'seats' }, ...rows);
   }
 
   /** Solo setup page: same schema-generated form as a multiplayer room, minus players/ready. Always editable. */
@@ -189,13 +239,15 @@ class App {
       { class: 'panel' },
       el('h1', {}, `${game.meta.name}: solo`),
       el('p', { class: 'muted' }, game.meta.description),
+      el('h2', {}, 'Seats'),
+      this.seatsPanel(room, game, true),
       el('h2', {}, 'Solo settings'),
       settingsForm(game.meta, room.settings, true, (settings) => this.send({ t: 'setSettings', settings })),
       el(
         'div',
         { class: 'row' },
         el('button', { class: 'primary', onclick: () => this.send({ t: 'start' }) }, 'Start game'),
-        el('button', { onclick: () => this.send({ t: 'setSettings', settings: { ...game.meta.soloSettings } }) }, 'Reset to defaults'),
+        el('button', { onclick: () => this.send({ t: 'setSettings', settings: { ...game.meta.soloSettings } }) }, 'Reset settings'),
         el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Back to lobby'),
       ),
     );
@@ -207,17 +259,18 @@ class App {
     const game = clientGames.get(room.gameId);
     this.gameHost = el('div', { class: 'game-host' });
     this.backBtn = el('button', { class: 'hidden', onclick: () => this.go('room') }, 'Back to setup');
+    const watching = (room.players.find((p) => p.id === this.me)?.slot ?? -1) < 0;
     return el(
       'div',
       { class: 'game-screen' },
-      el('div', { class: 'topbar' }, el('span', {}, `${game.meta.name}: ${room.name}`), this.backBtn, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave')),
+      el('div', { class: 'topbar' }, el('span', {}, `${game.meta.name}: ${room.name}${watching ? ' (watching)' : ''}`), this.backBtn, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave')),
       this.gameHost,
     );
   }
 
   mountGame() {
     const room = this.room;
-    const slot = room.players.find((p) => p.id === this.me)?.slot ?? 0;
+    const slot = room.players.find((p) => p.id === this.me)?.slot ?? -1; // -1 = spectator
     this.view = clientGames.get(room.gameId).mount({
       container: this.gameHost,
       me: { id: this.me, slot },

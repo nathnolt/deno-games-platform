@@ -12,6 +12,14 @@ const TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.wav': 'audio/wav', // sound effects: put files in games/<id>/sounds/
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.flac': 'audio/flac',
 };
 const PUBLIC_DIRS = ['/client/', '/shared/', '/games/'];
 

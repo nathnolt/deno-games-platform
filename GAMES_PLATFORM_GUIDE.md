@@ -41,14 +41,15 @@ only render that state and send inputs.
 │  lobby / room / setup  │   JSON text    │                    /ws upgrade      │
 │  settings form         │                │ server/platform.js connections,     │
 │                        │                │                    lobby, rooms     │
-│ games/<id>/client.js   │                │ server/room.js     host, ready,     │
-│  draws snapshots,      │                │                    settings, ticks  │
-│  sends input           │                │ games/<id>/server.js  THE RULES     │
+│ games/<id>/client.js   │                │ server/room.js     host, seats,     │
+│  draws snapshots,      │                │                    ready, settings, │
+│  sends input           │                │                    ticks            │
+│                        │                │ games/<id>/server.js  THE RULES     │
 └────────────────────────┘                └─────────────────────────────────────┘
           both import:  shared/*  and  games/<id>/shared.js   (plain ES modules)
 ```
 
-The platform is **game-agnostic**. It handles players, rooms, host, ready state, settings validation, the tick loop and
+The platform is **game-agnostic**. It handles players, rooms, host, seats (open / bot / closed, spectators), ready state, settings validation, the tick loop and
 message routing. A game only supplies: metadata + settings schema, a server simulation, and a client view. The
 platform never looks inside `input`, `snapshot` or `result`; those payloads belong to the game.
 
@@ -58,7 +59,7 @@ platform never looks inside `input`, `snapshot` or `result`; those payloads belo
 deno.json                 tasks (start, dev, test) and permissions
 server/main.js            Deno.serve: static files + /ws
 server/platform.js        connections, lobby, room management
-server/room.js            game-agnostic room: host, ready, slots, settings, tick loop
+server/room.js            game-agnostic room: host, seats, spectators, ready, settings, tick loop
 server/games.js           SERVER registry of games            <- you edit this
 shared/ecs.js             tiny Entity-Component-System (optional to use)
 shared/interp.js          SnapshotBuffer + lerp for smooth rendering (optional)
@@ -159,8 +160,8 @@ Rules to remember:
 2. **Any file named `server.js` is blocked** from being served (so `games/<id>/server.js` stays private). A *different*
    server-only filename inside `games/<id>/` (say `bots.js`) **would be publicly downloadable**. Keep server-only code in
    `server.js` or accept that it is readable. **Never put secrets in anything under `games/`, `shared/` or `client/`.**
-3. Content type comes from the `TYPES` table (`.html .js .css .json .svg`). Any other extension is sent as
-   `application/octet-stream`; see section 3 to add images, audio, fonts, models.
+3. Content type comes from the `TYPES` table (`.html .js .css .json .svg .png .jpg .webp .wav .mp3 .ogg .m4a .flac`). Any
+   other extension is sent as `application/octet-stream`; see section 3 to add fonts, models.
 4. Responses are sent with `cache-control: no-cache`, so a browser refresh always picks up your edits.
 
 ### Going online
@@ -269,9 +270,7 @@ const TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
-  // add what you need:
-  '.png': 'image/png',   '.jpg': 'image/jpeg',  '.webp': 'image/webp',
-  '.mp3': 'audio/mpeg',  '.ogg': 'audio/ogg',   '.wav': 'audio/wav',
+  // images and audio are already in the real table; add what else you need:
   '.woff2': 'font/woff2',
   '.glb': 'model/gltf-binary',
   '.wasm': 'application/wasm',
@@ -286,6 +285,10 @@ const hit = new Audio(new URL('./assets/hit.mp3', import.meta.url));
 
 Also: browsers only start audio after a user gesture. Create/play sounds in response to clicks or key presses.
 
+Warlords shows a nice pattern for sound: effects are synthesized by default, and `SOUND_FILES` in `games/warlords/audio.js`
+maps a sound name to a file in `games/warlords/sounds/` (optionally a `start`/`end` slice of a longer file). A missing or
+undecodable file falls back to the synthesized sound.
+
 ### 3.4 Adding a *game* ("plugin") to the platform
 
 Games are plugins registered in two small files; see section 9. Nothing else in the platform needs to change.
@@ -295,7 +298,7 @@ Games are plugins registered in two small files; see section 9. Nothing else in 
 ## 4. Lifecycle and wire protocol
 
 ```
-lobby ──► room (host, ready, players) ──► setup (settings form) ──► game (tick loop) ──► back to setup
+lobby ──► room (host, seats, ready) ──► setup (settings form) ──► game (tick loop) ──► back to setup
    └─ "Play solo" ──► private solo room ──► solo settings page ──► game ──► back to the solo settings page
 ```
 
@@ -307,7 +310,10 @@ Client to server:
 |---|---|---|
 | `hello` | `name` | sent on connect and on rename (max 20 chars) |
 | `createRoom` | `gameId`, `name?`, `solo?` | `solo: true` creates a **private** solo room (needs `meta.soloSettings`) |
-| `joinRoom` | `roomId` | fails for full rooms, rooms in game, and solo rooms |
+| `joinRoom` | `roomId` | fails only for solo rooms. With no free seat, or while a game runs, you join as a **spectator** |
+| `takeSeat` | `seat` | sit in an open, empty seat (moving from your current one). Lobby only |
+| `spectate` | | give up your seat and watch. Lobby only |
+| `setSeat` | `seat`, `value` | **host only**, lobby only. `value`: `'open'` \| `'bot'` \| `'closed'` \| `'player:<id>'` (seat that person) |
 | `leaveRoom` | | |
 | `setSettings` | `settings` | host only, only while not playing. Sanitized server-side |
 | `setReady` | `ready` | guests only matter; the host is implicitly ready |
@@ -323,13 +329,21 @@ Inputs must therefore be small, and should be sent on change rather than every f
 ### Room state (what `room` messages contain)
 
 ```js
-{ id, name, gameId, hostId, players: [{ id, name, ready, slot }], settings, status: 'lobby' | 'playing', solo }
+{ id, name, gameId, hostId,
+  players: [{ id, name, ready, slot }],     // slot = seat index, or -1 for a spectator
+  seats:   [{ mode, playerId }],            // one per meta.maxPlayers; mode 'open' | 'bot' | 'closed'
+  settings, status: 'lobby' | 'playing', solo }
 ```
 
-- **Slots** are numbers `0..maxPlayers-1`, assigned to the lowest free number on join. Use them for seats/colors/corners.
-- The **host** is the creator; if the host leaves, the next member becomes host.
+- **Seats** are numbers `0..maxPlayers-1`. The room page shows one row per seat; the **host** has a dropdown per row:
+  *Open* (anyone may sit), *Bot*, *Closed*, or one of the people in the room (seats them there). Others see who sits where
+  and can press *Sit here* on an open seat or *Stand up*. A seat with `playerId` set is a seated **player**.
+- Whoever joins before the game starts takes the first open seat; with none free they are a **spectator**
+  (`slot: -1`). Spectators may join at any time, including mid-game: they get the game screen with `ctx.me.slot === -1`.
+- Seats are locked while a match runs. To start: at least one human seated, humans + bots >= `meta.minPlayers`, and every
+  seated guest ready (spectators don't need to be). Empty open seats simply stay empty.
+- The **host** is the creator; if the host leaves, the next member becomes host. The host may also spectate.
 - Changing settings clears every guest's *ready* flag.
-- Nobody can join while `status === 'playing'`.
 - When the match ends (`ctx.end(result)`), the room returns to `'lobby'`, all ready flags reset, clients get
   `gameEnd`, and the UI offers **Back to setup**.
 - If a player disconnects mid-game, the server calls `onLeave(playerId)`. If everyone leaves, the room is destroyed.
@@ -339,8 +353,9 @@ Inputs must therefore be small, and should be sent on change rather than every f
 
 `createRoom` with `solo: true` creates a room that:
 
-- contains exactly one human, is **not** listed in the lobby, and **cannot be joined** by anyone else,
+- contains exactly one human (seat 1) with **bots in every other seat**, is **not** listed in the lobby, and **cannot be joined**,
 - is created with `meta.soloSettings` applied on top of the schema defaults,
+- shows the same seat rows (each other seat can be *Bot* or *Closed*; you can also pick which seat you sit in),
 - is **not started automatically**: the client shows the **solo settings page** (a form generated from `meta.settings`,
   with *Start game*, *Reset to defaults* and *Back to lobby* buttons). Pressing *Start game* sends `start`,
 - returns to that same settings page after each match, so the player can tweak and replay.
@@ -358,16 +373,18 @@ export const meta = {
   id: 'mygame',            // unique, lowercase, no spaces
   name: 'My Game',         // display name
   description: 'One sentence shown on the setup screen.',
-  minPlayers: 1,           // platform refuses to start below this many HUMANS. Use 1 if bots/solo are possible
-  maxPlayers: 4,           // also the number of slots
+  minPlayers: 2,           // platform refuses to start below this many FILLED seats (humans + bots; at least one human)
+  maxPlayers: 4,           // the number of seats: the room page shows one row per seat
+  seatNames: ['Red', 'Blue', 'Green', 'Yellow'],   // OPTIONAL label per seat
+  seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'], // OPTIONAL dot color per seat
   tickRate: 20,            // server updates per second (e.g. 20 for turn-ish/casual, 60 for fast action)
-  soloSettings: { bots: 2 },   // OPTIONAL. If present, the lobby enables "Play solo". See section 6
+  soloSettings: {},        // OPTIONAL. If present, the lobby enables "Play solo" (you + bots). See section 6
   settings: [ /* SettingField[] — see section 6 */ ],
 };
 ```
 
-`minPlayers` counts humans only. If your game also needs a minimum number of *seats* (humans + bots), enforce it in
-`canStart`.
+Who plays where, and which seats are bots, is decided by the **seat rows in the room**, not by a game setting: do not add
+a `bots` setting. The platform checks `minPlayers` for you; use `canStart` only for game-specific rules.
 
 ### 5.2 `server.js` exports a `ServerGame`
 
@@ -375,7 +392,7 @@ export const meta = {
 export const mygame = {
   meta,
   create(ctx) { return new MyGameInstance(ctx); },     // called once per match
-  canStart({ players, settings }) { return null; },     // optional: return a message string to block starting
+  canStart({ players, bots, settings }) { return null; }, // optional: return a message string to block starting
 };
 ```
 
@@ -383,7 +400,8 @@ export const mygame = {
 
 | Field | Meaning |
 |---|---|
-| `ctx.players` | `[{ id, name, slot }]` humans in the room when the match starts |
+| `ctx.players` | `[{ id, name, slot }]` humans sitting in a seat when the match starts (`slot` = seat index) |
+| `ctx.bots` | `[slot, ...]` seats the host set to *Bot*: your game drives these. Seats in neither list are empty |
 | `ctx.settings` | the room's settings, already sanitized (always complete and in range) |
 | `ctx.end(result)` | call exactly when the match is over. `result` is any JSON-serializable value; clients receive it in `onEnd(result)` |
 
@@ -410,7 +428,7 @@ export const mygame = {
 | Field | Meaning |
 |---|---|
 | `ctx.container` | an empty `div.game-host`, centered and filling the space under the top bar. Append your DOM/canvas to it |
-| `ctx.me` | `{ id, slot }` — your player id and seat |
+| `ctx.me` | `{ id, slot }` — your player id and seat. **`slot` is `-1` for a spectator**: send no input and don't draw "your" things |
 | `ctx.room` | room state at game start: `ctx.room.players` (names, slots) and `ctx.room.settings` |
 | `ctx.sendInput(data)` | sends `{t:'input', data}` to your `onInput` |
 
@@ -451,7 +469,7 @@ Rules:
 ```
 form change ─► {t:'setSettings', settings} ─► Room.setSettings ─► sanitizeSettings(meta, raw)
                                                             └► broadcast room state to everyone (guests un-readied)
-start        ─► canStart({players, settings}) ─► create(ctx)  // ctx.settings = the sanitized object
+start        ─► seat checks ─► canStart({players, bots, settings}) ─► create(ctx)  // ctx.settings = the sanitized object
 ```
 
 - **Server:** read `ctx.settings.<key>` in `create(ctx)` (copy what you need) and in your systems.
@@ -465,21 +483,21 @@ start        ─► canStart({players, settings}) ─► create(ctx)  // ctx.set
 Add `soloSettings` to `meta` to make the lobby's **Play solo** button available for your game:
 
 ```js
-soloSettings: { bots: 3, botSkill: 'normal' },   // any subset of keys; missing keys use their schema defaults
+soloSettings: { botSkill: 'normal' },   // any subset of keys; missing keys use their schema defaults ({} = just the defaults)
 ```
 
 What happens:
 
 1. *Play solo* creates a private solo room and applies `soloSettings` over the defaults.
-2. The client shows the **solo settings page**: the same schema-generated form, **always editable**, plus
-   **Start game**, **Reset to defaults** (re-applies `soloSettings`) and **Back to lobby**.
-3. **Start game** runs the usual `canStart` check. If it fails, the message appears as a toast (e.g. "You need an
-   opponent: set Bots to 1 or more"), and the player stays on the page.
+2. The client shows the **solo settings page**: the seat rows (you in seat 1, bots elsewhere), the same schema-generated
+   form, **always editable**, plus **Start game**, **Reset settings** (re-applies `soloSettings`) and **Back to lobby**.
+3. **Start game** runs the usual checks. If they fail, the message appears as a toast (e.g. "Need at least 2 seats filled
+   (players or bots)"), and the player stays on the page.
 4. After the match, **Back to setup** returns to the same page with the same values.
 
 Design guidance for solo-capable games:
 
-- Make `soloSettings` a sensible *quick start* (typically "bots fill every other seat").
+- Make `soloSettings` a sensible *quick start*; the bots in the other seats come from the platform.
 - Use `canStart` to explain impossible combinations instead of silently fixing them.
 - Because the solo page shows **every** field, keep labels clear: players see them without a "multiplayer" context.
 - Not defining `soloSettings` disables the *Play solo* button for that game; the server rejects `solo: true` for it.
@@ -621,9 +639,9 @@ every 1000/tickRate ms:
 
 ### 8.3 Bots
 
-Bots are just seats the server drives. Pattern used by both examples: after reading `ctx.players`, fill free slots
-with bots up to `settings.bots`; update bots inside `update(dt)`; mark them in the snapshot (`bots: [...]`) so the client
-can label them ("Bot 2"). A skill table keyed by a `select` setting keeps difficulty tunable:
+Bots are just seats the server drives. The host picks them in the room's seat rows and the platform hands them over as
+`ctx.bots` (seat indexes). Mark them active, update them inside `update(dt)`, and put `bots: [...]` in the snapshot so the
+client can label them ("Bot 2"). A skill table keyed by a `select` setting keeps difficulty tunable:
 
 ```js
 const SKILL = { easy: {...}, normal: {...}, hard: {...} };
@@ -633,7 +651,7 @@ const skill = SKILL[this.s.botSkill] ?? SKILL.normal;
 ### 8.4 Leaving, ending and early-outs
 
 - `onLeave(playerId)`: mark the seat inactive; if no humans remain, call `ctx.end(...)`, otherwise do not leave bots
-  playing forever.
+  playing forever. (Spectators leaving never reach `onLeave`, and their `onInput` ids are not in `ctx.players`: ignore them.)
 - Always have a path to `ctx.end`. A match that can stall (bots only, nobody scoring) will tick forever.
 - `ctx.end(result)` returns the room to setup, so a "match" = one pass through the setup screen. Multi-round structures
   (Warlords' *rounds to win*) live **inside** your simulation as phases (`countdown`, `playing`, `roundOver`).
@@ -705,13 +723,13 @@ export const meta = {
   id: 'taprace', // unique; used as the registry key and in every message
   name: 'Tap Race',
   description: 'Tap faster than everyone else. First to the target wins.',
-  minPlayers: 1, // 1 because solo (with bots) is allowed; canStart() checks the real minimum
-  maxPlayers: 4,
+  minPlayers: 2, // filled seats (players + bots) needed to start
+  maxPlayers: 4, // seats
+  seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'],
   tickRate: 20, // server updates per second; a simple game does not need 60
-  soloSettings: { bots: 2, botSkill: 'normal' }, // presence of this field enables "Play solo"
+  soloSettings: { botSkill: 'normal' }, // presence of this field enables "Play solo" (you + bots in the other seats)
   settings: [
     { type: 'number', key: 'target', label: 'Taps to win', min: 10, max: 200, step: 5, default: 50 },
-    { type: 'number', key: 'bots', label: 'Bots (fill empty seats)', min: 0, max: 3, step: 1, default: 0 },
     {
       type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal',
       options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }],
@@ -750,13 +768,7 @@ class TapRaceGame {
       this.active[p.slot] = true;
     }
     this.humans = ctx.players.length;
-    let bots = Math.min(this.s.bots, meta.maxPlayers - this.humans);
-    for (let slot = 0; slot < meta.maxPlayers && bots > 0; slot++) {
-      if (!this.active[slot]) {
-        this.active[slot] = this.bot[slot] = true;
-        bots--;
-      }
-    }
+    for (const slot of ctx.bots) this.active[slot] = this.bot[slot] = true; // seats the host set to "Bot"
   }
 
   // ── GameInstance ──
@@ -819,10 +831,7 @@ class TapRaceGame {
 export const taprace = {
   meta,
   create: (ctx) => new TapRaceGame(ctx),
-  canStart({ players, settings }) {
-    const seats = players + Math.min(settings.bots, meta.maxPlayers - players);
-    return seats >= 2 ? null : 'You need an opponent: set Bots to 1 or more, or invite a friend.';
-  },
+  // no canStart needed: the platform already requires 2 filled seats (minPlayers) and one human
 };
 ```
 
@@ -835,7 +844,7 @@ import { COLORS, meta } from './shared.js';
 class TapRaceView {
   constructor(ctx) {
     this.ctx = ctx; // { container, me: {id, slot}, room, sendInput }
-    this.names = new Map(ctx.room.players.map((p) => [p.slot, p.name]));
+    this.names = new Map(ctx.room.players.filter((p) => p.slot >= 0).map((p) => [p.slot, p.name]));
     this.target = ctx.room.settings.target;
 
     this.bars = el('div', { class: 'tr-bars' });
@@ -916,7 +925,7 @@ for (const g of [warlords, taprace]) clientGames.set(g.meta.id, g);
 ```
 
 Then `deno task start`, open `http://localhost:8000`, pick **Tap Race**, press **Play solo**. You land on the solo settings
-page showing *Taps to win*, *Bots*, *Bot skill* and the penalty checkbox, with `soloSettings` pre-applied (2 bots).
+page showing the four seat rows (you + 3 bots), *Taps to win*, *Bot skill* and the penalty checkbox.
 
 ---
 
@@ -932,15 +941,16 @@ import { defaultSettings } from '../shared/settings.js';
 
 const ok = (c, m) => { if (!c) throw new Error('FAIL: ' + m); console.log('ok  -', m); };
 let result = null;
-const settings = { ...defaultSettings(taprace.meta), bots: 3, botSkill: 'hard', target: 20 };
+const settings = { ...defaultSettings(taprace.meta), botSkill: 'hard', target: 20 };
 const g = taprace.create({
   players: [{ id: 'p0', name: 'A', slot: 0 }],
+  bots: [1, 2, 3],
   settings,
   end: (r) => (result = r),
 });
 for (let i = 0; i < 20 * 60 && !result; i++) g.update(1 / 20);   // simulate up to 60 s at 20 ticks/s
 ok(result && result.winner >= 0, 'match against bots finishes with a winner');
-ok(taprace.canStart({ players: 1, settings: defaultSettings(taprace.meta) }) !== null, 'alone with no bots cannot start');
+ok(g.snapshot().bots.filter(Boolean).length === 3, 'the three bot seats are bots');
 ```
 
 **2. Platform test with a fake WebSocket.** Drives the real `Platform` and `Room` (see `tests/platform.test.js`): a
@@ -949,7 +959,7 @@ Useful assertions for a new game: *solo creates a room but does not start until 
 host can change settings*, *snapshots stream after start*, *input reaches the simulation*.
 
 Solo-specific behavior covered by the existing tests: solo rooms are hidden from the lobby list, cannot be joined,
-settings are editable and clamped, `start` honours `canStart`.
+settings are editable and clamped, seats can be changed, starting with too few filled seats is refused.
 
 Front-end code is not covered by these tests: check it by opening two browser tabs (multiplayer) and *Play solo*.
 
@@ -960,7 +970,8 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 **Checklist for a new game**
 
 - [ ] `games/<id>/shared.js` exports `meta` (unique `id`, `maxPlayers`, `tickRate`, `settings` with defaults)
-- [ ] `soloSettings` set if the game can be played alone (and `canStart` rejects impossible setups)
+- [ ] `minPlayers` (filled seats) set; `soloSettings` set if the game can be played alone
+- [ ] `ctx.bots` honoured, spectators (`ctx.me.slot === -1`) handled in the client, optional `seatNames` / `seatColors`
 - [ ] `games/<id>/server.js` exports `{ meta, create, canStart? }`; instance has `onInput`, `onLeave`, `update`, `snapshot`
 - [ ] `games/<id>/client.js` exports `{ meta, mount }`; view has `onSnapshot`, `dispose` (and `onEnd`)
 - [ ] Registered in **both** `server/games.js` and `client/games.js`
@@ -983,7 +994,8 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 | Game keeps old behaviour after the first replay | `dispose()` forgot a listener/timer, so two views are alive |
 | Server crashes mid-match | exception thrown inside `update()` or `snapshot()` |
 | Input seems ignored | message over 4096 chars, not JSON-serializable, or rejected by your own validation |
-| "Need at least N players" | `minPlayers` counts humans only; use `minPlayers: 1` for bot/solo games and check seats in `canStart` |
+| "Need at least N seats filled" | `minPlayers` counts humans + bots; the host fills seats in the room (Bot / Sit here) |
+| Spectator's client errors on `slot` -1 | guard `ctx.me.slot < 0`: no input, no "your" highlighting |
 | Solo button disabled | game has no `meta.soloSettings` |
 | Settings value is `undefined` on the server | key missing from `meta.settings` (unknown keys are dropped by `sanitizeSettings`) |
 | Stutter on real-time games | rendering raw snapshots; use `SnapshotBuffer`, or predict your own input |
@@ -997,9 +1009,9 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 
 | File | Shows |
 |---|---|
-| `shared.js` | `meta` with all setting types and `soloSettings: { bots: 3 }`; geometry helpers used identically by server and client; ECS component tokens |
-| `server.js` | multi-round state machine (`countdown` → `playing` → `roundOver`), systems (bots, paddles, spawning, balls), ECS `World` recreated per round, collision substeps to avoid tunnelling, early round end when all humans are out, `canStart` counting bots |
-| `client.js` | Three.js scene (orthographic camera), a client-side ECS `World` with a client-only `Render` component, `SnapshotBuffer` interpolation, mouse + keyboard input, client-side prediction for the player's own paddle, HUD/banner overlays, full `dispose()` |
+| `shared.js` | `meta` with all setting types, seat names/colors and `soloSettings`; geometry helpers used identically by server and client; ECS component tokens |
+| `server.js` | multi-round state machine (`countdown` → `playing` → `roundOver`), systems (bots, paddles, spawning, balls), ECS `World` recreated per round, collision substeps to avoid tunnelling, bots from `ctx.bots`, fast-forward when only bots are left |
+| `client.js` | Three.js scene (orthographic camera), a client-side ECS `World` with a client-only `Render` component, `SnapshotBuffer` interpolation, mouse + keyboard input, client-side prediction for the player's own paddle, spectator mode, HUD/banner overlays, sound effects from files with synth fallback, full `dispose()` |
 
 The key idea to carry over: **shared** code defines the rules' geometry and constants, the **server** runs the
 authoritative simulation and emits compact snapshots, and the **client** is a pure function of the latest snapshots plus

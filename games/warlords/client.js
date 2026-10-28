@@ -48,7 +48,8 @@ class WarlordsView {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.buffer = new SnapshotBuffer(EVENT_DELAY);
     this.balls = new Map(); // network ball id -> entity
-    this.names = new Map(ctx.room.players.map((p) => [p.slot, p.name]));
+    this.names = new Map(ctx.room.players.filter((p) => p.slot >= 0).map((p) => [p.slot, p.name]));
+    this.spectating = ctx.me.slot < 0; // joined without a seat: watch only, send no input
     this.instant = ctx.room.settings.instantMouse !== false;
     this.baseSpeed = ctx.room.settings.ballSpeed;
     this.mouseT = null; // latest mouse position on the track (for prediction)
@@ -80,7 +81,9 @@ class WarlordsView {
     this.banner = Object.assign(document.createElement('div'), { className: 'wl-banner' });
     this.hint = Object.assign(document.createElement('div'), {
       className: 'wl-hint',
-      textContent: ctx.room.settings.holdEnabled !== false
+      textContent: this.spectating
+        ? 'You are watching this match. M mutes.'
+        : ctx.room.settings.holdEnabled !== false
         ? 'Mouse swings your paddle around your base. Hold the button (or Space) to catch a ball, swing, release to launch. Swing into balls to speed them up. M mutes.'
         : 'Mouse swings your paddle around your base (arrow keys / WASD also work). M mutes.',
     });
@@ -166,6 +169,7 @@ class WarlordsView {
 
   // ── input ──
   #onPointer = (e) => {
+    if (this.spectating) return;
     const r = this.renderer.domElement.getBoundingClientRect();
     const x = ((e.clientX - r.left) / r.width) * ARENA;
     const y = ((e.clientY - r.top) / r.height) * ARENA;
@@ -181,6 +185,7 @@ class WarlordsView {
 
   /** Hold button: sent only when it changes. */
   #setHold(on) {
+    if (this.spectating) return;
     if (on === this.holdOn) return;
     this.holdOn = on;
     this.ctx.sendInput({ hold: on });
@@ -192,6 +197,7 @@ class WarlordsView {
       if (down && !e.repeat) this.#toggleMute();
       return;
     }
+    if (this.spectating) return; // nothing below applies to a spectator
     if (e.key === ' ') { // Space = hold, for keyboard players
       e.preventDefault();
       this.#setHold(down);
@@ -561,9 +567,6 @@ class WarlordsView {
     } else if (s.phase === 'roundOver') {
       this.banner.textContent = s.roundWinner >= 0 ? `${this.#name(s.roundWinner)} takes the round` : 'Draw';
       this.banner.style.color = s.roundWinner >= 0 ? COLORS[s.roundWinner] : '#e2e8f0';
-    } else if (!s.alive[this.ctx.me.slot]) {
-      this.banner.textContent = "You're out. Watching the rest of the round...";
-      this.banner.style.color = '#94a3b8';
     } else {
       this.banner.textContent = '';
     }

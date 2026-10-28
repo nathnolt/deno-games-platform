@@ -33,6 +33,7 @@ const SKILL = {
   normal: { speed: 0.9, react: 0.06, error: 12, flick: 0.9, hold: 0.45, holdFor: [1.0, 1.8] },
   hard: { speed: 1.2, react: 0.025, error: 3, flick: 1.4, hold: 0.6, holdFor: [0.9, 1.5] },
 };
+const BOT_FAST_FORWARD = 3; // simulation steps per tick once only bots are left alive (3 = three times as fast)
 const BOT_HORIZON = 1.6; //  s: how far ahead a bot predicts a ball's path (with wall bounces)
 const FLICK_LEAD = 0.06; //  s: a flick starts this long before the ball arrives, so the paddle is at full speed on contact
 const newBotState = () => ({
@@ -72,12 +73,10 @@ class WarlordsGame {
       this.active[p.slot] = true;
     }
     this.humans = ctx.players.length;
-    let bots = Math.min(this.s.bots, 4 - this.humans);
-    for (const slot of SLOTS) {
-      if (bots > 0 && !this.active[slot]) {
+    for (const slot of ctx.bots ?? []) { // seats the host set to "bot"
+      if (slot >= 0 && slot < 4 && !this.active[slot]) {
         this.active[slot] = this.bot[slot] = true;
         this.botState[slot] = newBotState();
-        bots--;
       }
     }
     this.#startRound();
@@ -120,14 +119,20 @@ class WarlordsGame {
           this.spawnTimer = 0;
         }
         break;
-      case 'playing':
-        this.#botSystem(dt);
-        this.#paddleSystem(dt);
-        this.#holdSystem(dt);
-        this.#spawnSystem(dt);
-        this.#ballSystem(dt);
-        this.#checkRoundEnd();
+      case 'playing': {
+        // Only bots left alive: fast-forward (several simulation steps per tick) so nobody has to sit through it.
+        const humansAlive = SLOTS.some((s) => this.alive[s] && !this.bot[s]);
+        const steps = humansAlive ? 1 : BOT_FAST_FORWARD;
+        for (let i = 0; i < steps && this.phase === 'playing'; i++) {
+          this.#botSystem(dt);
+          this.#paddleSystem(dt);
+          this.#holdSystem(dt);
+          this.#spawnSystem(dt);
+          this.#ballSystem(dt);
+          this.#checkRoundEnd();
+        }
         break;
+      }
       case 'roundOver':
         this.timer -= dt;
         if (this.timer <= 0) this.#afterRound();
@@ -640,8 +645,4 @@ class WarlordsGame {
 export const warlords = {
   meta,
   create: (ctx) => new WarlordsGame(ctx),
-  canStart({ players, settings }) {
-    const bots = Math.min(settings.bots, 4 - players);
-    return players + bots >= 2 ? null : 'You need an opponent: set Bots to 1 or more, or invite a friend.';
-  },
 };
