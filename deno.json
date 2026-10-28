@@ -1,0 +1,7 @@
+{
+  "tasks": {
+    "start": "deno run --allow-net --allow-read=. --allow-env=PORT server/main.js",
+    "dev": "deno run --watch --allow-net --allow-read=. --allow-env=PORT server/main.js",
+    "test": "deno run tests/sim.test.js && deno run tests/platform.test.js"
+  }
+}

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Games platform</title>
+    <link rel="stylesheet" href="/client/style.css" />
+    <!-- No bundler: the browser loads our ES modules directly. Three.js comes from a CDN via this import map.
+         For offline use, download that file into client/vendor/ and point the map at it. -->
+    <script type="importmap">
+      { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js" } }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/client/app.js"></script>
+  </body>
+</html>

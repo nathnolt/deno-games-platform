@@ -1,0 +1,495 @@
+import { World } from '../../shared/ecs.js';
+import {
+  ARENA, BALL_R, BRICK_CELLS, TRACK, BallC, BrickC, KingC, PaddleC, Pos, Vel,
+  PADDLE_LEN, brickRect, circleRect, heldPoint, heldS, kingRect, launchDir, meta, paddleRects, tFromPoint,
+} from './shared.js';
+
+const SLOTS = [0, 1, 2, 3];
+const COUNTDOWN = 3;
+const ROUND_OVER = 3;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const r1 = (n) => Math.round(n * 10) / 10;
+const r2 = (n) => Math.round(n * 100) / 100;
+
+// ── ball speed tuning (all relative to the "Ball speed" setting) ──
+// (top speed and slow-down come from the settings: maxSpeedMult, speedDecay)
+const PADDLE_TRANSFER = 0.35; // how much of the paddle's own velocity is added to the ball (x speedUpStrength)
+const ENGLISH = 0.6; //          sideways kick for hitting the paddle off-centre (x ball speed)
+const LATERAL_FREE = 0.8; //     sideways speed (x base) the paddle can give before it is turned into forward speed
+const MIN_FORWARD = 0.3; //      after a paddle hit at least this fraction of the speed leaves along the normal
+const MAX_EVENTS = 40; //        per snapshot
+const PEAK_WINDOW = 0.12; //     s: a release uses the paddle's fastest recent speed, so letting go isn't punished for a hand that slowed down
+const HOLD_COOLDOWN = 0.4; //    seconds before a paddle can catch again after releasing
+
+// speed: fraction of the paddle speed, react: seconds between decisions, error: aim error in track units (px)
+const SKILL = {
+  easy: { speed: 0.45, react: 0.25, error: 50 },
+  normal: { speed: 0.7, react: 0.12, error: 25 },
+  hard: { speed: 1.0, react: 0.05, error: 6 },
+};
+
+class WarlordsGame {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.s = ctx.settings;
+    this.world = new World();
+    this.slotOf = new Map();
+    this.active = [false, false, false, false]; // slot is occupied (human or bot)
+    this.bot = [false, false, false, false];
+    this.alive = [false, false, false, false]; // slot still in the current round
+    this.mode = ['dir', 'dir', 'dir', 'dir']; // last input style per human: keyboard 'dir' or mouse 'target'
+    this.dirs = [0, 0, 0, 0];
+    this.targets = [0, 0, 0, 0];
+    this.holding = [false, false, false, false]; // hold button is down (humans only)
+    this.holdCool = [0, 0, 0, 0];
+    this.held = new Map(); // ball entity -> {slot, off, since, peak}: balls riding on a paddle
+    this.botState = [null, null, null, null];
+    this.scores = [0, 0, 0, 0];
+    this.phase = 'countdown';
+    this.timer = COUNTDOWN;
+    this.round = 0;
+    this.tick = 0;
+    this.roundWinner = -1;
+    this.nextBallId = 1;
+    this.spawnTimer = 0;
+    this.events = []; // one-shot things that happened this tick (sounds, shakes...); sent in the snapshot
+
+    for (const p of ctx.players) {
+      this.slotOf.set(p.id, p.slot);
+      this.active[p.slot] = true;
+    }
+    this.humans = ctx.players.length;
+    let bots = Math.min(this.s.bots, 4 - this.humans);
+    for (const slot of SLOTS) {
+      if (bots > 0 && !this.active[slot]) {
+        this.active[slot] = this.bot[slot] = true;
+        this.botState[slot] = { target: 0, next: 0 };
+        bots--;
+      }
+    }
+    this.#startRound();
+  }
+
+  // ── GameInstance ──
+  onInput(playerId, data) {
+    const slot = this.slotOf.get(playerId);
+    if (slot === undefined || !data || typeof data !== 'object') return;
+    if (typeof data.t === 'number' && Number.isFinite(data.t)) {
+      this.targets[slot] = clamp(data.t, -TRACK, TRACK); // mouse: absolute position on the track
+      this.mode[slot] = 'target';
+    } else if (typeof data.dir === 'number') {
+      this.dirs[slot] = Math.sign(data.dir); // keyboard: -1, 0, 1
+      this.mode[slot] = 'dir';
+    } else if (typeof data.hold === 'boolean') {
+      this.holding[slot] = data.hold; // mouse button / space: catch balls on the front of the paddle
+    }
+  }
+
+  onLeave(playerId) {
+    const slot = this.slotOf.get(playerId);
+    if (slot === undefined || !this.active[slot]) return;
+    this.active[slot] = false;
+    this.holding[slot] = false;
+    this.humans--;
+    this.#eliminate(slot);
+  }
+
+  update(dt) {
+    this.tick++;
+    this.events = [];
+    switch (this.phase) {
+      case 'countdown':
+        this.#paddleSystem(dt); // let people position themselves before the round starts
+        this.timer -= dt;
+        if (this.timer <= 0) {
+          this.phase = 'playing';
+          this.spawnTimer = 0;
+        }
+        break;
+      case 'playing':
+        this.#botSystem(dt);
+        this.#paddleSystem(dt);
+        this.#holdSystem(dt);
+        this.#spawnSystem(dt);
+        this.#ballSystem(dt);
+        this.#checkRoundEnd();
+        break;
+      case 'roundOver':
+        this.timer -= dt;
+        if (this.timer <= 0) this.#afterRound();
+        break;
+    }
+  }
+
+  snapshot() {
+    const w = this.world;
+    const paddles = [0, 0, 0, 0];
+    const bricks = [0, 0, 0, 0]; // bitmask of surviving bricks per slot
+    for (const e of w.query(PaddleC)) {
+      const p = w.get(e, PaddleC);
+      paddles[p.slot] = r1(p.t);
+    }
+    for (const e of w.query(BrickC)) {
+      const b = w.get(e, BrickC);
+      bricks[b.slot] |= 1 << b.idx;
+    }
+    const balls = w.query(BallC, Pos, Vel).map((e) => {
+      const p = w.get(e, Pos);
+      const v = w.get(e, Vel);
+      const held = this.held.get(e);
+      const b = { id: w.get(e, BallC).id, x: r1(p.x), y: r1(p.y), vx: Math.round(v.x), vy: Math.round(v.y) };
+      if (held) b.h = held.slot + 1; // held by this slot (+1 so 0/undefined means free)
+      return b;
+    });
+    return {
+      tick: this.tick,
+      phase: this.phase,
+      timer: this.timer,
+      round: this.round,
+      roundWinner: this.roundWinner,
+      balls,
+      paddles,
+      alive: [...this.alive],
+      active: [...this.active],
+      bots: [...this.bot],
+      bricks,
+      scores: [...this.scores],
+      ev: this.events, // one-shot events of this tick: {k, x, y, nx, ny, b, p, ...}
+    };
+  }
+
+  // ── round flow ──
+  #startRound() {
+    this.round++;
+    this.world = new World();
+    this.alive = [...this.active];
+    this.dirs = [0, 0, 0, 0];
+    this.roundWinner = -1;
+    const w = this.world;
+    for (const slot of SLOTS) {
+      if (!this.active[slot]) continue;
+      w.add(w.create(), KingC, { slot });
+      w.add(w.create(), PaddleC, { slot, t: 0, ds: 0 }); // ds: smoothed paddle speed along the track (px/s)
+      BRICK_CELLS.forEach((_, idx) => w.add(w.create(), BrickC, { slot, idx }));
+      this.targets[slot] = 0;
+    }
+    this.holdCool = [0, 0, 0, 0];
+    this.held = new Map();
+    this.phase = 'countdown';
+    this.timer = COUNTDOWN;
+  }
+
+  #checkRoundEnd() {
+    const left = SLOTS.filter((s) => this.alive[s]);
+    const humansLeft = left.filter((s) => !this.bot[s]).length;
+    // Normal end: one (or zero) left. Also end when every human is out but bots remain,
+    // so you don't have to watch bots fight; the sturdiest base takes the point.
+    if (left.length > 1 && humansLeft > 0) return;
+    this.roundWinner = left.length === 1 ? left[0] : left.length > 1 ? this.#sturdiest(left) : -1;
+    if (this.roundWinner >= 0) this.scores[this.roundWinner]++;
+    this.phase = 'roundOver';
+    this.timer = ROUND_OVER;
+  }
+
+  #sturdiest(slots) {
+    const count = [0, 0, 0, 0];
+    for (const e of this.world.query(BrickC)) count[this.world.get(e, BrickC).slot]++;
+    return slots.reduce((best, s) => (count[s] > count[best] ? s : best), slots[0]);
+  }
+
+  #afterRound() {
+    const activeCount = this.active.filter(Boolean).length;
+    const best = Math.max(...this.scores);
+    if (this.humans < 1 || activeCount < 2 || best >= this.s.roundsToWin) {
+      const winner = best > 0 ? this.scores.indexOf(best) : -1;
+      this.ctx.end({ winner, scores: [...this.scores] });
+    } else {
+      this.#startRound();
+    }
+  }
+
+  #eliminate(slot) {
+    if (!this.alive[slot]) return;
+    this.alive[slot] = false;
+    const w = this.world;
+    for (const e of w.query(KingC)) if (w.get(e, KingC).slot === slot) w.destroy(e);
+    for (const e of w.query(PaddleC)) if (w.get(e, PaddleC).slot === slot) w.destroy(e);
+    for (const e of w.query(BrickC)) if (w.get(e, BrickC).slot === slot) w.destroy(e);
+  }
+
+  // ── systems ──
+  #botSystem(dt) {
+    const w = this.world;
+    const skill = SKILL[this.s.botSkill] ?? SKILL.normal;
+    for (const slot of SLOTS) {
+      if (!this.bot[slot] || !this.alive[slot]) continue;
+      const st = this.botState[slot];
+      st.next -= dt;
+      if (st.next > 0) continue;
+      st.next = skill.react;
+      const king = kingRect(slot);
+      let nearest = null;
+      let best = Infinity;
+      for (const e of w.query(BallC, Pos)) {
+        const p = w.get(e, Pos);
+        const d = Math.hypot(p.x - king.x, p.y - king.y);
+        if (d < best) { best = d; nearest = p; }
+      }
+      st.target = nearest
+        ? clamp(tFromPoint(slot, nearest.x, nearest.y) + (Math.random() * 2 - 1) * skill.error, -TRACK, TRACK)
+        : 0;
+    }
+  }
+
+  #paddleSystem(dt) {
+    const w = this.world;
+    const speed = this.s.paddleSpeed;
+    const skill = SKILL[this.s.botSkill] ?? SKILL.normal;
+    const toward = (p, target, maxStep) => (p.t += clamp(target - p.t, -maxStep, maxStep));
+    const smooth = 1 - Math.exp(-dt / 0.04); // ~40 ms low-pass so mouse jitter doesn't make the paddle speed noisy
+    for (const e of w.query(PaddleC)) {
+      const p = w.get(e, PaddleC);
+      const slot = p.slot;
+      const before = p.t;
+      if (this.bot[slot]) toward(p, this.botState[slot].target, speed * skill.speed * dt);
+      else if (this.mode[slot] === 'target') {
+        if (this.s.instantMouse) p.t = this.targets[slot]; // as fast as the mouse
+        else toward(p, this.targets[slot], speed * dt);
+      } else p.t += this.dirs[slot] * speed * dt;
+      p.t = clamp(p.t, -TRACK, TRACK);
+      const raw = dt > 0 ? (p.t - before) / dt : 0;
+      p.ds = clamp(p.ds + (raw - p.ds) * smooth, -1500, 1500);
+    }
+  }
+
+  #spawnSystem(dt) {
+    this.spawnTimer -= dt;
+    if (this.spawnTimer > 0) return;
+    this.spawnTimer = this.s.ballInterval;
+    const w = this.world;
+    if (w.query(BallC).length >= this.s.maxBalls) return;
+    const angle = Math.PI / 4 + (Math.random() - 0.5) * 0.8 + Math.floor(Math.random() * 4) * (Math.PI / 2);
+    const e = w.create();
+    const id = this.nextBallId++;
+    w.add(e, BallC, { id });
+    w.add(e, Pos, { x: ARENA / 2, y: ARENA / 2 });
+    w.add(e, Vel, { x: Math.cos(angle) * this.s.ballSpeed, y: Math.sin(angle) * this.s.ballSpeed });
+    this.#emit('spawn', { x: ARENA / 2, y: ARENA / 2 }, null, 0, 0, id);
+  }
+
+  #ballSystem(dt) {
+    const w = this.world;
+    const base = this.s.ballSpeed;
+    for (const e of w.query(BallC, Pos, Vel)) {
+      if (this.held.has(e)) continue; // riding on a paddle: moved by #holdSystem
+      const p = w.get(e, Pos);
+      const v = w.get(e, Vel);
+      const id = w.get(e, BallC).id;
+      // A boosted ball slowly relaxes back to the base speed.
+      let speed = Math.hypot(v.x, v.y);
+      if (speed > base) {
+        const k = (base + (speed - base) * Math.exp(-this.s.speedDecay * dt)) / speed;
+        v.x *= k;
+        v.y *= k;
+        speed *= k;
+      }
+      // Substep so a fast ball never tunnels through a brick (the ball may now be much faster than base).
+      const steps = Math.max(1, Math.ceil((speed * dt) / 4));
+      const h = dt / steps;
+      for (let i = 0; i < steps; i++) {
+        p.x += v.x * h;
+        p.y += v.y * h;
+        if (this.#collide(p, v, id, e)) break; // caught by a paddle
+      }
+    }
+  }
+
+  /** Balls riding on paddles follow them, and are released when the button goes up (or time / the paddle runs out). */
+  #holdSystem(dt) {
+    const w = this.world;
+    for (let slot = 0; slot < 4; slot++) this.holdCool[slot] = Math.max(0, this.holdCool[slot] - dt);
+    for (const [e, h] of [...this.held]) {
+      const p = w.get(e, Pos);
+      const v = w.get(e, Vel);
+      const pe = w.query(PaddleC).find((x) => w.get(x, PaddleC).slot === h.slot);
+      h.since += dt;
+      h.peak *= Math.exp(-dt / PEAK_WINDOW);
+      if (pe !== undefined) {
+        const pd = w.get(pe, PaddleC);
+        const pt = heldPoint(h.slot, pd.t + h.off, pd.t);
+        p.x = pt.x;
+        p.y = pt.y;
+        h.peak = Math.max(h.peak, Math.abs(pd.ds));
+      }
+      const timedOut = !this.s.holdInfinite && h.since >= this.s.holdMax;
+      if (pe !== undefined && this.holding[h.slot] && !timedOut) continue;
+      // release: along the line from just inside the corner through the ball, at a speed that depends
+      // on how fast the paddle was moving (never below the minimum, never above the top speed)
+      const base = this.s.ballSpeed;
+      const speed = clamp(base * this.s.releaseMinSpeed + h.peak * this.s.releaseSpeedGain, base, base * this.s.maxSpeedMult);
+      const d = launchDir(h.slot, p.x, p.y);
+      v.x = d.x * speed;
+      v.y = d.y * speed;
+      this.#normalize(v, speed);
+      this.held.delete(e);
+      this.holdCool[h.slot] = HOLD_COOLDOWN;
+      this.#emit('launch', p, v, d.x, d.y, w.get(e, BallC).id, { s: h.slot });
+    }
+  }
+
+  /** Returns true if the ball was caught (so the caller stops moving it this tick). */
+  #collide(p, v, id, e0) {
+    const w = this.world;
+    if (p.x < BALL_R) { if (v.x < 0) this.#emit('wall', p, v, 1, 0, id); p.x = BALL_R; v.x = Math.abs(v.x); }
+    else if (p.x > ARENA - BALL_R) { if (v.x > 0) this.#emit('wall', p, v, -1, 0, id); p.x = ARENA - BALL_R; v.x = -Math.abs(v.x); }
+    if (p.y < BALL_R) { if (v.y < 0) this.#emit('wall', p, v, 0, 1, id); p.y = BALL_R; v.y = Math.abs(v.y); }
+    else if (p.y > ARENA - BALL_R) { if (v.y > 0) this.#emit('wall', p, v, 0, -1, id); p.y = ARENA - BALL_R; v.y = -Math.abs(v.y); }
+
+    for (const e of w.query(PaddleC)) {
+      const pd = w.get(e, PaddleC);
+      for (const r of paddleRects(pd.slot, pd.t)) {
+        const hit = circleRect(p.x, p.y, BALL_R, r);
+        if (!hit) continue;
+        return this.#paddleHit(p, v, hit, r, pd, id, e0);
+      }
+    }
+    for (const e of w.query(BrickC)) {
+      const b = w.get(e, BrickC);
+      const hit = circleRect(p.x, p.y, BALL_R, brickRect(b.slot, b.idx));
+      if (!hit) continue;
+      this.#bounce(p, v, hit);
+      w.destroy(e);
+      this.#emit('brick', p, v, hit.nx, hit.ny, id, { s: b.slot, i: b.idx });
+      return;
+    }
+    for (const e of w.query(KingC)) {
+      const k = w.get(e, KingC);
+      const hit = circleRect(p.x, p.y, BALL_R, kingRect(k.slot));
+      if (!hit) continue;
+      this.#bounce(p, v, hit);
+      this.#emit('king', p, v, hit.nx, hit.ny, id, { s: k.slot });
+      this.#eliminate(k.slot);
+      return;
+    }
+  }
+
+  /**
+   * Ball meets paddle. If the player is holding the button and the ball touches the front, it is caught.
+   * Otherwise, in the paddle's own frame (n = away from the paddle surface, t = along it):
+   *  1. reflect the ball;
+   *  2. "English": hitting the paddle off-centre bends the ball sideways;
+   *  and, only when the speed-up setting is on:
+   *  3. the paddle's own speed (along the track) is added to the ball, so a paddle swung into the
+   *     ball hits harder, and one moving away takes some pace off;
+   *  4. if the ball ends up leaving at a very shallow angle (lots of sideways speed), part of that
+   *     sideways speed is turned into forward speed, like `ballysp *= 1+val; ballxsp /= 1+val` before;
+   *  5. clamp: never slower than the base speed, never faster than maxSpeedMult x, always leaves
+   *     the paddle.
+   * With speed-up off the ball always keeps the base speed.
+   */
+  #paddleHit(p, v, hit, r, pd, id, e) {
+    const base = this.s.ballSpeed;
+    const speedUp = this.s.speedUp;
+    const slot = pd.slot;
+
+    // catch: button down, nothing held yet, and the ball touched the FRONT face (the side facing the arena)
+    const front = hit.nx * r.fx + hit.ny * r.fy >= 0.5;
+    if (this.s.holdEnabled && front && this.holding[slot] && this.holdCool[slot] <= 0 && ![...this.held.values()].some((h) => h.slot === slot)) {
+      const off = clamp(heldS(slot, p.x, p.y, pd.t) - pd.t, -PADDLE_LEN / 2, PADDLE_LEN / 2);
+      this.held.set(e, { slot, off, since: 0, peak: 0 });
+      const pt = heldPoint(slot, pd.t + off, pd.t);
+      p.x = pt.x;
+      p.y = pt.y;
+      this.#emit('catch', p, v, hit.nx, hit.ny, id, { s: slot });
+      v.x = 0;
+      v.y = 0;
+      return true;
+    }
+
+    this.#bounce(p, v, hit);
+    const nx = hit.nx;
+    const ny = hit.ny;
+    const tx = -ny;
+    const ty = nx;
+
+    // 2. English
+    const half = Math.abs(tx) * (r.w / 2) + Math.abs(ty) * (r.h / 2);
+    const off = clamp(((p.x - r.x) * tx + (p.y - r.y) * ty) / half, -1, 1);
+    let vn = v.x * nx + v.y * ny;
+    let vt = v.x * tx + v.y * ty + off * base * ENGLISH;
+
+    let speed = base;
+    if (speedUp) {
+      // 3. paddle velocity at the point of contact
+      const gain = PADDLE_TRANSFER * this.s.speedUpStrength;
+      vn += (r.dx * nx + r.dy * ny) * pd.ds * gain;
+      vt += (r.dx * tx + r.dy * ty) * pd.ds * gain;
+      // 4. shallow exits get straightened out and sped up
+      const free = LATERAL_FREE * base;
+      const lateral = Math.abs(vt);
+      if (lateral > free) {
+        const val = (this.s.speedUpStrength * (lateral - free)) / (2 * base);
+        vn *= 1 + val;
+        vt /= 1 + val;
+      }
+      speed = clamp(Math.hypot(vn, vt), base, base * this.s.maxSpeedMult);
+    }
+
+    // 5. always leave the paddle
+    const len = Math.hypot(vn, vt) || 1;
+    const fn = Math.max(MIN_FORWARD, vn / len);
+    const ft = (vt < 0 ? -1 : 1) * Math.sqrt(1 - fn * fn);
+    v.x = (fn * nx + ft * tx) * speed;
+    v.y = (fn * ny + ft * ty) * speed;
+    this.#normalize(v, speed);
+    this.#emit('paddle', p, v, nx, ny, id, { s: slot });
+    return false;
+  }
+
+  #bounce(p, v, hit) {
+    p.x += hit.nx * hit.depth;
+    p.y += hit.ny * hit.depth;
+    const dot = v.x * hit.nx + v.y * hit.ny;
+    if (dot < 0) {
+      v.x -= 2 * dot * hit.nx;
+      v.y -= 2 * dot * hit.ny;
+    }
+    this.#normalize(v);
+  }
+
+  /** Keeps the given speed (default: the current one), and never (almost) axis-aligned, so a ball can't ping-pong forever. */
+  #normalize(v, speed = Math.hypot(v.x, v.y)) {
+    const min = 0.22;
+    speed ||= this.s.ballSpeed;
+    const len0 = Math.hypot(v.x, v.y) || 1;
+    let nx = v.x / len0;
+    let ny = v.y / len0;
+    if (Math.abs(nx) < min) nx = (nx < 0 ? -1 : 1) * min;
+    if (Math.abs(ny) < min) ny = (ny < 0 ? -1 : 1) * min;
+    const len = Math.hypot(nx, ny);
+    v.x = (nx / len) * speed;
+    v.y = (ny / len) * speed;
+  }
+
+  /**
+   * Records something the clients should hear / see once. (x, y) is where it happened, (nx, ny) the
+   * surface normal (pointing at the ball), b the ball id, p how fast the ball was going (0 = base
+   * speed, 1 = the maximum), plus event specific fields (s: slot, i: brick id).
+   */
+  #emit(kind, pos, v, nx, ny, id, extra = {}) {
+    if (this.events.length >= MAX_EVENTS) return;
+    const base = this.s.ballSpeed;
+    const power = v ? clamp((Math.hypot(v.x, v.y) - base) / (base * Math.max(0.1, this.s.maxSpeedMult - 1)), 0, 1) : 0;
+    this.events.push({ k: kind, x: r1(pos.x), y: r1(pos.y), nx: r2(nx), ny: r2(ny), b: id, p: r2(power), ...extra });
+  }
+}
+
+/** @type {import('../../shared/contracts.js').ServerGame} */
+export const warlords = {
+  meta,
+  create: (ctx) => new WarlordsGame(ctx),
+  canStart({ players, settings }) {
+    const bots = Math.min(settings.bots, 4 - players);
+    return players + bots >= 2 ? null : 'You need an opponent: set Bots to 1 or more, or invite a friend.';
+  },
+};
