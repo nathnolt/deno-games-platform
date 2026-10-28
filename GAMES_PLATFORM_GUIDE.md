@@ -63,12 +63,12 @@ server/room.js            game-agnostic room: host, seats, spectators, ready, se
 server/games.js           SERVER registry of games            <- you edit this
 shared/ecs.js             tiny Entity-Component-System (optional to use)
 shared/interp.js          SnapshotBuffer + lerp for smooth rendering (optional)
-shared/settings.js        settings schema types, defaultSettings(), sanitizeSettings()
+shared/settings.js        settings schema types, defaultSettings(), sanitizeSettings(), groupSettings()
 shared/contracts.js       JSDoc of the plugin contracts + wire protocol
 client/index.html         page + import map
 client/app.js             app shell: lobby, room, solo setup page, game screen
 client/games.js           CLIENT registry of games            <- you edit this
-client/settings-form.js   settings form generated from the schema
+client/settings-form.js   settings form generated from the schema (with collapsible groups)
 client/dom.js             el() helper
 client/style.css          global styles                        <- you may append to this
 games/<id>/shared.js      meta + geometry/constants/components used by both sides
@@ -379,6 +379,7 @@ export const meta = {
   seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'], // OPTIONAL dot color per seat
   tickRate: 20,            // server updates per second (e.g. 20 for turn-ish/casual, 60 for fast action)
   soloSettings: {},        // OPTIONAL. If present, the lobby enables "Play solo" (you + bots). See section 6
+  settingGroups: [ /* OPTIONAL sections for the setup form — see section 6.2 */ ],
   settings: [ /* SettingField[] — see section 6 */ ],
 };
 ```
@@ -464,7 +465,63 @@ Rules:
   must be real booleans. **Unknown keys are dropped.** All of this happens in `sanitizeSettings()` on the server, so
   your game can always trust `ctx.settings`.
 
-### 6.2 How settings flow
+More than a handful of fields? Organize them into sections: see 6.2.
+
+### 6.2 Grouping settings into sections
+
+A long list of fields gets hard to scan. Split it into **groups**: titled, collapsible sections of the setup form. Groups
+are purely presentational: the values stay one flat `{ key: value }` object, so `ctx.settings.<key>`, `soloSettings`,
+`sanitizeSettings()` and the wire protocol are exactly the same as without groups.
+
+Two steps:
+
+1. Declare the groups in `meta.settingGroups` (this list also fixes their order on screen).
+2. Put a field in a group with `group: '<group id>'`.
+
+```js
+settingGroups: [
+  { id: 'rules', label: 'Rules' },
+  { id: 'bots',  label: 'Bots', description: 'Only used when a seat is set to Bot.', collapsed: true },
+],
+settings: [
+  { type: 'number', key: 'target',   label: 'Taps to win', min: 10, max: 200, step: 5, default: 50, group: 'rules' },
+  { type: 'boolean', key: 'penalty', label: 'Lose a tap when tapping during the countdown', default: true, group: 'rules' },
+  { type: 'select', key: 'botSkill',  label: 'Bot skill', default: 'normal', group: 'bots',
+    options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }] },
+],
+```
+
+A group (`SettingGroup`) has:
+
+| Property | Required | Meaning |
+|---|---|---|
+| `id` | yes | unique within the game; the value of `group` on its fields |
+| `label` | yes | section title (the clickable summary line) |
+| `description` | no | one muted line shown under the title when the section is open |
+| `collapsed` | no | `true` = the section starts folded. Default: open |
+
+How the form lays things out (`groupSettings(meta)` in `shared/settings.js` does the splitting):
+
+- **Fields without a `group`** are shown first, with no header. Use this for the one or two settings everybody touches;
+  you can mix grouped and ungrouped fields freely, and a game with no groups at all renders exactly as before.
+- **Groups follow in the order of `settingGroups`**, and the fields inside a group keep their order from `settings`
+  (a group's fields do not have to be next to each other in the array).
+- **A group with no fields is not shown.**
+- **A field whose `group` is not declared** still shows up: the platform creates the group on the fly, titled with the
+  id itself, after the declared ones. This keeps a typo from hiding a setting, but it looks unpolished, so declare every group.
+- Groups are one level deep (no groups inside groups).
+- It applies everywhere the schema-generated form is used: the multiplayer room setup **and** the solo settings page.
+  Guests see the same sections, disabled.
+- The player's fold/unfold choices are remembered per game while the page stays open (the form is rebuilt each time
+  the server sends the room state, so without this a section would pop back open after every change).
+  `collapsed` is only the starting state.
+- Keep `key`s unique across the **whole** game, not per group.
+- A collapsed group still counts: its values are validated, sent and saved like any other. Collapsing hides, it does not disable.
+  So don't hide settings that most players *must* look at; collapse the advanced ones.
+- Grouping is also the easy way to deal with conditional fields (see 6.3): put the "only used when…" fields in their own group,
+  explain that in its `description`, and set `collapsed: true`.
+
+### 6.3 How settings flow
 
 ```
 form change ─► {t:'setSettings', settings} ─► Room.setSettings ─► sanitizeSettings(meta, raw)
@@ -475,10 +532,10 @@ start        ─► seat checks ─► canStart({players, bots, settings}) ─�
 - **Server:** read `ctx.settings.<key>` in `create(ctx)` (copy what you need) and in your systems.
 - **Client:** read `ctx.room.settings.<key>` in `mount(ctx)`. Settings cannot change during a match, so reading once is fine.
 - Only the **host** can edit; guests see the form disabled. Settings are locked while a match runs.
-- Every field is always shown. If a field only matters conditionally (say, speed limit only when "instant" is off),
-  say so in its label. The generated form has no show/hide logic.
+- Every field is always enabled and sent. If a field only matters conditionally (say, speed limit only when "instant" is off),
+  say so in its label or put it in its own group (6.2). The generated form has no show/hide logic.
 
-### 6.3 Solo settings page
+### 6.4 Solo settings page
 
 Add `soloSettings` to `meta` to make the lobby's **Play solo** button available for your game:
 
@@ -500,20 +557,22 @@ Design guidance for solo-capable games:
 - Make `soloSettings` a sensible *quick start*; the bots in the other seats come from the platform.
 - Use `canStart` to explain impossible combinations instead of silently fixing them.
 - Because the solo page shows **every** field, keep labels clear: players see them without a "multiplayer" context.
+  Groups (6.2) work here too and help a lot when the page is long.
 - Not defining `soloSettings` disables the *Play solo* button for that game; the server rejects `solo: true` for it.
 
-### 6.4 Adding a new kind of field (rare)
+### 6.5 Adding a new kind of field (rare)
 
 If you need something other than number/boolean/select (a text field, a color picker), three places change, together:
 
 1. `shared/settings.js`: extend the `SettingField` JSDoc typedef and add a branch in `sanitizeSettings` (**validation is
    mandatory** — never let raw client values through).
-2. `client/settings-form.js`: add the matching input in `rows` and its value extraction in `collect`.
+2. `client/settings-form.js`: add the matching input in the `row()` function and its value extraction in `collect`.
 3. Use the new `type` in your `meta.settings`.
 
-Every game benefits automatically, including the solo page.
+Every game benefits automatically, including the solo page. Groups need no extra work: `group` is read from the field
+definition, whatever its `type`.
 
-### 6.5 Settings that are *not* schema fields
+### 6.6 Settings that are *not* schema fields
 
 Per-player preferences (volume, theme, name) are not room settings. Store them on the client, e.g. `localStorage`
 (the shell already stores the player name this way), and keep them out of `meta.settings`.
@@ -709,7 +768,7 @@ The game appears in the lobby's game dropdown on next page load; *Play solo* is 
 ## 10. Complete worked example: Tap Race
 
 A tiny but complete game: 1 to 4 players (humans + bots) tap as fast as they can; first to the target wins. It uses all
-three setting types, `soloSettings`, `canStart`, bots, input validation/rate limiting, `onEnd` and `dispose`. The
+three setting types, setting groups, `soloSettings`, `canStart`, bots, input validation/rate limiting, `onEnd` and `dispose`. The
 server logic was run end-to-end through the real platform (solo flow, bot match, `gameEnd`). Copy the folder, rename,
 and change the rules.
 
@@ -728,13 +787,17 @@ export const meta = {
   seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'],
   tickRate: 20, // server updates per second; a simple game does not need 60
   soloSettings: { botSkill: 'normal' }, // presence of this field enables "Play solo" (you + bots in the other seats)
+  settingGroups: [ // optional: sections of the setup form (see section 6.2)
+    { id: 'rules', label: 'Rules' },
+    { id: 'bots', label: 'Bots', description: 'Only used when a seat is set to Bot.' },
+  ],
   settings: [
-    { type: 'number', key: 'target', label: 'Taps to win', min: 10, max: 200, step: 5, default: 50 },
+    { type: 'number', key: 'target', label: 'Taps to win', min: 10, max: 200, step: 5, default: 50, group: 'rules' },
+    { type: 'boolean', key: 'penalty', label: 'Lose a tap when tapping during the countdown', default: true, group: 'rules' },
     {
-      type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal',
+      type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal', group: 'bots',
       options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }],
     },
-    { type: 'boolean', key: 'penalty', label: 'Lose a tap when tapping during the countdown', default: true },
   ],
 };
 
@@ -925,7 +988,7 @@ for (const g of [warlords, taprace]) clientGames.set(g.meta.id, g);
 ```
 
 Then `deno task start`, open `http://localhost:8000`, pick **Tap Race**, press **Play solo**. You land on the solo settings
-page showing the four seat rows (you + 3 bots), *Taps to win*, *Bot skill* and the penalty checkbox.
+page showing the four seat rows (you + 3 bots) and two sections: **Rules** (*Taps to win*, the penalty checkbox) and **Bots** (*Bot skill*).
 
 ---
 
@@ -958,6 +1021,11 @@ ok(g.snapshot().bots.filter(Boolean).length === 3, 'the three bot seats are bots
 Useful assertions for a new game: *solo creates a room but does not start until `start`*, *settings are clamped*, *only the
 host can change settings*, *snapshots stream after start*, *input reaches the simulation*.
 
+**3. Settings schema test** (`tests/settings.test.js`, run with `deno run tests/settings.test.js`): covers `groupSettings()`
+(ordering, empty and undeclared groups) and that grouped fields are still defaulted and clamped. Add this file to the `test`
+task in `deno.json` (`... && deno run tests/settings.test.js`). If you add a game with groups, you can also assert
+`groupSettings(meta).groups.map(g => g.id)` for it.
+
 Solo-specific behavior covered by the existing tests: solo rooms are hidden from the lobby list, cannot be joined,
 settings are editable and clamped, seats can be changed, starting with too few filled seats is refused.
 
@@ -971,6 +1039,7 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 
 - [ ] `games/<id>/shared.js` exports `meta` (unique `id`, `maxPlayers`, `tickRate`, `settings` with defaults)
 - [ ] `minPlayers` (filled seats) set; `soloSettings` set if the game can be played alone
+- [ ] More than ~6 settings? Declare `settingGroups` and give each field a `group` (every `group` id declared; keys unique game-wide)
 - [ ] `ctx.bots` honoured, spectators (`ctx.me.slot === -1`) handled in the client, optional `seatNames` / `seatColors`
 - [ ] `games/<id>/server.js` exports `{ meta, create, canStart? }`; instance has `onInput`, `onLeave`, `update`, `snapshot`
 - [ ] `games/<id>/client.js` exports `{ meta, mount }`; view has `onSnapshot`, `dispose` (and `onEnd`)
@@ -997,6 +1066,8 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 | "Need at least N seats filled" | `minPlayers` counts humans + bots; the host fills seats in the room (Bot / Sit here) |
 | Spectator's client errors on `slot` -1 | guard `ctx.me.slot < 0`: no input, no "your" highlighting |
 | Solo button disabled | game has no `meta.soloSettings` |
+| A setting shows up in a section titled with a raw id (e.g. `bots`) | its `group` is not declared in `meta.settingGroups` (typo or missing entry) |
+| A group does not appear | none of the fields reference its `id`, or the field has `group` misspelled (then it appears as an undeclared group instead) |
 | Settings value is `undefined` on the server | key missing from `meta.settings` (unknown keys are dropped by `sanitizeSettings`) |
 | Stutter on real-time games | rendering raw snapshots; use `SnapshotBuffer`, or predict your own input |
 | Smooth locally, laggy online | ticks too slow for the game; raise `tickRate`, and keep snapshots small |

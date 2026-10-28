@@ -50,3 +50,9 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .seat-select { min-width: 0; width: 100%; }
 .seat-extra { display: flex; gap: .6rem; align-items: center; justify-content: flex-end; min-width: 6rem; }
 @media (max-width: 520px) { .seat { grid-template-columns: auto 1fr; } .seat > :nth-child(n+3) { grid-column: 2; } .seat-extra { justify-content: flex-start; } }
+
+.settings-group { margin-top: .8rem; border: 1px solid var(--line); border-radius: 8px; padding: 0 .8rem; }
+.settings-group > summary { cursor: pointer; padding: .55rem 0; font-weight: 600; font-family: Palatino, 'Book Antiqua', Georgia, serif; }
+.settings-group[open] > summary { border-bottom: 1px solid var(--line); }
+.settings-group-desc { margin: .4rem 0 0; font-size: .85rem; }
+.settings-group > .setting:last-child { border-bottom: 0; }
