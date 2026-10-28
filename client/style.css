@@ -36,6 +36,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .game-screen { display: flex; flex-direction: column; height: 100%; }
 .topbar { display: flex; gap: .5rem; align-items: center; padding: .5rem 1rem; border-bottom: 1px solid var(--line); }
 .topbar span { flex: 1; font-family: Palatino, Georgia, serif; font-weight: 700; }
+.game-screen:fullscreen { background: var(--bg); }
 .game-host { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
 .game-host canvas { cursor: crosshair; touch-action: none; }
 .wl-hud { position: absolute; top: .6rem; left: 1rem; display: flex; gap: 1rem; font-weight: 600; pointer-events: none; }

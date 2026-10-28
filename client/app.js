@@ -260,12 +260,27 @@ class App {
     this.gameHost = el('div', { class: 'game-host' });
     this.backBtn = el('button', { class: 'hidden', onclick: () => this.go('room') }, 'Back to setup');
     const watching = (room.players.find((p) => p.id === this.me)?.slot ?? -1) < 0;
+
+    // Fullscreen applies to the whole game screen (top bar + game), so Leave / Back to setup stay reachable.
+    // Not offered where the browser has no Fullscreen API (e.g. iPhone Safari).
+    const fsBtn = el('button', { class: 'hidden', onclick: () => this.toggleFullscreen() }, 'Fullscreen');
+    if (document.fullscreenEnabled) fsBtn.classList.remove('hidden');
     return el(
       'div',
-      { class: 'game-screen' },
-      el('div', { class: 'topbar' }, el('span', {}, `${game.meta.name}: ${room.name}${watching ? ' (watching)' : ''}`), this.backBtn, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave')),
+      {
+        class: 'game-screen',
+        // fires on the element that entered/left fullscreen (also when the player presses Esc), and goes away with it
+        onfullscreenchange: () => (fsBtn.textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen'),
+      },
+      el('div', { class: 'topbar' }, el('span', {}, `${game.meta.name}: ${room.name}${watching ? ' (watching)' : ''}`), this.backBtn, fsBtn, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave')),
       this.gameHost,
     );
+  }
+
+  toggleFullscreen() {
+    if (document.fullscreenElement) return document.exitFullscreen();
+    const target = this.gameHost?.closest('.game-screen');
+    target?.requestFullscreen().catch(() => this.toast('Fullscreen is not available in this browser'));
   }
 
   mountGame() {
@@ -281,7 +296,7 @@ class App {
 
   toast(message) {
     const t = el('div', { class: 'toast' }, message);
-    document.body.append(t);
+    (document.fullscreenElement ?? document.body).append(t); // body content is hidden while an element is fullscreen
     setTimeout(() => t.remove(), 3500);
   }
 }

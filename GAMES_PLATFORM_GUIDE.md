@@ -66,7 +66,7 @@ shared/interp.js          SnapshotBuffer + lerp for smooth rendering (optional)
 shared/settings.js        settings schema types, defaultSettings(), sanitizeSettings(), groupSettings()
 shared/contracts.js       JSDoc of the plugin contracts + wire protocol
 client/index.html         page + import map
-client/app.js             app shell: lobby, room, solo setup page, game screen
+client/app.js             app shell: lobby, room, solo setup page, game screen (top bar with Fullscreen / Leave)
 client/games.js           CLIENT registry of games            <- you edit this
 client/settings-form.js   settings form generated from the schema (with collapsible groups)
 client/dom.js             el() helper
@@ -583,8 +583,8 @@ Per-player preferences (volume, theme, name) are not room settings. Store them o
 
 ### 7.1 What the shell gives you, and what it expects
 
-The shell (`client/app.js`) owns the lobby, room list, setup forms and the game screen frame (top bar with *Leave* and,
-after the match, *Back to setup*). It creates `ctx.container` and calls `mount(ctx)` **once per match**. You draw inside
+The shell (`client/app.js`) owns the lobby, room list, setup forms and the game screen frame (top bar with *Fullscreen*,
+*Leave* and, after the match, *Back to setup*). It creates `ctx.container` and calls `mount(ctx)` **once per match**. You draw inside
 the container and nothing else. When the shell leaves the game screen it calls `dispose()`.
 
 `.game-host` is a flex container that centers its children. For absolutely-positioned overlays (HUD, banners) set
@@ -636,6 +636,16 @@ onSnapshot(data) { this.buffer.push(data); }
 - **Canvas 2D**: append a `<canvas>` to `ctx.container`; size it from a `ResizeObserver` on the container.
 - **Three.js / WebGL**: add `three` via the import map (already present). Warlords uses an orthographic camera on flat
   planes. Call `renderer.dispose()` in `dispose()`.
+
+**Fullscreen.** The top bar has a *Fullscreen* button (hidden where the browser has no Fullscreen API, e.g. iPhone Safari).
+It makes the whole game screen (top bar + your container) fullscreen, so you get it for free; there is nothing to implement.
+To make it work well:
+
+- Size your view from the **container** (`ResizeObserver`, see below), never from `window.innerWidth/innerHeight`: entering and
+  leaving fullscreen just resizes the container.
+- Keep HUD/banners **inside** `ctx.container`. Anything appended to `document.body` is not shown while another element is fullscreen.
+- Don't bind game actions to `Esc` (the browser uses it to leave fullscreen) or `F11`.
+- The shell exits fullscreen automatically when the player leaves the game screen.
 
 For responsive layout, observe the container, not the window:
 
@@ -1069,6 +1079,8 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 | A setting shows up in a section titled with a raw id (e.g. `bots`) | its `group` is not declared in `meta.settingGroups` (typo or missing entry) |
 | A group does not appear | none of the fields reference its `id`, or the field has `group` misspelled (then it appears as an undeclared group instead) |
 | Settings value is `undefined` on the server | key missing from `meta.settings` (unknown keys are dropped by `sanitizeSettings`) |
+| Game is the wrong size / cropped after *Fullscreen* | the view sizes itself from `window` instead of observing `ctx.container` with a `ResizeObserver` |
+| Overlay or popup disappears in fullscreen | it was appended to `document.body`; append it inside `ctx.container` |
 | Stutter on real-time games | rendering raw snapshots; use `SnapshotBuffer`, or predict your own input |
 | Smooth locally, laggy online | ticks too slow for the game; raise `tickRate`, and keep snapshots small |
 
