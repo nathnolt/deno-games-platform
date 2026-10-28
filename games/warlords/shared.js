@@ -16,20 +16,21 @@ export const meta = {
       type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal',
       options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }],
     },
-    { type: 'number', key: 'maxBalls', label: 'Max balls', min: 1, max: 8, step: 1, default: 3 },
-    { type: 'number', key: 'ballInterval', label: 'Seconds between new balls', min: 3, max: 30, step: 1, default: 10 },
-    { type: 'number', key: 'ballSpeed', label: 'Ball speed', min: 150, max: 700, step: 10, default: 320 },
-    { type: 'boolean', key: 'speedUp', label: 'Balls speed up when hit by a moving paddle', default: true },
-    { type: 'number', key: 'speedUpStrength', label: 'Speed-up strength (only with speed-up on)', min: 0.1, max: 2, step: 0.1, default: 1 },
-    { type: 'number', key: 'maxSpeedMult', label: 'Top ball speed, x base (speed-up and hold release)', min: 1.2, max: 4, step: 0.1, default: 2.4 },
-    { type: 'number', key: 'speedDecay', label: 'Slow-down of fast balls per second (only with speed-up on)', min: 0, max: 1, step: 0.05, default: 0.15 },
+    { type: 'number', key: 'maxBalls', label: 'Max balls', min: 1, max: 8, step: 1, default: 4 },
+    { type: 'number', key: 'ballInterval', label: 'Seconds between new balls', min: 3, max: 30, step: 1, default: 6 },
+    { type: 'number', key: 'ballSpeed', label: 'Ball speed', min: 150, max: 700, step: 10, default: 380 },
+    { type: 'boolean', key: 'speedUp', label: 'Balls speed up when hit by a paddle', default: true },
+    { type: 'number', key: 'speedUpStrength', label: 'Speed-up strength: paddle swing + shallow angles (only with speed-up on)', min: 0.1, max: 3, step: 0.1, default: 1.6 },
+    { type: 'number', key: 'hitBoost', label: 'Speed multiplier on EVERY paddle hit (only with speed-up on; 1 = none)', min: 1, max: 1.5, step: 0.01, default: 1.1 },
+    { type: 'number', key: 'maxSpeedMult', label: 'Top ball speed, x base (speed-up and hold release)', min: 1.2, max: 8, step: 0.1, default: 3.5 },
+    { type: 'number', key: 'speedDecay', label: 'Slow-down of fast balls per second (only with speed-up on)', min: 0, max: 1, step: 0.05, default: 0.05 },
     { type: 'boolean', key: 'holdEnabled', label: 'Hold the mouse button / Space to catch a ball on your paddle', default: true },
-    { type: 'boolean', key: 'holdInfinite', label: 'Infinite hold: keep the ball as long as the button is down (only with hold on)', default: true },
+    { type: 'boolean', key: 'holdInfinite', label: 'Infinite hold: keep the ball as long as the button is down (off = temporary hold, see max seconds)', default: false },
     { type: 'number', key: 'holdMax', label: 'Max seconds a ball can be held (only with hold on and infinite hold off)', min: 1, max: 15, step: 1, default: 4 },
     { type: 'number', key: 'releaseMinSpeed', label: 'Minimum speed of a released ball, x base (only with hold on)', min: 1, max: 3, step: 0.1, default: 1.3 },
     { type: 'number', key: 'releaseSpeedGain', label: 'Extra release speed per paddle speed (only with hold on; 0 = always the minimum)', min: 0, max: 2, step: 0.1, default: 0.6 },
     { type: 'boolean', key: 'instantMouse', label: 'Mouse moves paddle instantly', default: true },
-    { type: 'number', key: 'paddleSpeed', label: 'Paddle speed (keyboard, bots, and mouse when not instant)', min: 100, max: 1500, step: 50, default: 700 },
+    { type: 'number', key: 'paddleSpeed', label: 'Paddle speed (keyboard, bots, and mouse when not instant)', min: 100, max: 1500, step: 50, default: 900 },
     { type: 'number', key: 'roundsToWin', label: 'Rounds to win', min: 1, max: 9, step: 1, default: 3 },
   ],
 };
@@ -38,8 +39,10 @@ export const meta = {
 // Everything is defined for slot 0 (top-left corner) in local (u, v) coordinates
 // measured from the corner, then mirrored into the other corners.
 export const ARENA = 800;
-export const BRICK = 24;
-export const BLOCK = 6; //  base = 6x6 cells (144 px, twice the old 3x3): the king fills the corner 2x2, 32 bricks around it
+// ★ BASE SIZE KNOB: pixels per brick. Base = BLOCK * BRICK (24 -> 144 px, 28 -> 168 px, 32 -> 192 px).
+//   Everything (king, paddle track, hold path, bots) scales with it. Try 26..32 and see what feels nicest.
+export const BRICK = 28;
+export const BLOCK = 6; //  base = 6x6 cells: the king fills the corner 2x2, 32 bricks around it (the snapshot mask is 32 bits)
 export const KING_CELLS = 2;
 export const BLOCK_SIZE = BRICK * BLOCK;
 export const GAP = 14; //   keep below 2 * BALL_R or balls can squeeze between the paddle and the base

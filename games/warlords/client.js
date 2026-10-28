@@ -81,7 +81,7 @@ class WarlordsView {
     this.hint = Object.assign(document.createElement('div'), {
       className: 'wl-hint',
       textContent: ctx.room.settings.holdEnabled !== false
-        ? 'Mouse swings your paddle around your base. Hold the button (or Space) to catch a ball, release to launch. M mutes.'
+        ? 'Mouse swings your paddle around your base. Hold the button (or Space) to catch a ball, swing, release to launch. Swing into balls to speed them up. M mutes.'
         : 'Mouse swings your paddle around your base (arrow keys / WASD also work). M mutes.',
     });
     this.muteBtn = Object.assign(document.createElement('button'), { className: 'wl-mute', type: 'button' });
@@ -561,6 +561,9 @@ class WarlordsView {
     } else if (s.phase === 'roundOver') {
       this.banner.textContent = s.roundWinner >= 0 ? `${this.#name(s.roundWinner)} takes the round` : 'Draw';
       this.banner.style.color = s.roundWinner >= 0 ? COLORS[s.roundWinner] : '#e2e8f0';
+    } else if (!s.alive[this.ctx.me.slot]) {
+      this.banner.textContent = "You're out. Watching the rest of the round...";
+      this.banner.style.color = '#94a3b8';
     } else {
       this.banner.textContent = '';
     }

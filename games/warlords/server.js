@@ -1,7 +1,7 @@
 import { World } from '../../shared/ecs.js';
 import {
   ARENA, BALL_R, BRICK_CELLS, TRACK, BallC, BrickC, KingC, PaddleC, Pos, Vel,
-  PADDLE_LEN, brickRect, circleRect, heldPoint, heldS, kingRect, launchDir, meta, paddleRects, tFromPoint,
+  PAD_C, PADDLE_THICK, PADDLE_LEN, brickRect, circleRect, heldPoint, heldS, kingRect, launchDir, meta, paddleRects, tFromPoint,
 } from './shared.js';
 
 const SLOTS = [0, 1, 2, 3];
@@ -21,12 +21,24 @@ const MAX_EVENTS = 40; //        per snapshot
 const PEAK_WINDOW = 0.12; //     s: a release uses the paddle's fastest recent speed, so letting go isn't punished for a hand that slowed down
 const HOLD_COOLDOWN = 0.4; //    seconds before a paddle can catch again after releasing
 
-// speed: fraction of the paddle speed, react: seconds between decisions, error: aim error in track units (px)
+// ── bots ──
+// speed:   fraction of the paddle speed while positioning
+// react:   seconds between re-plans (where will a ball arrive?)
+// error:   aim error in track units (px)
+// flick:   paddle speed multiplier while sweeping through an incoming ball (0 = never flicks)
+// hold:    chance to try to catch an incoming ball instead of just bouncing it
+// holdFor: [min, max] seconds a bot keeps a caught ball while it lines up its shot
 const SKILL = {
-  easy: { speed: 0.45, react: 0.25, error: 50 },
-  normal: { speed: 0.7, react: 0.12, error: 25 },
-  hard: { speed: 1.0, react: 0.05, error: 6 },
+  easy: { speed: 0.5, react: 0.18, error: 40, flick: 0, hold: 0.15, holdFor: [1.2, 2.2] },
+  normal: { speed: 0.9, react: 0.06, error: 12, flick: 0.9, hold: 0.45, holdFor: [1.0, 1.8] },
+  hard: { speed: 1.2, react: 0.025, error: 3, flick: 1.4, hold: 0.6, holdFor: [0.9, 1.5] },
 };
+const BOT_HORIZON = 1.6; //  s: how far ahead a bot predicts a ball's path (with wall bounces)
+const FLICK_LEAD = 0.06; //  s: a flick starts this long before the ball arrives, so the paddle is at full speed on contact
+const newBotState = () => ({
+  target: 0, mult: 0.7, next: 0, eta: Infinity, hitT: 0, flickDir: 1, ball: -1, err: 0, wantHold: false,
+  heldE: null, enemy: -1, aimT: null, runT: 0, runDone: false, holdFor: 1,
+});
 
 class WarlordsGame {
   constructor(ctx) {
@@ -42,6 +54,7 @@ class WarlordsGame {
     this.targets = [0, 0, 0, 0];
     this.holding = [false, false, false, false]; // hold button is down (humans only)
     this.holdCool = [0, 0, 0, 0];
+    this.holdLock = [false, false, false, false]; // a timed-out hold must be released and pressed again before it can catch again
     this.held = new Map(); // ball entity -> {slot, off, since, peak}: balls riding on a paddle
     this.botState = [null, null, null, null];
     this.scores = [0, 0, 0, 0];
@@ -63,7 +76,7 @@ class WarlordsGame {
     for (const slot of SLOTS) {
       if (bots > 0 && !this.active[slot]) {
         this.active[slot] = this.bot[slot] = true;
-        this.botState[slot] = { target: 0, next: 0 };
+        this.botState[slot] = newBotState();
         bots--;
       }
     }
@@ -82,6 +95,7 @@ class WarlordsGame {
       this.mode[slot] = 'dir';
     } else if (typeof data.hold === 'boolean') {
       this.holding[slot] = data.hold; // mouse button / space: catch balls on the front of the paddle
+      if (!data.hold) this.holdLock[slot] = false;
     }
   }
 
@@ -174,17 +188,18 @@ class WarlordsGame {
       this.targets[slot] = 0;
     }
     this.holdCool = [0, 0, 0, 0];
+    this.holdLock = [false, false, false, false];
     this.held = new Map();
+    for (const slot of SLOTS) if (this.bot[slot]) this.botState[slot] = newBotState();
     this.phase = 'countdown';
     this.timer = COUNTDOWN;
   }
 
   #checkRoundEnd() {
     const left = SLOTS.filter((s) => this.alive[s]);
-    const humansLeft = left.filter((s) => !this.bot[s]).length;
-    // Normal end: one (or zero) left. Also end when every human is out but bots remain,
-    // so you don't have to watch bots fight; the sturdiest base takes the point.
-    if (left.length > 1 && humansLeft > 0) return;
+    // The round runs until one base is left, even if you were knocked out (you can watch the bots finish it).
+    // Only when every human has left the room do we cut it short; the sturdiest base takes the point.
+    if (left.length > 1 && this.humans > 0) return;
     this.roundWinner = left.length === 1 ? left[0] : left.length > 1 ? this.#sturdiest(left) : -1;
     if (this.roundWinner >= 0) this.scores[this.roundWinner]++;
     this.phase = 'roundOver';
@@ -218,40 +233,175 @@ class WarlordsGame {
   }
 
   // ── systems ──
+  /**
+   * Bots predict where each loose ball will cross their defence zone (wall bounces included) and
+   * stand there. Depending on skill they then either
+   *  - flick: pre-position a little behind the impact point and sweep through it at full speed, so the
+   *    paddle's own velocity is added to the ball, or
+   *  - catch: hold the button as the ball arrives, then line up a shot at an enemy base and let go
+   *    while swinging the paddle through the aim point (a flick release).
+   */
   #botSystem(dt) {
     const w = this.world;
     const skill = SKILL[this.s.botSkill] ?? SKILL.normal;
     for (const slot of SLOTS) {
       if (!this.bot[slot] || !this.alive[slot]) continue;
       const st = this.botState[slot];
-      st.next -= dt;
-      if (st.next > 0) continue;
-      st.next = skill.react;
-      const king = kingRect(slot);
-      let nearest = null;
-      let best = Infinity;
-      for (const e of w.query(BallC, Pos)) {
-        const p = w.get(e, Pos);
-        const d = Math.hypot(p.x - king.x, p.y - king.y);
-        if (d < best) { best = d; nearest = p; }
+      const pe = w.query(PaddleC).find((x) => w.get(x, PaddleC).slot === slot);
+      if (pe === undefined) continue;
+      const pd = w.get(pe, PaddleC);
+      const heldEntry = [...this.held].find(([, h]) => h.slot === slot);
+      if (heldEntry) {
+        this.#botHolding(slot, st, skill, pd, heldEntry);
+        continue;
       }
-      st.target = nearest
-        ? clamp(tFromPoint(slot, nearest.x, nearest.y) + (Math.random() * 2 - 1) * skill.error, -TRACK, TRACK)
-        : 0;
+      st.heldE = null;
+      st.eta -= dt;
+      st.next -= dt;
+      if (st.next <= 0) this.#botPlan(slot, st, skill);
+
+      const wantCatch = this.s.holdEnabled && st.wantHold && st.eta < 0.25 && st.eta > -0.1;
+      this.holding[slot] = wantCatch;
+      if (!wantCatch) this.holdLock[slot] = false;
+
+      st.mult = skill.speed;
+      st.target = st.hitT;
+      if (skill.flick > 0 && this.s.speedUp && !wantCatch && st.eta < Infinity) {
+        const fv = this.s.paddleSpeed * skill.flick;
+        if (st.eta > FLICK_LEAD) {
+          st.target = clamp(st.hitT - st.flickDir * fv * FLICK_LEAD, -TRACK, TRACK); // run-up spot
+        } else if (st.eta > -0.12) {
+          st.target = clamp(st.hitT + st.flickDir * 200, -TRACK, TRACK); // sweep through the impact point
+          st.mult = skill.flick;
+        }
+      }
     }
+  }
+
+  #botPlan(slot, st, skill) {
+    const w = this.world;
+    st.next = skill.react;
+    const king = kingRect(slot);
+    let best = null;
+    let nearest = null;
+    let nd = Infinity;
+    for (const e of w.query(BallC, Pos, Vel)) {
+      if (this.held.has(e)) continue;
+      const p = w.get(e, Pos);
+      const d = Math.hypot(p.x - king.x, p.y - king.y);
+      if (d < nd) { nd = d; nearest = p; }
+      const hit = this.#predictArrival(slot, p, w.get(e, Vel));
+      if (hit && (!best || hit.time < best.time)) best = { ...hit, id: w.get(e, BallC).id };
+    }
+    if (best) {
+      if (best.id !== st.ball || best.time > st.eta + 0.3) { // a new approach: roll the dice again
+        st.err = (Math.random() * 2 - 1) * skill.error;
+        st.wantHold = this.s.holdEnabled && Math.random() < skill.hold;
+        st.flickDir = Math.random() < 0.5 ? -1 : 1;
+      }
+      st.ball = best.id;
+      st.eta = best.time;
+      st.hitT = clamp(tFromPoint(slot, best.x, best.y) + st.err, -TRACK, TRACK);
+      if (st.hitT > 4) st.flickDir = -1; //  sweep towards the inner corner: the ball gets thrown out into the arena
+      else if (st.hitT < -4) st.flickDir = 1;
+    } else {
+      st.ball = -1;
+      st.eta = Infinity;
+      st.wantHold = false;
+      st.hitT = nearest ? clamp(tFromPoint(slot, nearest.x, nearest.y), -TRACK, TRACK) : 0;
+    }
+  }
+
+  /** Where and when (seconds from now) a ball will first enter the square around this slot's paddle track, or null. */
+  #predictArrival(slot, p, v) {
+    const sx = slot & 1;
+    const sy = slot >> 1;
+    const zone = PAD_C + PADDLE_THICK / 2 + BALL_R;
+    const inZone = (x, y) => (sx ? ARENA - x : x) < zone && (sy ? ARENA - y : y) < zone;
+    let { x, y } = p;
+    let { x: vx, y: vy } = v;
+    // a ball that is already in the zone and flying away (it just left our paddle) is no threat until it comes back
+    let armed = !(inZone(x, y) && ((sx ? -vx : vx) > 0 || (sy ? -vy : vy) > 0));
+    const step = 1 / 90;
+    for (let t = 0; t < BOT_HORIZON; t += step) {
+      const inside = inZone(x, y);
+      if (inside && armed) return { time: t, x, y };
+      if (!inside) armed = true;
+      x += vx * step;
+      y += vy * step;
+      if (x < BALL_R) { x = BALL_R; vx = Math.abs(vx); } else if (x > ARENA - BALL_R) { x = ARENA - BALL_R; vx = -Math.abs(vx); }
+      if (y < BALL_R) { y = BALL_R; vy = Math.abs(vy); } else if (y > ARENA - BALL_R) { y = ARENA - BALL_R; vy = -Math.abs(vy); }
+    }
+    return null;
+  }
+
+  /** A bot with a ball on its paddle: run up, then swing through the aim point and let go (so the throw is fast). */
+  #botHolding(slot, st, skill, pd, [e, h]) {
+    this.holding[slot] = true;
+    if (st.heldE !== e) { // just caught it
+      st.heldE = e;
+      st.holdFor = skill.holdFor[0] + Math.random() * (skill.holdFor[1] - skill.holdFor[0]);
+      st.enemy = -1;
+      st.aimT = null;
+    }
+    if (st.enemy < 0 || !this.alive[st.enemy]) {
+      st.enemy = this.#pickEnemy(slot);
+      st.aimT = null;
+    }
+    const limit = this.s.holdInfinite ? st.holdFor : Math.min(st.holdFor, this.s.holdMax - 0.5);
+    if (st.enemy < 0 || h.since >= limit) { // out of time (or nobody left to shoot at): just let go
+      this.holding[slot] = false;
+      return;
+    }
+    if (st.aimT === null) {
+      // try every paddle position: where would the released ball fly straight at the enemy king?
+      const king = kingRect(st.enemy);
+      let bestT = 0;
+      let bestErr = Infinity;
+      for (let t = -TRACK; t <= TRACK; t += 6) {
+        const bp = heldPoint(slot, t + h.off, t);
+        const d = launchDir(slot, bp.x, bp.y);
+        const tx = king.x - bp.x;
+        const ty = king.y - bp.y;
+        const err = Math.acos(clamp((d.x * tx + d.y * ty) / (Math.hypot(tx, ty) || 1), -1, 1));
+        if (err < bestErr) { bestErr = err; bestT = t; }
+      }
+      st.aimT = clamp(bestT + (Math.random() * 2 - 1) * skill.error, -TRACK, TRACK);
+      const sign = TRACK - st.aimT >= st.aimT + TRACK ? 1 : -1; // run up from the side with more room
+      st.runT = clamp(st.aimT + sign * 90, -TRACK, TRACK);
+      st.runDone = false;
+    }
+    const sweep = Math.sign(st.aimT - st.runT) || 1;
+    if (!st.runDone && (pd.t - st.runT) * sweep <= 4) st.runDone = true;
+    if (!st.runDone) {
+      st.target = st.runT;
+      st.mult = skill.speed;
+      return;
+    }
+    st.target = clamp(st.aimT + sweep * 150, -TRACK, TRACK);
+    st.mult = skill.flick > 0 ? skill.flick : skill.speed;
+    if ((pd.t - st.aimT) * sweep >= -4) this.holding[slot] = false; // passed the aim point at speed: let go
+  }
+
+  #pickEnemy(slot) {
+    const foes = SLOTS.filter((s) => s !== slot && this.alive[s]);
+    if (foes.length === 0) return -1;
+    if (this.s.botSkill !== 'hard') return foes[Math.floor(Math.random() * foes.length)];
+    const count = [0, 0, 0, 0]; // hard bots go for the weakest base
+    for (const e of this.world.query(BrickC)) count[this.world.get(e, BrickC).slot]++;
+    return foes.reduce((best, s) => (count[s] < count[best] ? s : best), foes[0]);
   }
 
   #paddleSystem(dt) {
     const w = this.world;
     const speed = this.s.paddleSpeed;
-    const skill = SKILL[this.s.botSkill] ?? SKILL.normal;
     const toward = (p, target, maxStep) => (p.t += clamp(target - p.t, -maxStep, maxStep));
     const smooth = 1 - Math.exp(-dt / 0.04); // ~40 ms low-pass so mouse jitter doesn't make the paddle speed noisy
     for (const e of w.query(PaddleC)) {
       const p = w.get(e, PaddleC);
       const slot = p.slot;
       const before = p.t;
-      if (this.bot[slot]) toward(p, this.botState[slot].target, speed * skill.speed * dt);
+      if (this.bot[slot]) toward(p, this.botState[slot].target, speed * this.botState[slot].mult * dt);
       else if (this.mode[slot] === 'target') {
         if (this.s.instantMouse) p.t = this.targets[slot]; // as fast as the mouse
         else toward(p, this.targets[slot], speed * dt);
@@ -323,6 +473,7 @@ class WarlordsGame {
       }
       const timedOut = !this.s.holdInfinite && h.since >= this.s.holdMax;
       if (pe !== undefined && this.holding[h.slot] && !timedOut) continue;
+      if (timedOut && this.holding[h.slot]) this.holdLock[h.slot] = true; // temp hold ran out: let go of the button to catch again
       // release: along the line from just inside the corner through the ball, at a speed that depends
       // on how fast the paddle was moving (never below the minimum, never above the top speed)
       const base = this.s.ballSpeed;
@@ -394,7 +545,8 @@ class WarlordsGame {
 
     // catch: button down, nothing held yet, and the ball touched the FRONT face (the side facing the arena)
     const front = hit.nx * r.fx + hit.ny * r.fy >= 0.5;
-    if (this.s.holdEnabled && front && this.holding[slot] && this.holdCool[slot] <= 0 && ![...this.held.values()].some((h) => h.slot === slot)) {
+    // (a paddle that already holds a ball just bounces any other ball that touches it)
+    if (this.s.holdEnabled && front && this.holding[slot] && !this.holdLock[slot] && this.holdCool[slot] <= 0 && ![...this.held.values()].some((h) => h.slot === slot)) {
       const off = clamp(heldS(slot, p.x, p.y, pd.t) - pd.t, -PADDLE_LEN / 2, PADDLE_LEN / 2);
       this.held.set(e, { slot, off, since: 0, peak: 0 });
       const pt = heldPoint(slot, pd.t + off, pd.t);
@@ -432,7 +584,7 @@ class WarlordsGame {
         vn *= 1 + val;
         vt /= 1 + val;
       }
-      speed = clamp(Math.hypot(vn, vt), base, base * this.s.maxSpeedMult);
+      speed = clamp(Math.hypot(vn, vt) * (this.s.hitBoost ?? 1), base, base * this.s.maxSpeedMult); // hitBoost: every hit adds pace
     }
 
     // 5. always leave the paddle
