@@ -12,27 +12,39 @@ export const meta = {
   seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'],
   tickRate: 60,
   soloSettings: {}, // Play solo = you in the first seat, bots in the other three (the room's seat rows can change that)
+  settingGroups: [
+    { id: 'match', label: 'Match' },
+    { id: 'balls', label: 'Balls' },
+    { id: 'controls', label: 'Paddle & controls' },
+    { id: 'speedup', label: 'Speed-up', description: 'Balls get faster as they are hit. Only used when "Balls speed up" is on.', collapsed: true },
+    { id: 'hold', label: 'Holding balls', description: 'Catch a ball on your paddle and release it. Only used when holding is on.', collapsed: true },
+  ],
   settings: [
+    // Match
+    { type: 'number', key: 'roundsToWin', label: 'Rounds to win', min: 1, max: 9, step: 1, default: 3, group: 'match' },
     {
-      type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal',
+      type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal', group: 'match',
       options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }],
     },
-    { type: 'number', key: 'maxBalls', label: 'Max balls', min: 1, max: 8, step: 1, default: 4 },
-    { type: 'number', key: 'ballInterval', label: 'Seconds between new balls', min: 3, max: 30, step: 1, default: 6 },
-    { type: 'number', key: 'ballSpeed', label: 'Ball speed', min: 150, max: 700, step: 10, default: 380 },
-    { type: 'boolean', key: 'speedUp', label: 'Balls speed up when hit by a paddle', default: true },
-    { type: 'number', key: 'speedUpStrength', label: 'Speed-up strength: paddle swing + shallow angles (only with speed-up on)', min: 0.1, max: 3, step: 0.1, default: 1.6 },
-    { type: 'number', key: 'hitBoost', label: 'Speed multiplier on EVERY paddle hit (only with speed-up on; 1 = none)', min: 1, max: 1.5, step: 0.01, default: 1.1 },
-    { type: 'number', key: 'maxSpeedMult', label: 'Top ball speed, x base (speed-up and hold release)', min: 1.2, max: 8, step: 0.1, default: 3.5 },
-    { type: 'number', key: 'speedDecay', label: 'Slow-down of fast balls per second (only with speed-up on)', min: 0, max: 1, step: 0.05, default: 0.05 },
-    { type: 'boolean', key: 'holdEnabled', label: 'Hold the mouse button / Space to catch a ball on your paddle', default: true },
-    { type: 'boolean', key: 'holdInfinite', label: 'Infinite hold: keep the ball as long as the button is down (off = temporary hold, see max seconds)', default: false },
-    { type: 'number', key: 'holdMax', label: 'Max seconds a ball can be held (only with hold on and infinite hold off)', min: 1, max: 15, step: 1, default: 4 },
-    { type: 'number', key: 'releaseMinSpeed', label: 'Minimum speed of a released ball, x base (only with hold on)', min: 1, max: 3, step: 0.1, default: 1.3 },
-    { type: 'number', key: 'releaseSpeedGain', label: 'Extra release speed per paddle speed (only with hold on; 0 = always the minimum)', min: 0, max: 2, step: 0.1, default: 0.6 },
-    { type: 'boolean', key: 'instantMouse', label: 'Mouse moves paddle instantly', default: true },
-    { type: 'number', key: 'paddleSpeed', label: 'Paddle speed (keyboard, bots, and mouse when not instant)', min: 100, max: 1500, step: 50, default: 900 },
-    { type: 'number', key: 'roundsToWin', label: 'Rounds to win', min: 1, max: 9, step: 1, default: 3 },
+    // Balls
+    { type: 'number', key: 'maxBalls', label: 'Max balls', min: 1, max: 8, step: 1, default: 4, group: 'balls' },
+    { type: 'number', key: 'ballInterval', label: 'Seconds between new balls', min: 3, max: 30, step: 1, default: 6, group: 'balls' },
+    { type: 'number', key: 'ballSpeed', label: 'Ball speed', min: 150, max: 700, step: 10, default: 380, group: 'balls' },
+    { type: 'number', key: 'maxSpeedMult', label: 'Top ball speed, x base (speed-up and hold release)', min: 1.2, max: 8, step: 0.1, default: 3.5, group: 'balls' },
+    // Paddle & controls
+    { type: 'boolean', key: 'instantMouse', label: 'Mouse moves paddle instantly', default: true, group: 'controls' },
+    { type: 'number', key: 'paddleSpeed', label: 'Paddle speed (keyboard, bots, and mouse when not instant)', min: 100, max: 1500, step: 50, default: 900, group: 'controls' },
+    // Speed-up
+    { type: 'boolean', key: 'speedUp', label: 'Balls speed up when hit by a paddle', default: true, group: 'speedup' },
+    { type: 'number', key: 'speedUpStrength', label: 'Speed-up strength: paddle swing + shallow angles (only with speed-up on)', min: 0.1, max: 3, step: 0.1, default: 1.6, group: 'speedup' },
+    { type: 'number', key: 'hitBoost', label: 'Speed multiplier on EVERY paddle hit (only with speed-up on; 1 = none)', min: 1, max: 1.5, step: 0.01, default: 1.1, group: 'speedup' },
+    { type: 'number', key: 'speedDecay', label: 'Slow-down of fast balls per second (only with speed-up on)', min: 0, max: 1, step: 0.05, default: 0.05, group: 'speedup' },
+    // Holding balls
+    { type: 'boolean', key: 'holdEnabled', label: 'Hold the mouse button / Space to catch a ball on your paddle', default: true, group: 'hold' },
+    { type: 'boolean', key: 'holdInfinite', label: 'Infinite hold: keep the ball as long as the button is down (off = temporary hold, see max seconds)', default: false, group: 'hold' },
+    { type: 'number', key: 'holdMax', label: 'Max seconds a ball can be held (only with hold on and infinite hold off)', min: 1, max: 15, step: 1, default: 4, group: 'hold' },
+    { type: 'number', key: 'releaseMinSpeed', label: 'Minimum speed of a released ball, x base (only with hold on)', min: 1, max: 3, step: 0.1, default: 1.3, group: 'hold' },
+    { type: 'number', key: 'releaseSpeedGain', label: 'Extra release speed per paddle speed (only with hold on; 0 = always the minimum)', min: 0, max: 2, step: 0.1, default: 0.6, group: 'hold' },
   ],
 };
 

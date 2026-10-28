@@ -1092,7 +1092,7 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 
 | File | Shows |
 |---|---|
-| `shared.js` | `meta` with all setting types, seat names/colors and `soloSettings`; geometry helpers used identically by server and client; ECS component tokens |
+| `shared.js` | `meta` with all setting types, five setting groups (two collapsed by default, see 6.2), seat names/colors and `soloSettings`; geometry helpers used identically by server and client; ECS component tokens |
 | `server.js` | multi-round state machine (`countdown` → `playing` → `roundOver`), systems (bots, paddles, spawning, balls), ECS `World` recreated per round, collision substeps to avoid tunnelling, bots from `ctx.bots`, fast-forward when only bots are left |
 | `client.js` | Three.js scene (orthographic camera), a client-side ECS `World` with a client-only `Render` component, `SnapshotBuffer` interpolation, mouse + keyboard input, client-side prediction for the player's own paddle, spectator mode, HUD/banner overlays, sound effects from files with synth fallback, full `dispose()` |
 
