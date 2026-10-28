@@ -3,7 +3,7 @@ import { World, defineComponent } from '../../shared/ecs.js';
 import { SnapshotBuffer, lerp } from '../../shared/interp.js';
 import {
   ARENA, BALL_R, BRICK_CELLS, BallC, BrickC, KingC, PaddleC, Pos, Vel,
-  brickRect, clockwiseSign, kingRect, launchDir, meta, paddleRects, tFromPoint,
+  brickRect, clockwiseSign, kingRect, meta, paddleRects, tFromPoint,
 } from './shared.js';
 import { Sfx } from './audio.js';
 
@@ -30,7 +30,7 @@ const easeOutBack = (x) => 1 + 2.70158 * (x - 1) ** 3 + 1.70158 * (x - 1) ** 2;
  *
  * Controls: the mouse "points" at what you want to defend against and your paddle slides around
  * your base to that side (see tFromPoint); arrow keys / WASD also work, M mutes. Hold the mouse
- * button (or Space) while a ball touches the front of your paddle to catch it; let go to launch it
+ * button (or Space) while a ball touches your paddle (anywhere on it) to catch it; let go to launch it
  * (a line is drawn showing where it will go). With "instant
  * mouse" on, your own paddle is drawn at the mouse position immediately (client-side
  * prediction), so it never feels laggy.
@@ -71,6 +71,7 @@ class WarlordsView {
     this.last = performance.now();
     this.colors = COLORS.map((c) => new THREE.Color(c));
     this.white = new THREE.Color('#ffffff');
+    this.blue = new THREE.Color('#3b9eff');
     this.planeGeo = new THREE.PlaneGeometry(1, 1);
     this.circleGeo = new THREE.CircleGeometry(BALL_R, 24);
     this.ringGeo = new THREE.RingGeometry(0.82, 1, 40);
@@ -321,6 +322,9 @@ class WarlordsView {
       v.y = nb.vy;
       v.sp = lerp(Math.hypot(prev.vx ?? nb.vx, prev.vy ?? nb.vy), Math.hypot(nb.vx, nb.vy), alpha);
       v.h = nb.h ?? 0; // held by slot (h - 1)
+      v.ax = nb.ax ?? 0; // launch direction while held (server computed)
+      v.ay = nb.ay ?? 0;
+      v.c = nb.c ?? 0; //   pickup cooldown: 1 = just launched (blue) -> 0 = white
       seen.add(nb.id);
     }
     for (const [id, e] of this.balls) {
@@ -383,9 +387,10 @@ class WarlordsView {
       outer.scale.set(pop * (1 - 0.8 * sq), pop * (1 + 0.5 * sq), 1);
       inner.rotation.z = velAng - j.ang;
       inner.scale.set(stretch, 1 / Math.sqrt(stretch), 1);
-      aim.visible = v.h > 0;
+      inner.material.color.copy(this.white).lerp(this.blue, clamp(v.c, 0, 1)); // blue right after launch, fading back to white
+      aim.visible = v.h > 0 && (v.ax !== 0 || v.ay !== 0);
       if (aim.visible) { // where the ball will go if released now
-        const d = launchDir(v.h - 1, p.x, p.y);
+        const d = { x: v.ax, y: v.ay };
         const len = 90;
         aim.position.set(p.x + d.x * (BALL_R + len / 2), ARENA - (p.y + d.y * (BALL_R + len / 2)), 0.08);
         aim.rotation.z = Math.atan2(-d.y, d.x);

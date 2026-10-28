@@ -135,65 +135,147 @@ export function tFromPoint(slot, x, y) {
 }
 
 // ── holding a ball ──
-// A held ball rides on the FRONT of the paddle (the side facing the middle of the arena), at a fixed
-// place along the paddle. Its path is the outline of the "┘" paddle shape offset by the ball radius:
-// two straight lines joined by a quarter circle around the outer corner of the elbow. Both the
-// server (to move the ball) and the client (to aim) use these helpers.
-const HOLD_R = BALL_R + 0.5; //                      stand-off from the paddle face (a hair more than touching)
-const HOLD_O = PAD_C + PADDLE_THICK / 2; //          outer corner of the elbow, in (u, v)
-const HOLD_A = (Math.PI * HOLD_R) / 4; //            half the length of the rounded part
-const HOLD_K = PADDLE_THICK / 2 + HOLD_A;
-/** Launch rays start this far inside the arena corner (not in it), so the extremes are never exactly horizontal / vertical. */
-export const HOLD_ORIGIN = 40;
-
-// centre-line arc s -> outline arc w, for a paddle centred at t. A straight paddle (one arm only) maps
-// exactly (w = s +- HOLD_K). A paddle bent round the corner maps exactly too, except within half a
-// thickness of the corner, where it is stretched so the ball swings smoothly round the elbow.
+// A held ball is glued to the paddle exactly where it touched it, so it can sit on the front, on either
+// end or on the back. Two numbers place it (see `h` = { off, d } in the server):
+//   off  arc length along the track from the paddle's centre (like `t`, so the ball rides along when the paddle moves)
+//   d    distance of the ball's centre from the paddle's centre line: > PADDLE_THICK / 2 in front of the paddle,
+//        <= PADDLE_THICK / 2 beside an end or behind it
+// In front of the paddle the ball follows the outline of the "┘" shape offset by its distance from the face: two straight
+// lines joined by a quarter circle around the outer corner of the elbow. Beside an end or behind the paddle it follows the
+// straight arm. Both the server (to move the ball) and the client (to aim) use these helpers.
 const HALF_T = PADDLE_THICK / 2;
-const bentAt = (t) => t - PADDLE_LEN / 2 < 0 && t + PADDLE_LEN / 2 > 0;
-function outlineW(s, t) {
-  if (!bentAt(t)) return s + HOLD_K * (t > 0 ? 1 : -1);
-  return Math.abs(s) >= HALF_T ? s + HOLD_K * Math.sign(s) : (s * (HALF_T + HOLD_K)) / HALF_T;
+const HOLD_R = BALL_R + 0.5; //                      default stand-off from the paddle face (a hair more than touching)
+const HOLD_O = PAD_C + HALF_T; //                    outer corner of the elbow, in (u, v)
+/** Default `d`: a ball sitting in front of the paddle. */
+export const HOLD_D = HALF_T + HOLD_R;
+/**
+ * Launch rays start this far inside the arena corner, in both directions. It equals half a paddle, which
+ * is exactly how far from the wall the paddle's middle is at either extreme, so a ball held on the front
+ * at an extreme leaves exactly along the wall (a cardinal direction).
+ */
+export const HOLD_ORIGIN = PADDLE_LEN / 2;
+
+const arcA = (e) => (Math.PI * e) / 4; //            half the length of the rounded part, for a ball e in front of the face
+/** 0 while the paddle lies straight on one arm, 1 once it is bent round the corner by at least half a thickness; smooth in between. */
+const bendAt = (t) => Math.max(0, Math.min(1, Math.min(PADDLE_LEN / 2 - t, t + PADDLE_LEN / 2) / HALF_T));
+
+// centre-line arc s -> outline arc w, for a paddle centred at t and a ball e in front of its face. A straight paddle
+// (one arm only) maps exactly (w = s +- K). A paddle bent round the corner maps exactly too, except within half a
+// thickness of the corner, where it is stretched so the ball swings smoothly round the elbow. The two maps are
+// blended while the paddle starts to bend, so a ball near a paddle end never jumps. (w is a piecewise linear,
+// increasing function of s with its breakpoints at s = +-HALF_T, which makes the inverse exact.)
+function outlineW(s, t, e) {
+  const k = HALF_T + arcA(e);
+  const w0 = s + k * (t > 0 ? 1 : -1);
+  const w1 = Math.abs(s) >= HALF_T ? s + k * Math.sign(s) : (s * (HALF_T + k)) / HALF_T;
+  const beta = bendAt(t);
+  return w0 + beta * (w1 - w0);
 }
-function outlineS(w, t) {
-  if (!bentAt(t)) return w - HOLD_K * (t > 0 ? 1 : -1);
-  return Math.abs(w) >= HALF_T + HOLD_K ? w - HOLD_K * Math.sign(w) : (w * HALF_T) / (HALF_T + HOLD_K);
+function outlineS(w, t, e) {
+  const hi = outlineW(HALF_T, t, e);
+  const lo = outlineW(-HALF_T, t, e);
+  if (w >= hi) return HALF_T + (w - hi);
+  if (w <= lo) return -HALF_T + (w - lo);
+  return -HALF_T + ((w - lo) * 2 * HALF_T) / (hi - lo);
 }
 
-/** World position of a held ball sitting at track position s (arc length from the inner corner, like `t`) of a paddle centred at t. */
-export function heldPoint(slot, s, t) {
-  const w = outlineW(s, t);
+// Beside an end or behind the paddle the ball follows the straight arm; round the elbow the two arms are blended
+// (over SIDE_BLEND px each side of the corner) so a ball off the centre line swings round instead of jumping.
+const SIDE_BLEND = 14;
+function sideUV(s, d) {
+  const x = Math.max(0, Math.min(1, (s + SIDE_BLEND) / (2 * SIDE_BLEND)));
+  const lam = x * x * (3 - 2 * x); // 0 = on the vertical arm, 1 = on the horizontal arm
+  return { lam, u: lam * (PAD_C - s) + (1 - lam) * (PAD_C + d), v: lam * (PAD_C + d) + (1 - lam) * (PAD_C + s) };
+}
+
+/** World position of a held ball at track position s (arc length from the inner corner, like `t`), distance d from the centre line, of a paddle centred at t. */
+export function heldPoint(slot, s, t, d = HOLD_D) {
   let u;
   let v;
-  if (w >= HOLD_A) { u = HOLD_O - (w - HOLD_A); v = HOLD_O + HOLD_R; } //        in front of the horizontal arm
-  else if (w <= -HOLD_A) { u = HOLD_O + HOLD_R; v = HOLD_O + (w + HOLD_A); } //   in front of the vertical arm
-  else {
-    const phi = Math.PI / 4 - w / HOLD_R; //                                        around the elbow
-    u = HOLD_O + HOLD_R * Math.sin(phi);
-    v = HOLD_O + HOLD_R * Math.cos(phi);
-  }
+  if (d > HALF_T) { //                                                              in front of the paddle
+    const e = d - HALF_T;
+    const a = arcA(e);
+    const w = outlineW(s, t, e);
+    if (w >= a) { u = HOLD_O - (w - a); v = HOLD_O + e; } //                        in front of the horizontal arm
+    else if (w <= -a) { u = HOLD_O + e; v = HOLD_O + (w + a); } //                  in front of the vertical arm
+    else {
+      const phi = Math.PI / 4 - w / e; //                                           around the elbow
+      u = HOLD_O + e * Math.sin(phi);
+      v = HOLD_O + e * Math.cos(phi);
+    }
+  } else ({ u, v } = sideUV(s, d)); //                                              beside an end / behind
   return { x: slot & 1 ? ARENA - u : u, y: slot >> 1 ? ARENA - v : v };
 }
 
-/** Inverse of heldPoint: the track position s of a paddle centred at t that the ball at (x, y) is sitting in front of. */
-export function heldS(slot, x, y, t) {
-  const du = (slot & 1 ? ARENA - x : x) - HOLD_O;
-  const dv = (slot >> 1 ? ARENA - y : y) - HOLD_O;
-  let w;
-  if (du > 0 && dv > 0) w = HOLD_R * (Math.PI / 4 - Math.atan2(du, dv));
-  else if (du <= 0 && (dv > 0 || -du >= -dv)) w = HOLD_A - du;
-  else w = -HOLD_A + dv;
-  return outlineS(w, t);
+/**
+ * Inverse of heldPoint: the track position s and centre-line distance d of the ball at (x, y), for a paddle centred at t.
+ * `horiz` says which of the paddle's rectangles the ball touched; it only matters beside / behind the paddle.
+ */
+export function heldCoords(slot, x, y, t, horiz) {
+  const u = slot & 1 ? ARENA - x : x;
+  const v = slot >> 1 ? ARENA - y : y;
+  const du = u - HOLD_O;
+  const dv = v - HOLD_O;
+  if (dv > 0 || du > 0) { // in front of the paddle (or round its elbow)
+    let e;
+    let w;
+    if (du > 0 && dv > 0) { e = Math.hypot(du, dv); w = e * (Math.PI / 4 - Math.atan2(du, dv)); }
+    else if (dv > 0) { e = dv; w = arcA(e) - du; }
+    else { e = du; w = -arcA(e) + dv; }
+    return { s: outlineS(w, t, e), d: HALF_T + e };
+  }
+  const sh = PAD_C - u; //  arc position on the horizontal arm, valid when > 0
+  const sv = v - PAD_C; //  arc position on the vertical arm, valid when <= 0
+  const useH = sh > 0 && (horiz || !(sv <= 0));
+  let s = useH ? sh : sv <= 0 ? sv : 0; // first guess: the straight arm the ball touched
+  let d = useH ? v - PAD_C : sv <= 0 ? u - PAD_C : v - PAD_C;
+  for (let i = 0; i < 10; i++) { // a few Newton steps make this the exact inverse of the blended mapping near the corner
+    const q = sideUV(s, d);
+    const eu = u - q.u;
+    const ev = v - q.v;
+    const a = -q.lam;
+    const b = 1 - q.lam;
+    const det = a * q.lam - b * b;
+    s += (q.lam * eu - b * ev) / det;
+    d += (-b * eu + a * ev) / det;
+  }
+  return { s, d };
 }
 
-/** Direction (unit vector) a ball held at (x, y) is released in: along the line from a point just inside the corner through the ball. */
-export function launchDir(slot, x, y) {
+/** Point on the centre line of the track at arc position s (like `t`), in world coordinates. */
+export function trackPoint(slot, s) {
+  const u = s >= 0 ? PAD_C - s : PAD_C;
+  const v = s >= 0 ? PAD_C : PAD_C + s;
+  return { x: slot & 1 ? ARENA - u : u, y: slot >> 1 ? ARENA - v : v };
+}
+
+/** World position of a held ball `h` = { off, d } for a paddle centred at t. */
+export function heldPos(slot, t, h) {
+  return heldPoint(slot, t + h.off, t, h.d);
+}
+
+/**
+ * Direction (unit vector) a held ball is released in. Two vectors are combined (their angles averaged):
+ *  A: from a point just inside the arena corner (HOLD_ORIGIN) to the middle of the paddle,
+ *  B: from the middle of the paddle to the ball.
+ * A ball on the FRONT at one of the two extreme paddle positions gets two parallel vectors along the wall, so it
+ * shoots exactly along it (straight down the left wall / straight right along the top wall for the top-left corner).
+ * A ball on a side or the back combines the same way, so it still goes sideways.
+ */
+export function launchVec(slot, t, h) {
+  const b = heldPos(slot, t, h);
+  const m = trackPoint(slot, t);
   const qx = slot & 1 ? ARENA - HOLD_ORIGIN : HOLD_ORIGIN;
   const qy = slot >> 1 ? ARENA - HOLD_ORIGIN : HOLD_ORIGIN;
-  const dx = x - qx;
-  const dy = y - qy;
-  const len = Math.hypot(dx, dy) || 1;
-  return { x: dx / len, y: dy / len };
+  const unit = (x, y) => {
+    const l = Math.hypot(x, y) || 1;
+    return { x: Math.abs(x / l) < 1e-9 ? 0 : x / l, y: Math.abs(y / l) < 1e-9 ? 0 : y / l }; // snap rounding dust, so "exactly cardinal" is exact
+  };
+  const A = unit(m.x - qx, m.y - qy);
+  const B = unit(b.x - m.x, b.y - m.y);
+  const sx = A.x + B.x;
+  const sy = A.y + B.y;
+  return Math.hypot(sx, sy) < 1e-6 ? A : unit(sx, sy);
 }
 
 /** +1 if increasing t moves the paddle clockwise around the base on screen for this corner, else -1. */

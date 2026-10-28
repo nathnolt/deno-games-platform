@@ -1,7 +1,7 @@
 import { World } from '../../shared/ecs.js';
 import {
   ARENA, BALL_R, BRICK_CELLS, TRACK, BallC, BrickC, KingC, PaddleC, Pos, Vel,
-  PAD_C, PADDLE_THICK, PADDLE_LEN, brickRect, circleRect, heldPoint, heldS, kingRect, launchDir, meta, paddleRects, tFromPoint,
+  PAD_C, PADDLE_THICK, brickRect, circleRect, heldCoords, heldPos, kingRect, launchVec, meta, paddleRects, tFromPoint,
 } from './shared.js';
 
 const SLOTS = [0, 1, 2, 3];
@@ -20,6 +20,7 @@ const MIN_FORWARD = 0.3; //      after a paddle hit at least this fraction of th
 const MAX_EVENTS = 40; //        per snapshot
 const PEAK_WINDOW = 0.12; //     s: a release uses the paddle's fastest recent speed, so letting go isn't punished for a hand that slowed down
 const HOLD_COOLDOWN = 0.4; //    seconds before a paddle can catch again after releasing
+const PICKUP_COOLDOWN = 0.25; // seconds a just-launched ball (drawn blue) cannot be caught, and passes through the paddle that launched it
 
 // ── bots ──
 // speed:   fraction of the paddle speed while positioning
@@ -56,7 +57,8 @@ class WarlordsGame {
     this.holding = [false, false, false, false]; // hold button is down (humans only)
     this.holdCool = [0, 0, 0, 0];
     this.holdLock = [false, false, false, false]; // a timed-out hold must be released and pressed again before it can catch again
-    this.held = new Map(); // ball entity -> {slot, off, since, peak}: balls riding on a paddle
+    this.held = new Map(); // ball entity -> {slot, off, d, since, peak}: balls riding on a paddle
+    this.fresh = new Map(); // ball entity -> {slot, left}: just launched; can't be caught and ignores the launching paddle
     this.botState = [null, null, null, null];
     this.scores = [0, 0, 0, 0];
     this.phase = 'countdown';
@@ -157,7 +159,17 @@ class WarlordsGame {
       const v = w.get(e, Vel);
       const held = this.held.get(e);
       const b = { id: w.get(e, BallC).id, x: r1(p.x), y: r1(p.y), vx: Math.round(v.x), vy: Math.round(v.y) };
-      if (held) b.h = held.slot + 1; // held by this slot (+1 so 0/undefined means free)
+      if (held) {
+        b.h = held.slot + 1; // held by this slot (+1 so 0/undefined means free)
+        const pe = w.query(PaddleC).find((x) => w.get(x, PaddleC).slot === held.slot);
+        if (pe !== undefined) {
+          const d = launchVec(held.slot, w.get(pe, PaddleC).t, held);
+          b.ax = r2(d.x); // where the ball would fly if released now (for the aim line)
+          b.ay = r2(d.y);
+        }
+      }
+      const fr = this.fresh.get(e);
+      if (fr) b.c = r2(fr.left / PICKUP_COOLDOWN); // 1 -> 0: blue fading back to white
       return b;
     });
     return {
@@ -195,6 +207,7 @@ class WarlordsGame {
     this.holdCool = [0, 0, 0, 0];
     this.holdLock = [false, false, false, false];
     this.held = new Map();
+    this.fresh = new Map();
     for (const slot of SLOTS) if (this.bot[slot]) this.botState[slot] = newBotState();
     this.phase = 'countdown';
     this.timer = COUNTDOWN;
@@ -364,8 +377,8 @@ class WarlordsGame {
       let bestT = 0;
       let bestErr = Infinity;
       for (let t = -TRACK; t <= TRACK; t += 6) {
-        const bp = heldPoint(slot, t + h.off, t);
-        const d = launchDir(slot, bp.x, bp.y);
+        const bp = heldPos(slot, t, h);
+        const d = launchVec(slot, t, h);
         const tx = king.x - bp.x;
         const ty = king.y - bp.y;
         const err = Math.acos(clamp((d.x * tx + d.y * ty) / (Math.hypot(tx, ty) || 1), -1, 1));
@@ -463,17 +476,27 @@ class WarlordsGame {
   #holdSystem(dt) {
     const w = this.world;
     for (let slot = 0; slot < 4; slot++) this.holdCool[slot] = Math.max(0, this.holdCool[slot] - dt);
+    for (const [e, f] of [...this.fresh]) {
+      f.left -= dt;
+      if (f.left <= 0) this.fresh.delete(e);
+    }
     for (const [e, h] of [...this.held]) {
       const p = w.get(e, Pos);
       const v = w.get(e, Vel);
       const pe = w.query(PaddleC).find((x) => w.get(x, PaddleC).slot === h.slot);
       h.since += dt;
       h.peak *= Math.exp(-dt / PEAK_WINDOW);
+      let d = null;
       if (pe !== undefined) {
         const pd = w.get(pe, PaddleC);
-        const pt = heldPoint(h.slot, pd.t + h.off, pd.t);
+        const pt = heldPos(h.slot, pd.t, h);
         p.x = pt.x;
         p.y = pt.y;
+        for (const r of paddleRects(h.slot, pd.t)) { // where the paddle bends round the elbow the ball must never end up inside it
+          const hit = circleRect(p.x, p.y, BALL_R, r);
+          if (hit) { p.x += hit.nx * hit.depth; p.y += hit.ny * hit.depth; }
+        }
+        d = launchVec(h.slot, pd.t, h);
         h.peak = Math.max(h.peak, Math.abs(pd.ds));
       }
       const timedOut = !this.s.holdInfinite && h.since >= this.s.holdMax;
@@ -483,11 +506,11 @@ class WarlordsGame {
       // on how fast the paddle was moving (never below the minimum, never above the top speed)
       const base = this.s.ballSpeed;
       const speed = clamp(base * this.s.releaseMinSpeed + h.peak * this.s.releaseSpeedGain, base, base * this.s.maxSpeedMult);
-      const d = launchDir(h.slot, p.x, p.y);
+      d ??= { x: Math.sign(p.x - ARENA / 2) || 1, y: 0 }; // paddle is gone (base destroyed): just let it go
       v.x = d.x * speed;
       v.y = d.y * speed;
-      this.#normalize(v, speed);
       this.held.delete(e);
+      this.fresh.set(e, { slot: h.slot, left: PICKUP_COOLDOWN });
       this.holdCool[h.slot] = HOLD_COOLDOWN;
       this.#emit('launch', p, v, d.x, d.y, w.get(e, BallC).id, { s: h.slot });
     }
@@ -503,6 +526,7 @@ class WarlordsGame {
 
     for (const e of w.query(PaddleC)) {
       const pd = w.get(e, PaddleC);
+      if (this.fresh.get(e0)?.slot === pd.slot) continue; // just launched from this paddle: pass through it, don't bounce
       for (const r of paddleRects(pd.slot, pd.t)) {
         const hit = circleRect(p.x, p.y, BALL_R, r);
         if (!hit) continue;
@@ -530,7 +554,7 @@ class WarlordsGame {
   }
 
   /**
-   * Ball meets paddle. If the player is holding the button and the ball touches the front, it is caught.
+   * Ball meets paddle. If the player is holding the button the ball is caught wherever it touches the paddle (front, ends, back).
    * Otherwise, in the paddle's own frame (n = away from the paddle surface, t = along it):
    *  1. reflect the ball;
    *  2. "English": hitting the paddle off-centre bends the ball sideways;
@@ -548,13 +572,16 @@ class WarlordsGame {
     const speedUp = this.s.speedUp;
     const slot = pd.slot;
 
-    // catch: button down, nothing held yet, and the ball touched the FRONT face (the side facing the arena)
-    const front = hit.nx * r.fx + hit.ny * r.fy >= 0.5;
+    // catch: button down, nothing held yet, ball not in its post-launch cooldown. The ball can touch ANY part
+    // of the paddle (front, either end, back) and then stays exactly where it touched.
     // (a paddle that already holds a ball just bounces any other ball that touches it)
-    if (this.s.holdEnabled && front && this.holding[slot] && !this.holdLock[slot] && this.holdCool[slot] <= 0 && ![...this.held.values()].some((h) => h.slot === slot)) {
-      const off = clamp(heldS(slot, p.x, p.y, pd.t) - pd.t, -PADDLE_LEN / 2, PADDLE_LEN / 2);
-      this.held.set(e, { slot, off, since: 0, peak: 0 });
-      const pt = heldPoint(slot, pd.t + off, pd.t);
+    if (this.s.holdEnabled && this.holding[slot] && !this.holdLock[slot] && this.holdCool[slot] <= 0 && !this.fresh.has(e) && ![...this.held.values()].some((h) => h.slot === slot)) {
+      p.x += hit.nx * hit.depth; // resting on the surface, not sunk into it
+      p.y += hit.ny * hit.depth;
+      const c = heldCoords(slot, p.x, p.y, pd.t, r.horiz);
+      const h = { slot, off: c.s - pd.t, d: c.d, since: 0, peak: 0 };
+      this.held.set(e, h);
+      const pt = heldPos(slot, pd.t, h);
       p.x = pt.x;
       p.y = pt.y;
       this.#emit('catch', p, v, hit.nx, hit.ny, id, { s: slot });
