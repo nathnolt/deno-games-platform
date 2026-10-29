@@ -5,7 +5,9 @@
 //   battle  aim with the mouse and bombard the other players' walls and cannons
 //   build   rebuild your walls with random Tetris-style pieces to close your castle again
 // You may only use cannons that stand inside an unbroken wall. Enclosing a castle claims it (more cannons).
-// If no castle of yours is enclosed when the build phase ends, you lose a life.
+// Walls can only go on open ground, and never inside another player's castle zone or enclosed territory.
+// You lose a life if no castle of yours is enclosed when the build phase ends, or if you are owed new cannons
+// but your territory has no room for even one.
 
 // ── meta ──
 /** @type {import('../../shared/settings.js').GameMeta} */
@@ -23,6 +25,7 @@ export const meta = {
     { id: 'match', label: 'Match' },
     { id: 'timing', label: 'Phase timers' },
     { id: 'battle', label: 'Cannons & battle' },
+    { id: 'building', label: 'Wall building' },
     { id: 'castles', label: 'Castles & cannon rewards', collapsed: true },
   ],
   settings: [
@@ -41,6 +44,15 @@ export const meta = {
     { type: 'number', key: 'reload', label: 'Cannon reload time (seconds)', min: 0.8, max: 6, step: 0.1, default: 2.4, group: 'battle' },
     { type: 'number', key: 'ballSpeed', label: 'Cannonball speed (pixels per second)', min: 200, max: 900, step: 10, default: 420, group: 'battle' },
     { type: 'number', key: 'cannonHp', label: 'Hits a cannon survives (1 = destroyed by one hit)', min: 1, max: 4, step: 1, default: 2, group: 'battle' },
+    // Wall building
+    {
+      type: 'select', key: 'discard', label: 'Throwing away a wall piece ("block cancelling")', default: 'any', group: 'building',
+      options: [
+        { value: 'any', label: 'Any time (1 second cooldown)' },
+        { value: 'stuck', label: 'Only when it fits nowhere' },
+        { value: 'never', label: 'Never' },
+      ],
+    },
     // Castles
     { type: 'number', key: 'cannonsHome', label: 'New cannons per round for your home castle', min: 1, max: 4, step: 1, default: 2, group: 'castles' },
     { type: 'number', key: 'cannonsPerKeep', label: 'New cannons per round for each other castle you hold', min: 0, max: 3, step: 1, default: 1, group: 'castles' },
@@ -95,6 +107,27 @@ export const RING_TILES = KEEPS.map((_, k) => {
   }
   return out;
 });
+/**
+ * Protected zones. While a castle belongs to a living player, nobody else may put a wall piece in its ring or in
+ * the ZONE_PAD tiles just outside it, even where the ring is broken. (Without this you could plug the holes in
+ * somebody's wall and stop them from closing their castle.)
+ */
+export const ZONE_PAD = 1;
+/** tile -> the keeps whose zone covers it (zones of neighbouring castles can overlap) */
+export const ZONE_KEEPS = Array.from({ length: N }, () => []);
+KEEPS.forEach((_, k) => {
+  const { x0, y0, x1, y1 } = ringRect(k);
+  for (let y = y0 - ZONE_PAD; y <= y1 + ZONE_PAD; y++) for (let x = x0 - ZONE_PAD; x <= x1 + ZONE_PAD; x++) if (inb(x, y)) ZONE_KEEPS[idx(x, y)].push(k);
+});
+/** Is tile `i` in the zone of a castle that a living player other than `slot` owns? (keepOwner: keep index -> slot or -1) */
+export function inForeignZone(slot, i, keepOwner, alive) {
+  for (const k of ZONE_KEEPS[i]) {
+    const o = keepOwner[k];
+    if (o >= 0 && o !== slot && alive[o]) return true;
+  }
+  return false;
+}
+
 export const isRingCorner = (k, x, y) => {
   const { x0, y0, x1, y1 } = ringRect(k);
   return (x === x0 || x === x1) && (y === y0 || y === y1);

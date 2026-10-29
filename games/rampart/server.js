@@ -1,6 +1,6 @@
 import {
   COLS, ROWS, TILE, N, ARENA_W, ARENA_H, HIT_R, TERRAIN, KEEPS, KEEP_AT, RING_TILES, ringRect, isRingCorner,
-  PIECES, PIECE_WEIGHTS, pieceCells, idx, inb, meta,
+  PIECES, PIECE_WEIGHTS, pieceCells, idx, inb, inForeignZone, meta,
 } from './shared.js';
 
 const SLOTS = [0, 1, 2, 3];
@@ -102,7 +102,7 @@ class RampartsGame {
         this.#placePiece(slot, data.p[0], data.p[1], data.p[2] & 3);
       }
     } else if (data.d === 1) {
-      if (this.phase === 'build' && this.skipCool[slot] <= 0) { // the piece cannot be placed anywhere: throw it away
+      if (this.phase === 'build' && this.skipCool[slot] <= 0 && this.#canDiscard(slot)) { // throw the piece away (if the room's rule allows it)
         this.pieceIdx[slot]++;
         this.skipCool[slot] = SKIP_COOLDOWN;
       }
@@ -212,12 +212,37 @@ class RampartsGame {
       });
       if (a > 0) a = Math.max(a, MIN_CANNONS - this.#cannonCount(slot)); // catch-up: a player who still holds a castle can always get back to 2 cannons
       a = Math.min(a, this.s.maxCannons - this.#cannonCount(slot));
-      this.allow[slot] = Math.max(0, a);
+      if (a > 0 && !this.#hasCannonSpot(slot)) a = this.#noRoom(slot); // owed cannons but nowhere to put even one: lose a life
+      this.allow[slot] = this.alive[slot] ? Math.max(0, a) : 0;
       if (!this.#hasCannonSpot(slot)) this.allow[slot] = 0;
       const bs = this.botState[slot];
       if (bs) bs.t = rnd(0.5, 1.2);
     }
+    const reason = this.#endReason(false); // a life lost above can end the match
+    if (reason) {
+      this.final = this.#result(reason);
+      this.phase = 'result';
+      this.timer = RESULT_TIME;
+      this.events.push({ k: 'p', n: 'result' });
+      return;
+    }
     this.events.push({ k: 'p', n: 'place' });
+  }
+
+  /**
+   * A player who is owed new cannons but has no free spot for any of them loses a life, just like failing to close a
+   * castle. Like a "continue" in the arcade, the survivor starts over: their cannons are removed and the home castle
+   * gets a fresh ring of walls with a clear inside. Returns how many cannons they may place now (0 if eliminated).
+   */
+  #noRoom(slot) {
+    this.lives[slot]--;
+    this.events.push({ k: 'l', o: slot, r: 'room' });
+    if (this.lives[slot] <= 0) { this.#eliminate(slot); return 0; }
+    for (const c of [...this.cannons.values()]) if (c.slot === slot) this.#removeCannon(c);
+    const { x0, y0, x1, y1 } = ringRect(slot);
+    for (let y = y0 + 1; y < y1; y++) for (let x = x0 + 1; x < x1; x++) if (inb(x, y) && this.wall[idx(x, y)] === slot) this.wall[idx(x, y)] = -1;
+    this.#resetHome(slot);
+    return Math.min(this.s.cannonsHome, this.s.maxCannons);
   }
 
   #startBattle() {
@@ -272,16 +297,20 @@ class RampartsGame {
       }
     }
     // 3. is the match over?
-    const alive = SLOTS.filter((s) => this.alive[s]);
-    const humansAlive = alive.some((s) => !this.bot[s]);
-    let reason = null;
-    if (alive.length <= 1) reason = 'last';
-    else if (!humansAlive) reason = 'humans-out';
-    else if (this.round >= this.s.maxRounds) reason = 'rounds';
+    const reason = this.#endReason(true);
     if (reason) this.final = this.#result(reason);
     this.phase = 'result';
     this.timer = RESULT_TIME;
     this.events.push({ k: 'p', n: 'result' });
+  }
+
+  /** Why the match is over right now, or null. The round limit is only checked at the end of a round (checkRounds). */
+  #endReason(checkRounds) {
+    const alive = SLOTS.filter((s) => this.alive[s]);
+    if (alive.length <= 1) return 'last';
+    if (!alive.some((s) => !this.bot[s])) return 'humans-out';
+    if (checkRounds && this.round >= this.s.maxRounds) return 'rounds';
+    return null;
   }
 
   #result(reason) {
@@ -496,7 +525,40 @@ class RampartsGame {
 
   #pieceAt(i) { return this.seq[i % SEQ_LEN]; }
 
+  /** Open ground: not water, wall, castle or cannon. */
   #tileFree(i) { return !TERRAIN[i] && this.wall[i] === -1 && KEEP_AT[i] < 0 && !this.occ[i]; }
+
+  /** Is tile i off limits to `slot` because it lies in another player's castle zone or enclosed territory? */
+  #blockedFor(slot, i) {
+    if (inForeignZone(slot, i, this.keepOwner, this.alive)) return true;
+    for (const s of SLOTS) if (s !== slot && this.alive[s] && this.terr[s][i]) return true;
+    return false;
+  }
+
+  /** Can `slot` put a wall on tile i? Open ground that is not inside somebody else's base. */
+  #buildable(slot, i) { return this.#tileFree(i) && !this.#blockedFor(slot, i); }
+
+  /** Does the slot's current piece fit anywhere (in any rotation)? */
+  #pieceFitsAnywhere(slot) {
+    const type = this.#pieceAt(this.pieceIdx[slot]);
+    for (let rot = 0; rot < 4; rot++) {
+      const cells = pieceCells(type, rot);
+      for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+          if (cells.every(([cx, cy]) => inb(x + cx, y + cy) && this.#buildable(slot, (y + cy) * COLS + x + cx))) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** The "discard" setting: 'any' = whenever, 'stuck' = only if the piece fits nowhere, 'never'. */
+  #canDiscard(slot) {
+    const mode = this.s.discard;
+    if (mode === 'never') return false;
+    if (mode === 'stuck') return !this.#pieceFitsAnywhere(slot);
+    return true;
+  }
 
   #placePiece(slot, x, y, rot) {
     const cells = pieceCells(this.#pieceAt(this.pieceIdx[slot]), rot);
@@ -504,7 +566,7 @@ class RampartsGame {
     for (const [cx, cy] of cells) {
       const tx = x + cx;
       const ty = y + cy;
-      if (!inb(tx, ty) || !this.#tileFree(ty * COLS + tx)) return false;
+      if (!inb(tx, ty) || !this.#buildable(slot, ty * COLS + tx)) return false;
       tiles.push(ty * COLS + tx);
     }
     for (const i of tiles) this.wall[i] = slot;
@@ -612,7 +674,7 @@ class RampartsGame {
             const ty = y + cy;
             if (!inb(tx, ty)) { ok = false; break; }
             const i = ty * COLS + tx;
-            if (!this.#tileFree(i)) { ok = false; break; }
+            if (!this.#buildable(slot, i)) { ok = false; break; }
             sc += want[i];
             if ((tx > 0 && this.wall[i - 1] === slot) || (tx < COLS - 1 && this.wall[i + 1] === slot) || (ty > 0 && this.wall[i - COLS] === slot) || (ty < ROWS - 1 && this.wall[i + COLS] === slot)) sc += 0.15;
           }
@@ -621,7 +683,7 @@ class RampartsGame {
       }
     }
     if (best) this.#placePiece(slot, best[0], best[1], best[2]);
-    else this.pieceIdx[slot]++; // nothing fits: discard it
+    else if (this.#canDiscard(slot)) this.pieceIdx[slot]++; // nothing fits: discard it (if the room's rule allows)
   }
 
   /** Per-tile desirability for a bot's next wall piece: missing ring tiles around the castles it wants closed are worth a lot, the room inside the ring is kept free for cannons. */
@@ -629,7 +691,7 @@ class RampartsGame {
     const want = new Float32Array(N).fill(-0.2);
     const targets = [];
     KEEPS.forEach((_, k) => { if (this.keepOwner[k] === slot) targets.push(k); });
-    const missing = (k) => RING_TILES[k].some((i) => this.wall[i] !== slot && this.#tileFree(i) && !isRingCorner(k, i % COLS, Math.floor(i / COLS)));
+    const missing = (k) => RING_TILES[k].some((i) => this.wall[i] !== slot && this.#buildable(slot, i) && !isRingCorner(k, i % COLS, Math.floor(i / COLS)));
     if (skill.expand && !targets.some(missing)) {
       let bestK = -1;
       let bd = Infinity;
@@ -644,7 +706,7 @@ class RampartsGame {
       const { x0, y0, x1, y1 } = ringRect(k);
       for (let y = y0 + 1; y < y1; y++) for (let x = x0 + 1; x < x1; x++) if (inb(x, y)) want[idx(x, y)] = -1.2;
       for (const i of RING_TILES[k]) {
-        if (this.wall[i] === slot || !this.#tileFree(i)) continue;
+        if (this.wall[i] === slot || !this.#buildable(slot, i)) continue;
         want[i] = isRingCorner(k, i % COLS, Math.floor(i / COLS)) ? 0.4 : 3;
       }
     }

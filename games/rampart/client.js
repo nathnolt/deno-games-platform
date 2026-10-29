@@ -1,7 +1,7 @@
 import { el } from '../../client/dom.js'; // the shell's tiny DOM helper
 import {
   ARENA_H, ARENA_W, COLORS, COLS, HIT_R, KEEPS, KEEP_AT, N, ROWS, TERRAIN, TILE,
-  meta, pieceCells, pieceSize,
+  ZONE_PAD, inForeignZone, meta, pieceCells, pieceSize, ringRect,
 } from './shared.js';
 import { Sfx } from './audio.js';
 
@@ -13,7 +13,8 @@ import { Sfx } from './audio.js';
  *   place phase   move: a 2x2 cannon follows the pointer · left click: put it down
  *   battle        move: aim · left click: fire the ready cannon closest to the target (hold = keep firing)
  *   build phase   move: the wall piece follows the pointer · left click: place · right click / wheel: rotate
- *                 · middle click: throw the piece away (when it fits nowhere)
+ *                 · middle click: throw the piece away (if the room's "discard" setting allows it)
+ *                 Other players' castle zones and territory are off limits (hatched on the board).
  *
  * Keyboard extras (optional): R or Space rotate, X discards, M mutes.
  * The client never decides anything: the server validates every click.
@@ -52,6 +53,8 @@ class RampartsView {
     this.spectating = this.me < 0;
     this.maxHp = ctx.room.settings.cannonHp ?? 2;
     this.maxRounds = ctx.room.settings.maxRounds ?? 8;
+    this.discardMode = ctx.room.settings.discard ?? 'any'; // 'any' | 'stuck' | 'never'
+    this.hatch = null; //   lazily created pattern for other players' protected zones
     this.names = new Map(ctx.room.players.filter((p) => p.slot >= 0).map((p) => [p.slot, p.name]));
     this.sfx = new Sfx();
     this.reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
@@ -225,7 +228,7 @@ class RampartsView {
         ready: 'Get ready. The mouse does everything.',
         place: 'Move the mouse and click to set a cannon inside your walls. Cannons outside the walls cannot fire.',
         battle: 'Aim with the mouse, click to fire (hold to keep firing). One broken wall tile opens a castle. Keep yours closed.',
-        build: 'Click to place wall pieces. Right click or scroll rotates. Middle click throws the piece away. Close your castle!',
+        build: `Click to place wall pieces. Right click or scroll rotates.${{ any: ' Middle click or X throws a piece away.', stuck: ' Middle click or X throws a piece away if it fits nowhere.', never: '' }[this.discardMode] ?? ''} You cannot build in another player's castle.`,
         result: 'Round over.',
       }[this.phase] ?? '';
     }
@@ -326,7 +329,20 @@ class RampartsView {
   }
 
   #discard() {
-    if (this.phase === 'build' && this.#alive()) this.ctx.sendInput({ d: 1 });
+    if (this.phase !== 'build' || !this.#alive()) return;
+    if (this.discardMode === 'never' || (this.discardMode === 'stuck' && this.#fitsAnywhere())) { this.sfx.play('deny'); return; }
+    this.ctx.sendInput({ d: 1 }); // the server has the last word (cooldown, rule)
+  }
+
+  /** Does my current piece fit anywhere? (same test the server uses for the 'stuck' rule) */
+  #fitsAnywhere() {
+    const t = this.snap?.pq?.[this.me]?.[0];
+    if (t === undefined) return true;
+    for (let rot = 0; rot < 4; rot++) {
+      const cells = pieceCells(t, rot);
+      for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (this.#pieceOk({ cells, x, y })) return true;
+    }
+    return false;
   }
 
   #cannonSpot() { return [Math.round(this.mx / TILE - 1), Math.round(this.my / TILE - 1)]; }
@@ -345,6 +361,15 @@ class RampartsView {
 
   #tileFree(i) { return !TERRAIN[i] && this.wallOwner[i] < 0 && KEEP_AT[i] < 0 && !this.occ[i]; }
 
+  /** Off limits for me: inside another living player's castle zone or enclosed territory. */
+  #blocked(i) {
+    const s = this.snap;
+    if (!s) return false;
+    if (inForeignZone(this.me, i, s.ko, s.alive)) return true;
+    const t = this.terrOwner[i];
+    return t >= 0 && t !== this.me && s.alive[t];
+  }
+
   #cannonOk(x, y) {
     if (x < 0 || y < 0 || x + 1 >= COLS || y + 1 >= ROWS) return false;
     for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
@@ -358,7 +383,7 @@ class RampartsView {
     for (const [cx, cy] of spot.cells) {
       const x = spot.x + cx;
       const y = spot.y + cy;
-      if (x < 0 || y < 0 || x >= COLS || y >= ROWS || !this.#tileFree(y * COLS + x)) return false;
+      if (x < 0 || y < 0 || x >= COLS || y >= ROWS || !this.#tileFree(y * COLS + x) || this.#blocked(y * COLS + x)) return false;
     }
     return true;
   }
@@ -435,8 +460,8 @@ class RampartsView {
         break;
       case 'l':
         this.sfx.play('life');
-        this.#toast(`${this.#name(ev.o)} could not close a castle and lost a life`, COLORS[ev.o]);
-        if (ev.o === this.me) this.#showBanner('Lost a life', 'Your walls did not enclose a castle');
+        this.#toast(`${this.#name(ev.o)} ${ev.r === 'room' ? 'had no room for a cannon' : 'could not close a castle'} and lost a life`, COLORS[ev.o]);
+        if (ev.o === this.me) this.#showBanner('Lost a life', ev.r === 'room' ? 'No room left in your castle for a new cannon' : 'Your walls did not enclose a castle');
         break;
       case 'kc':
         if (ev.o >= 0) { this.sfx.play('claim'); this.#toast(`${this.#name(ev.o)} claimed a castle`, COLORS[ev.o]); }
@@ -633,6 +658,7 @@ class RampartsView {
     const s = this.snap;
     if (!s) return;
     this.#drawPops(g, now);
+    this.#drawZones(g);
     for (let k = 0; k < KEEPS.length; k++) this.#drawKeep(g, k, s.ko[k], now);
     for (const c of this.cannons) this.#drawCannon(g, c, now);
     this.#drawBalls(g, now);
@@ -666,6 +692,36 @@ class RampartsView {
       g.fillStyle = `rgba(255,255,255,${0.55 * a})`;
       g.fillRect((p.i % COLS) * TILE, ((p.i / COLS) | 0) * TILE, TILE, TILE);
     }
+  }
+
+  /** Build phase: hatch the castle zones of the other players, because walls cannot go there. */
+  #drawZones(g) {
+    if (this.phase !== 'build' || !this.#alive()) return;
+    const s = this.snap;
+    if (!this.hatch) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 8;
+      const p = c.getContext('2d');
+      p.strokeStyle = 'rgba(255,255,255,0.2)';
+      p.lineWidth = 1.5;
+      p.beginPath(); p.moveTo(-1, 9); p.lineTo(9, -1); p.moveTo(-1, 1); p.lineTo(1, -1); p.moveTo(7, 9); p.lineTo(9, 7); p.stroke();
+      this.hatch = g.createPattern(c, 'repeat');
+    }
+    g.save();
+    g.setLineDash([6, 5]);
+    g.lineWidth = 1.5;
+    s.ko.forEach((o, k) => {
+      if (o < 0 || o === this.me || !s.alive[o]) return;
+      const r = ringRect(k);
+      const x = Math.max(0, r.x0 - ZONE_PAD) * TILE;
+      const y = Math.max(0, r.y0 - ZONE_PAD) * TILE;
+      const w = (Math.min(COLS - 1, r.x1 + ZONE_PAD) + 1) * TILE - x;
+      const h = (Math.min(ROWS - 1, r.y1 + ZONE_PAD) + 1) * TILE - y;
+      if (this.hatch) { g.fillStyle = this.hatch; g.fillRect(x, y, w, h); }
+      g.strokeStyle = rgba(COLORS[o], 0.7);
+      g.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
+    });
+    g.restore();
   }
 
   #drawKeep(g, k, owner, now) {
