@@ -1,9 +1,11 @@
 import { warlords } from '../games/warlords/client.js';
 import { ramparts } from '../games/rampart/client.js';
+import { dotfield } from '../games/dotfield/client.js';
 
 const availableGames = [
 	warlords,
-	ramparts
+	ramparts,
+	dotfield
 ]
 
 // To add a game: create games/<id>/{shared,server,client}.js and list its ClientGame here

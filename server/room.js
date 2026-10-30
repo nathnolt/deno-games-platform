@@ -1,5 +1,7 @@
 import { defaultSettings, sanitizeSettings } from '../shared/settings.js';
 
+const DEFAULT_MAX_PLAYERS = 4; // used when a game's meta has no maxPlayers
+
 /**
  * A room is game-agnostic: members, host, readiness, settings, SEATS and the tick loop.
  * What happens inside a match is delegated to the game's instance.
@@ -9,6 +11,11 @@ import { defaultSettings, sanitizeSettings } from '../shared/settings.js';
  *   mode 'bot'    the game fills it with a bot.
  *   mode 'closed' nobody plays here.
  * Members without a seat are spectators. They can join at any time, even mid-game, and just watch.
+ *
+ * Drop-in games (`meta.dropIn: true`) differ in two ways: the room starts the match as soon as it is created (no seat/setup
+ * page), and a member who joins mid-match takes a free seat and the game is told via `instance.onJoin(player)`.
+ * Spectators can also take a free seat mid-match (`takeSeat`), and seated players can stand up (`spectate`); both go through
+ * `onJoin` / `onLeave`. Leaving mid-match works for every game through `instance.onLeave(id)`.
  */
 export class Room {
   #members = new Map(); // clientId -> { client, ready }
@@ -26,9 +33,11 @@ export class Room {
     this.game = game;
     this.onChange = onChange;
     this.solo = solo;
+    this.maxPlayers = game.meta.maxPlayers ?? DEFAULT_MAX_PLAYERS;
+    this.dropIn = !!game.meta.dropIn && !solo;
     this.#settings = defaultSettings(game.meta);
     // Solo: the human takes the first seat, bots fill the rest. Multiplayer: everything starts open.
-    this.#seats = Array.from({ length: game.meta.maxPlayers }, (_, i) => ({ mode: solo && i > 0 ? 'bot' : 'open', playerId: null }));
+    this.#seats = Array.from({ length: this.maxPlayers }, (_, i) => ({ mode: solo && i > 0 ? 'bot' : 'open', playerId: null }));
   }
 
   get empty() {
@@ -40,10 +49,15 @@ export class Room {
     this.#members.set(client.id, { client, ready: false });
     if (!this.#hostId) this.#hostId = client.id;
     client.room = this;
-    // Before the game starts, take the first open seat if there is one; otherwise (or mid-game) just watch.
-    if (this.#status === 'lobby') {
+    // Before the game starts (or at any time in a drop-in game), take the first open seat if there is one;
+    // otherwise (or mid-game in a normal game) just watch.
+    const joinMidGame = this.#status === 'playing' && this.dropIn;
+    if (this.#status === 'lobby' || joinMidGame) {
       const free = this.#seats.findIndex((s) => s.mode === 'open' && !s.playerId);
-      if (free >= 0) this.#seats[free].playerId = client.id;
+      if (free >= 0) {
+        this.#seats[free].playerId = client.id;
+        if (joinMidGame && !this.#tellGameAboutJoin(client, free)) this.#seats[free].playerId = null; // refused: watch instead
+      }
     }
     this.broadcastState();
     // Somebody arriving mid-game gets the game screen straight away, as a spectator.
@@ -74,22 +88,32 @@ export class Room {
   // ── seats ──
   /** A member sits in an open, empty seat (moving from their current one if any). */
   takeSeat(client, index) {
-    this.#requireLobby();
+    this.#requireSeatChange();
     const seat = this.#seat(index);
     if (seat.playerId === client.id) return;
     if (seat.mode !== 'open') throw new Error('That seat is not open');
     if (seat.playerId) throw new Error('That seat is taken');
+    const midMatch = this.#status === 'playing'; // only possible in a drop-in game
+    if (midMatch && this.#seatOf(client.id) >= 0) throw new Error('Stand up first: seats cannot be swapped during a match');
     this.#sit(client.id, index);
+    if (midMatch && !this.#tellGameAboutJoin(client, index)) {
+      seat.playerId = null;
+      throw new Error('The game cannot take another player right now');
+    }
     this.broadcastState();
+    if (midMatch) client.send({ t: 'gameStart', room: this.state() }); // remount the game view with the new seat
   }
 
   /** A member gives up their seat and watches instead. */
   spectate(client) {
-    this.#requireLobby();
+    this.#requireSeatChange();
     if (this.solo) throw new Error('A solo game needs you in a seat');
     const seat = this.#seatOf(client.id);
+    const midMatch = this.#status === 'playing' && seat >= 0; // only possible in a drop-in game
+    if (midMatch) this.#instance?.onLeave(client.id); // the game hears about it exactly like a disconnect
     if (seat >= 0) this.#vacate(seat);
     this.broadcastState();
+    if (midMatch) client.send({ t: 'gameStart', room: this.state() }); // remount the game view as a spectator
   }
 
   /**
@@ -131,7 +155,7 @@ export class Room {
   start(client) {
     this.#requireHost(client);
     if (this.#status !== 'lobby') return;
-    const { minPlayers, tickRate } = this.game.meta;
+    const { minPlayers = 1, tickRate } = this.game.meta;
     const humans = this.#seated();
     const bots = this.#seats.flatMap((s, i) => (s.mode === 'bot' ? [i] : []));
     if (humans.length < 1) throw new Error('At least one person has to sit in a seat');
@@ -177,7 +201,8 @@ export class Room {
       gameId: this.game.meta.id,
       players: seated,
       spectators: this.#members.size - seated,
-      maxPlayers: this.game.meta.maxPlayers,
+      maxPlayers: this.maxPlayers,
+      dropIn: this.dropIn,
       openSeats: this.#seats.filter((s) => s.mode === 'open' && !s.playerId).length,
       status: this.#status,
       solo: this.solo,
@@ -201,6 +226,7 @@ export class Room {
       settings: this.#settings,
       status: this.#status,
       solo: this.solo,
+      dropIn: this.dropIn,
     };
   }
 
@@ -209,6 +235,16 @@ export class Room {
   }
 
   // ── internals ──
+  /** Drop-in games: announce a newcomer. The game may refuse by returning false (e.g. it is full by its own rules). */
+  #tellGameAboutJoin(client, slot) {
+    try {
+      return this.#instance?.onJoin?.({ id: client.id, name: client.name, slot }) !== false;
+    } catch (err) {
+      console.error(`onJoin failed in game "${this.game.meta.id}":`, err);
+      return false;
+    }
+  }
+
   /** Seated humans as the game receives them: [{ id, name, slot }]. */
   #seated() {
     return this.#seats.flatMap((s, slot) => {
@@ -239,6 +275,11 @@ export class Room {
     const seat = this.#seats[index];
     seat.playerId = null;
     if (this.solo) seat.mode = 'bot';
+  }
+
+  /** Seats change in the lobby, and also during a match in drop-in games. */
+  #requireSeatChange() {
+    if (this.#status !== 'lobby' && !this.dropIn) throw new Error('Seats cannot be changed during a game');
   }
 
   #requireLobby() {

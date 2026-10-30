@@ -14,12 +14,14 @@
  * @property {string} id
  * @property {string} name
  * @property {string} description
- * @property {number} minPlayers          minimum number of FILLED seats (humans + bots) needed to start; at least one must be human
- * @property {number} maxPlayers          number of seats; the room shows one row per seat
+ * @property {number} [minPlayers]        minimum number of FILLED seats (humans + bots) needed to start; at least one must be human. Default 1
+ * @property {number} [maxPlayers]        number of seats; the room shows one row per seat. Default 4
+ * @property {boolean} [dropIn]           drop-in game: no setup page, the match starts when the room is created, and people may join
+ *                                        (into a free seat, announced via GameInstance.onJoin) and leave at any time. Default false
  * @property {string[]} [seatNames]       optional label per seat, e.g. ['Top left', ...]
  * @property {string[]} [seatColors]      optional CSS color per seat, shown next to its row
  * @property {number} tickRate            server updates per second
- * @property {SettingField[]} settings    drives the generated setup form
+ * @property {SettingField[]} settings    drives the generated setup form (an empty array is fine: the setup section is then hidden)
  * @property {SettingGroup[]} [settingGroups]  optional sections for the setup form; fields join one via `group: '<id>'`
  * @property {Record<string, number|boolean|string>} [soloSettings]  if set, the lobby offers "Play solo" (you in seat 1, bots in the rest; {} = just the defaults)
  */

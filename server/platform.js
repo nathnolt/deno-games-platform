@@ -70,6 +70,8 @@ export class Platform {
         room.join(c);
         // Solo does NOT auto-start: the client shows a settings page (pre-filled with soloSettings), then sends 'start'.
         if (solo) room.setSettings(c, { ...game.meta.soloSettings });
+        // Drop-in games have no setup page: the match starts right away and people join/leave while it runs.
+        if (room.dropIn) room.start(c);
         this.#broadcastRooms();
         break;
       }

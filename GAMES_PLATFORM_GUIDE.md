@@ -19,7 +19,7 @@ the solo settings page), how the front-end plugs in, and it ends with a complete
 5. [The game plugin contract](#5-the-game-plugin-contract)
 6. [Settings (multiplayer setup and solo settings page)](#6-settings)
 7. [Building the front-end](#7-building-the-front-end)
-8. [Writing the server simulation](#8-writing-the-server-simulation)
+8. [Writing the server simulation](#8-writing-the-server-simulation) (incl. 8.6 drop-in games)
 9. [Registering your game](#9-registering-your-game)
 10. [Complete worked example: Tap Race](#10-complete-worked-example-tap-race)
 11. [Testing](#11-testing)
@@ -300,6 +300,7 @@ Games are plugins registered in two small files; see section 9. Nothing else in 
 ```
 lobby ──► room (host, seats, ready) ──► setup (settings form) ──► game (tick loop) ──► back to setup
    └─ "Play solo" ──► private solo room ──► solo settings page ──► game ──► back to the solo settings page
+   └─ drop-in game (meta.dropIn) ──► room created ──► game starts at once ──► people join / leave / spectate while it runs
 ```
 
 ### Messages (JSON text over one WebSocket)
@@ -309,10 +310,10 @@ Client to server:
 | `t` | Fields | Notes |
 |---|---|---|
 | `hello` | `name` | sent on connect and on rename (max 20 chars) |
-| `createRoom` | `gameId`, `name?`, `solo?` | `solo: true` creates a **private** solo room (needs `meta.soloSettings`) |
+| `createRoom` | `gameId`, `name?`, `solo?` | `solo: true` creates a **private** solo room (needs `meta.soloSettings`). For a **drop-in** game the match starts immediately (see 8.6) |
 | `joinRoom` | `roomId` | fails only for solo rooms. With no free seat, or while a game runs, you join as a **spectator** |
-| `takeSeat` | `seat` | sit in an open, empty seat (moving from your current one). Lobby only |
-| `spectate` | | give up your seat and watch. Lobby only |
+| `takeSeat` | `seat` | sit in an open, empty seat (moving from your current one). Lobby only; in a **drop-in** game also mid-match, if you have no seat (calls `onJoin`) |
+| `spectate` | | give up your seat and watch. Lobby only; in a **drop-in** game also mid-match (calls `onLeave`) |
 | `setSeat` | `seat`, `value` | **host only**, lobby only. `value`: `'open'` \| `'bot'` \| `'closed'` \| `'player:<id>'` (seat that person) |
 | `leaveRoom` | | |
 | `setSettings` | `settings` | host only, only while not playing. Sanitized server-side |
@@ -332,7 +333,7 @@ Inputs must therefore be small, and should be sent on change rather than every f
 { id, name, gameId, hostId,
   players: [{ id, name, ready, slot }],     // slot = seat index, or -1 for a spectator
   seats:   [{ mode, playerId }],            // one per meta.maxPlayers; mode 'open' | 'bot' | 'closed'
-  settings, status: 'lobby' | 'playing', solo }
+  settings, status: 'lobby' | 'playing', solo, dropIn }
 ```
 
 - **Seats** are numbers `0..maxPlayers-1`. The room page shows one row per seat; the **host** has a dropdown per row:
@@ -340,7 +341,7 @@ Inputs must therefore be small, and should be sent on change rather than every f
   and can press *Sit here* on an open seat or *Stand up*. A seat with `playerId` set is a seated **player**.
 - Whoever joins before the game starts takes the first open seat; with none free they are a **spectator**
   (`slot: -1`). Spectators may join at any time, including mid-game: they get the game screen with `ctx.me.slot === -1`.
-- Seats are locked while a match runs. To start: at least one human seated, humans + bots >= `meta.minPlayers`, and every
+- Seats are locked while a match runs (**drop-in games** are the exception, see 8.6). To start: at least one human seated, humans + bots >= `meta.minPlayers`, and every
   seated guest ready (spectators don't need to be). Empty open seats simply stay empty.
 - The **host** is the creator; if the host leaves, the next member becomes host. The host may also spectate.
 - Changing settings clears every guest's *ready* flag.
@@ -373,8 +374,9 @@ export const meta = {
   id: 'mygame',            // unique, lowercase, no spaces
   name: 'My Game',         // display name
   description: 'One sentence shown on the setup screen.',
-  minPlayers: 2,           // platform refuses to start below this many FILLED seats (humans + bots; at least one human)
-  maxPlayers: 4,           // the number of seats: the room page shows one row per seat
+  minPlayers: 2,           // OPTIONAL (default 1). Platform refuses to start below this many FILLED seats (humans + bots; at least one human)
+  maxPlayers: 4,           // OPTIONAL (default 4). The number of seats: the room page shows one row per seat. Set it per game
+  dropIn: false,           // OPTIONAL (default false). true = no setup page, people join / leave at any time. See section 8.6
   seatNames: ['Red', 'Blue', 'Green', 'Yellow'],   // OPTIONAL label per seat
   seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'], // OPTIONAL dot color per seat
   tickRate: 20,            // server updates per second (e.g. 20 for turn-ish/casual, 60 for fast action)
@@ -383,6 +385,8 @@ export const meta = {
   settings: [ /* SettingField[] — see section 6 */ ],
 };
 ```
+
+`maxPlayers` is yours to choose per game (2 for a duel, 8 for a party game); the platform only falls back to 4 when you leave it out.
 
 Who plays where, and which seats are bots, is decided by the **seat rows in the room**, not by a game setting: do not add
 a `bots` setting. The platform checks `minPlayers` for you; use `canStart` only for game-specific rules.
@@ -412,6 +416,7 @@ The instance (GameInstance) must implement:
 |---|---|---|
 | `onInput(playerId, data)` | whenever that client sends `input` | `data` is **untrusted**: validate type and range, ignore bad input silently |
 | `onLeave(playerId)` | a human disconnects or leaves mid-game | remove them; call `ctx.end` if the match cannot continue |
+| `onJoin({id, name, slot})` *(optional)* | **drop-in games only** (`meta.dropIn`): somebody takes a free seat mid-match | add them; return `false` to refuse (they then just spectate). See 8.6 |
 | `update(dt)` | every tick; `dt` in seconds, capped at 0.1 | advance the simulation |
 | `snapshot()` | every tick, right after `update` | return the JSON-serializable state clients need to draw |
 
@@ -438,6 +443,7 @@ export const mygame = {
 | Method | Purpose |
 |---|---|
 | `onSnapshot(data)` | the object returned by `snapshot()` on the server arrives here every tick |
+| `onRoom(room)` *(optional)* | the room state changed during the match (somebody joined, left, renamed). Handy for player names in drop-in games |
 | `onEnd(result)` *(optional)* | the match finished: show the result. The shell then shows **Back to setup** |
 | `dispose()` | the shell is leaving the game screen: remove every listener, timer, animation frame, DOM node, GL context |
 
@@ -446,6 +452,8 @@ export const mygame = {
 ## 6. Settings
 
 ### 6.1 Defining settings
+
+A game with no settings simply uses `settings: []`: the setup/solo pages then show no settings section at all.
 
 Settings are **data, not UI code**. You list fields in `meta.settings` and the platform generates the form, validates
 values server-side, and delivers them to both sides. Three field types exist:
@@ -741,6 +749,221 @@ world.destroy(e);                                 // query() returns a copy: des
 ```
 
 Define components in `shared.js` so server and client use the same tokens (each side owns its own `World`).
+
+### 8.6 Drop-in games (join and leave at any time)
+
+Some games should not have a lobby, ready buttons or a settings page: people simply walk in and out while the match
+runs (a shared arena, a sandbox, a party room). Whether a game behaves this way is **decided by the game itself**: it is
+a flag in its `meta`, and every other game keeps the normal lobby flow.
+
+```js
+export const meta = {
+  id: 'dotfield', name: 'Dot Field', description: '…', tickRate: 20,
+  maxPlayers: 8,     // seats; anyone beyond that spectates until a seat frees up (default 4 when omitted)
+  minPlayers: 1,     // must be able to run with one person
+  dropIn: true,      // ★
+  settings: [],      // no settings
+};
+```
+
+**What the platform does for a `dropIn` game**
+
+| Situation | Behaviour |
+|---|---|
+| Someone presses *Create room* | the match starts immediately, with the creator in seat 1. No room/setup page |
+| Someone joins from the lobby list | the button reads **Join** if a seat is free, **Spectate** if the room is full. They go straight to the game screen |
+| A free seat exists | they are seated and your game gets `onJoin({ id, name, slot })` |
+| No free seat (or `onJoin` returns `false`) | they spectate (`ctx.me.slot === -1`); the top bar shows a disabled **Full: spectating** |
+| A seat frees up while someone spectates | their top bar button becomes **Join game**; pressing it sends `takeSeat` and your game gets `onJoin` |
+| A player presses **Spectate** in the top bar | your game gets `onLeave(id)`, the seat opens for others |
+| A player presses *Leave* or disconnects | your game gets `onLeave(id)`, exactly as in any game |
+| Seat or spectator changes for the person | the shell re-mounts their game view with the new `ctx.me.slot` (so a view never has to handle its own slot changing) |
+| Anyone joins, leaves or renames | every client's view gets `onRoom(room)` |
+| Last person leaves | the room is destroyed, as always |
+
+Seats are still `0..maxPlayers-1`, and the **host** (the creator; the next member if they leave) has no special powers in
+a drop-in game, since there is no setup page. Hosts cannot assign seats or bots; every seat is open.
+
+**What your game must do**
+
+```js
+// games/<id>/server.js
+class MyGame {
+  constructor(ctx) { for (const p of ctx.players) this.#add(p); }  // only the creator is seated at this point
+  onJoin({ id, name, slot }) { this.#add({ id, slot }); }          // everybody after the creator arrives here
+  onLeave(id) { this.players.delete(id); }                           // leaving, spectating and disconnecting all end up here
+  // update() / snapshot() / onInput() as usual. onInput ignores ids you do not know (spectators send input too)
+}
+```
+
+- **Implement `onJoin`.** Without it, newcomers are seated but your game never hears about them, so their input is ignored.
+- **Do not call `ctx.end()` because the game is empty or someone left.** The match is meant to run until the room is destroyed.
+  (If you do call it, the room falls back to the normal setup page.)
+- **Never rely on `ctx.players`** after the constructor: it only contains who was seated at the start.
+- **A slot can be reused.** If player A (slot 2) leaves and B joins, B gets slot 2. Key your state by `playerId`, not by slot, if
+  you need per-player continuity, and clear everything that belonged to the leaver in `onLeave`.
+- **Late joiners must be able to render**: the view is mounted fresh and only sees snapshots from then on. Put everything needed
+  to draw the *current* state in each snapshot, not just deltas.
+- **Names:** do not put names in the snapshot every tick. Read them from the room state: `ctx.room.players` at mount and `onRoom(room)`
+  afterwards (`room.players` is `[{ id, name, ready, slot }]`).
+- Client views are unchanged otherwise: check `ctx.me.slot < 0` for spectators, observe the container, and clean up in `dispose()`.
+- Joining and leaving re-mounts the view, which exits fullscreen. Keep per-session state on the server, not in the view.
+
+Because `meta.settings` is empty, `maxPlayers` is the only tuning knob. Raise it freely, but remember snapshots are broadcast to
+everyone in the room every tick, so cost grows with players: keep them compact (numbers, not objects with names).
+
+#### Worked example: Dot Field
+
+Everyone moves a dot around a shared square; people come and go. Shared, server, and client in full; register it as in section 9.
+
+`games/dotfield/shared.js`
+
+```js
+// Runs on BOTH server and browser. No DOM, no Deno APIs, no imports from client/ or server/.
+
+/** @type {import('../../shared/settings.js').GameMeta} */
+export const meta = {
+  id: 'dotfield',
+  name: 'Dot Field',
+  description: 'Drift around a shared field. Join or leave whenever you like.',
+  maxPlayers: 8, // number of seats (default 4 when omitted). Everyone after that spectates until a seat frees up
+  minPlayers: 1, // a drop-in game must be able to run with one person
+  dropIn: true, // ★ no setup page; the match starts when the room is created; people come and go
+  tickRate: 20,
+  settings: [], // no settings: the setup section is hidden (and a drop-in game never shows it anyway)
+};
+
+export const COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#eab308', '#a855f7', '#06b6d4', '#f97316', '#ec4899'];
+```
+
+`games/dotfield/server.js`
+
+```js
+import { meta } from './shared.js';
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+const round3 = (v) => Math.round(v * 1000) / 1000;
+
+class DotField {
+  constructor(ctx) {
+    this.dots = new Map(); // playerId -> { slot, x, y, tx, ty }
+    for (const p of ctx.players) this.#add(p); // whoever is seated when the match starts (the room creator)
+  }
+
+  // ── GameInstance ──
+  onJoin(player) {
+    this.#add(player); // somebody took a free seat mid-match. Return false to refuse them (they then just watch)
+  }
+
+  onLeave(playerId) {
+    this.dots.delete(playerId); // disconnect, "Leave" or "Spectate". Do NOT call ctx.end(): the match just goes on
+  }
+
+  onInput(playerId, data) {
+    const d = this.dots.get(playerId); // spectators are not in the map: ignored
+    if (!d || !Number.isFinite(data?.x) || !Number.isFinite(data?.y)) return;
+    d.tx = clamp01(data.x);
+    d.ty = clamp01(data.y);
+  }
+
+  update(dt) {
+    const k = 1 - Math.exp(-6 * dt); // ease every dot toward its target
+    for (const d of this.dots.values()) {
+      d.x += (d.tx - d.x) * k;
+      d.y += (d.ty - d.y) * k;
+    }
+  }
+
+  snapshot() {
+    // Names are NOT sent here: clients get them from the room state (see onRoom in client.js).
+    return { dots: [...this.dots.entries()].map(([id, d]) => [id, d.slot, round3(d.x), round3(d.y)]) };
+  }
+
+  #add({ id, slot }) {
+    this.dots.set(id, { slot, x: 0.5, y: 0.5, tx: 0.5, ty: 0.5 });
+  }
+}
+
+/** @type {import('../../shared/contracts.js').ServerGame} */
+export const dotfield = { meta, create: (ctx) => new DotField(ctx) };
+```
+
+`games/dotfield/client.js`
+
+```js
+import { COLORS, meta } from './shared.js';
+
+class DotFieldView {
+  names = new Map(); // playerId -> name, kept fresh by onRoom
+  dots = []; //         [[playerId, slot, x, y], ...] from the latest snapshot
+  lastSent = 0;
+
+  constructor(ctx) {
+    this.ctx = ctx; // ctx.me.slot is -1 for a spectator (also for a full room: the shell offers "Join game" in the top bar)
+    this.canvas = document.createElement('canvas');
+    ctx.container.append(this.canvas);
+    this.observer = new ResizeObserver(() => this.#resize());
+    this.observer.observe(ctx.container);
+    if (ctx.me.slot >= 0) this.canvas.addEventListener('pointermove', this.#onMove);
+    this.onRoom(ctx.room);
+  }
+
+  // ── GameView ──
+  onRoom(room) {
+    this.names = new Map(room.players.map((p) => [p.id, p.name])); // fires whenever somebody joins, leaves or renames
+    this.#draw();
+  }
+
+  onSnapshot(s) {
+    this.dots = s.dots;
+    this.#draw();
+  }
+
+  dispose() {
+    this.observer.disconnect();
+    this.canvas.remove();
+  }
+
+  // ── input / drawing ──
+  #onMove = (e) => {
+    const now = performance.now();
+    if (now - this.lastSent < 50) return; // at most 20 messages a second
+    this.lastSent = now;
+    const r = this.canvas.getBoundingClientRect();
+    this.ctx.sendInput({ x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height });
+  };
+
+  #resize() {
+    const { clientWidth: w, clientHeight: h } = this.ctx.container;
+    this.canvas.width = this.canvas.height = Math.max(100, Math.min(w, h));
+    this.#draw();
+  }
+
+  #draw() {
+    const g = this.canvas.getContext('2d');
+    const size = this.canvas.width;
+    g.clearRect(0, 0, size, size);
+    g.strokeStyle = '#26304f';
+    g.strokeRect(0.5, 0.5, size - 1, size - 1);
+    g.font = '14px system-ui';
+    g.textAlign = 'center';
+    for (const [id, slot, x, y] of this.dots) {
+      g.fillStyle = COLORS[slot] ?? '#fff';
+      g.beginPath();
+      g.arc(x * size, y * size, id === this.ctx.me.id ? 12 : 9, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = '#e2e8f0';
+      g.fillText(this.names.get(id) ?? '', x * size, y * size - 16);
+    }
+  }
+}
+
+/** @type {import('../../shared/contracts.js').ClientGame} */
+export const dotfield = { meta, mount: (ctx) => new DotFieldView(ctx) };
+```
+
+The server logic was run through the real platform with fake sockets (create room, join mid-match, bad input ignored, stand up);
+the client was syntax-checked only, so try it with two browser tabs.
 
 ---
 
@@ -1054,7 +1277,8 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 - [ ] `games/<id>/server.js` exports `{ meta, create, canStart? }`; instance has `onInput`, `onLeave`, `update`, `snapshot`
 - [ ] `games/<id>/client.js` exports `{ meta, mount }`; view has `onSnapshot`, `dispose` (and `onEnd`)
 - [ ] Registered in **both** `server/games.js` and `client/games.js`
-- [ ] Every code path eventually calls `ctx.end(result)`
+- [ ] Every code path eventually calls `ctx.end(result)` (a `dropIn` game is the exception: it runs until the room is destroyed)
+- [ ] Drop-in game? `meta.dropIn: true`, `minPlayers: 1`, `onJoin` + `onLeave` implemented, state keyed by `playerId`, names read from the room state (8.6)
 - [ ] `onInput` validates everything; nothing in `update`/`snapshot` can throw
 - [ ] `dispose()` removes every listener, frame, timer, observer and DOM node
 - [ ] CSS classes are prefixed; CSS appended to `client/style.css`
@@ -1076,6 +1300,10 @@ Front-end code is not covered by these tests: check it by opening two browser ta
 | "Need at least N seats filled" | `minPlayers` counts humans + bots; the host fills seats in the room (Bot / Sit here) |
 | Spectator's client errors on `slot` -1 | guard `ctx.me.slot < 0`: no input, no "your" highlighting |
 | Solo button disabled | game has no `meta.soloSettings` |
+| Players join a drop-in game but nothing happens for them | the instance has no `onJoin`, so newcomers are seated but unknown to the game |
+| A drop-in match ends when the first player leaves | `onLeave` calls `ctx.end`; drop-in games should keep running |
+| The lobby button says "Spectate" for a drop-in room | all `maxPlayers` seats are taken (raise `maxPlayers` in `meta`, or wait for a seat to free up) |
+| Game has only 4 seats and you wanted more | `maxPlayers` is missing from `meta` (default 4) |
 | A setting shows up in a section titled with a raw id (e.g. `bots`) | its `group` is not declared in `meta.settingGroups` (typo or missing entry) |
 | A group does not appear | none of the fields reference its `id`, or the field has `group` misspelled (then it appears as an undeclared group instead) |
 | Settings value is `undefined` on the server | key missing from `meta.settings` (unknown keys are dropped by `sanitizeSettings`) |

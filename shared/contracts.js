@@ -29,6 +29,9 @@
  * @typedef {object} GameInstance
  * @property {(playerId: string, data: unknown) => void} onInput
  * @property {(playerId: string) => void} onLeave
+ * @property {(player: {id: string, name: string, slot: number}) => boolean | void} [onJoin]  drop-in games only (meta.dropIn): somebody took
+ *     a free seat mid-match (as a new arrival, or a spectator pressing "Join game"). Return false to refuse. Must be implemented by every dropIn game.
+ *     A player pressing "Spectate" mid-match reaches onLeave, exactly like a disconnect
  * @property {(dt: number) => void} update
  * @property {() => unknown} snapshot
  */
@@ -48,6 +51,7 @@
  *
  * @typedef {object} GameView
  * @property {(data: unknown) => void} onSnapshot
+ * @property {(room: object) => void} [onRoom]  the room state changed during the match (somebody joined, left or renamed); useful for names in drop-in games
  * @property {(result: unknown) => void} [onEnd]
  * @property {() => void} dispose
  */

@@ -16,6 +16,7 @@ class App {
   view = null;
   roomListEl = null;
   backBtn = null;
+  seatBtn = null;
   gameHost = null;
   status = el('div', { class: 'status' });
 
@@ -54,6 +55,9 @@ class App {
           if (this.screen !== 'lobby') this.go('lobby');
         } else if (this.screen !== 'game') {
           this.go('room');
+        } else {
+          this.updateSeatButton();
+          this.view?.onRoom?.(m.room); // drop-in games: somebody joined, left or renamed during the match
         }
         break;
       case 'gameStart':
@@ -77,7 +81,7 @@ class App {
     this.view?.dispose();
     this.view = null;
     this.screen = screen;
-    this.roomListEl = this.backBtn = this.gameHost = null;
+    this.roomListEl = this.backBtn = this.gameHost = this.seatBtn = null;
     const body = screen === 'lobby' ? this.buildLobby() : screen === 'room' ? this.buildRoom() : this.buildGame();
     this.root.replaceChildren(this.status, body);
     if (screen === 'game') this.mountGame();
@@ -135,8 +139,9 @@ class App {
     this.roomListEl.replaceChildren(
       ...this.rooms.map((r) => {
         // Joining is never refused: with no free seat (or a game already running) you join as a spectator.
-        const watch = r.status === 'playing' || r.openSeats === 0;
-        const join = el('button', { onclick: () => this.send({ t: 'joinRoom', roomId: r.id }) }, watch ? 'Watch' : 'Join');
+        // "Join" when there is a seat you can take, "Spectate" when the room is full (or a normal game is already running).
+        const watch = r.openSeats === 0 || (r.status === 'playing' && !r.dropIn);
+        const join = el('button', { onclick: () => this.send({ t: 'joinRoom', roomId: r.id }) }, watch ? 'Spectate' : 'Join');
         const gameName = clientGames.get(r.gameId)?.meta.name ?? r.gameId;
         const watching = r.spectators ? `, ${r.spectators} watching` : '';
         return el(
@@ -177,8 +182,9 @@ class App {
         ? el('p', { class: 'muted' }, `Watching: ${spectators.map((p) => p.name + (p.id === this.me ? ' (you)' : '')).join(', ')}`)
         : '',
       !seated && !isHost ? el('p', { class: 'muted' }, 'You are watching. Press "Sit here" on an open seat to play.') : '',
-      el('h2', {}, `${game.meta.name} setup`),
-      settingsForm(game.meta, room.settings, isHost, (settings) => this.send({ t: 'setSettings', settings })),
+      ...(game.meta.settings.length
+        ? [el('h2', {}, `${game.meta.name} setup`), settingsForm(game.meta, room.settings, isHost, (settings) => this.send({ t: 'setSettings', settings }))]
+        : []),
       el('div', { class: 'row' }, action, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave room')),
       isHost ? el('p', { class: 'muted' }, 'Everyone sitting in a seat must be ready before you can start. Spectators can come and go.') : '',
     );
@@ -241,8 +247,9 @@ class App {
       el('p', { class: 'muted' }, game.meta.description),
       el('h2', {}, 'Seats'),
       this.seatsPanel(room, game, true),
-      el('h2', {}, 'Solo settings'),
-      settingsForm(game.meta, room.settings, true, (settings) => this.send({ t: 'setSettings', settings })),
+      ...(game.meta.settings.length
+        ? [el('h2', {}, 'Solo settings'), settingsForm(game.meta, room.settings, true, (settings) => this.send({ t: 'setSettings', settings }))]
+        : []),
       el(
         'div',
         { class: 'row' },
@@ -263,18 +270,42 @@ class App {
 
     // Fullscreen applies to the whole game screen (top bar + game), so Leave / Back to setup stay reachable.
     // Not offered where the browser has no Fullscreen API (e.g. iPhone Safari).
+    // Drop-in games only: spectators get "Join game" when a seat is free, players get "Spectate".
+    this.seatBtn = el('button', { class: 'hidden', onclick: () => this.onSeatButton() });
     const fsBtn = el('button', { class: 'hidden', onclick: () => this.toggleFullscreen() }, 'Fullscreen');
     if (document.fullscreenEnabled) fsBtn.classList.remove('hidden');
-    return el(
+    const screen = el(
       'div',
       {
         class: 'game-screen',
         // fires on the element that entered/left fullscreen (also when the player presses Esc), and goes away with it
         onfullscreenchange: () => (fsBtn.textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen'),
       },
-      el('div', { class: 'topbar' }, el('span', {}, `${game.meta.name}: ${room.name}${watching ? ' (watching)' : ''}`), this.backBtn, fsBtn, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave')),
+      el('div', { class: 'topbar' }, el('span', {}, `${game.meta.name}: ${room.name}${watching ? ' (watching)' : ''}`), this.backBtn, this.seatBtn, fsBtn, el('button', { onclick: () => this.send({ t: 'leaveRoom' }) }, 'Leave')),
       this.gameHost,
     );
+    this.updateSeatButton();
+    return screen;
+  }
+
+  /** Drop-in games: "Spectate" for a seated player, "Join game" for a spectator when a seat is free, disabled "Full" otherwise. */
+  updateSeatButton() {
+    const btn = this.seatBtn;
+    const room = this.room;
+    if (!btn || !room?.dropIn || room.solo) return;
+    const seated = (room.players.find((p) => p.id === this.me)?.slot ?? -1) >= 0;
+    const free = room.seats.some((s) => s.mode === 'open' && !s.playerId);
+    btn.classList.remove('hidden');
+    btn.textContent = seated ? 'Spectate' : free ? 'Join game' : 'Full: spectating';
+    btn.disabled = !seated && !free;
+  }
+
+  onSeatButton() {
+    const room = this.room;
+    const seated = (room.players.find((p) => p.id === this.me)?.slot ?? -1) >= 0;
+    if (seated) return this.send({ t: 'spectate' });
+    const free = room.seats.findIndex((s) => s.mode === 'open' && !s.playerId);
+    if (free >= 0) this.send({ t: 'takeSeat', seat: free });
   }
 
   toggleFullscreen() {
