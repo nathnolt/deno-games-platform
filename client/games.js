@@ -1,10 +1,12 @@
 import { warlords } from '../games/warlords/client.js';
 import { ramparts } from '../games/rampart/client.js';
 import { dotfield } from '../games/dotfield/client.js';
+import { balance } from '../games/balance/client.js';
 
 const availableGames = [
 	warlords,
 	ramparts,
+	balance,
 	dotfield
 ]
 
