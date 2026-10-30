@@ -1,0 +1,17 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:planck@1": "1.5.1_stage-js@1.0.2"
+  },
+  "npm": {
+    "planck@1.5.1_stage-js@1.0.2": {
+      "integrity": "sha512-x3nHPSyoNTAxN0v8UXrSwP0XVTG0e7JCENBVZljZ8PZOjbOo7aRHq2+fy+DOREDhfW52aq5GiwgIm+m8kIErKQ==",
+      "dependencies": [
+        "stage-js"
+      ]
+    },
+    "stage-js@1.0.2": {
+      "integrity": "sha512-EWTRBYlg7Qv9wGUao99/PfRe3KaiQqWmgSvTOXvaWnu1Jk/q/vV8yJVu6bi/3EqDZeMVnCPAjheba6OFc5k1GQ=="
+    }
+  }
+}
