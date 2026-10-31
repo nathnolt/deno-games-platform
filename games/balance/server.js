@@ -18,6 +18,8 @@ const FLOAT_SIDES = 24; //        circles are approximated by a polygon when com
 const BOWL_SEGMENTS = 36;
 const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along in every snapshot after a change
 // settleTime, settleSpeed and follow come from `tuning` (definitions.js)
+const LAB_ID_START = 100000; //   ids of blocks spawned in the level lab (they never clash with the ids of a level's own blocks)
+const LAB_MAX_BLOCKS = 300;
 const START_GRACE = 0.8; //       seconds after a level starts during which start / restart clicks are ignored (two players clicking the same button)
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -80,6 +82,8 @@ class BalanceGame {
     this.defsRev = 0; //          debug: bumps every time somebody changes the definitions
     this.defsFrom = null; //      debug: who made the last change
     this.defsBurst = 0; //        debug: > 0 while the definitions are attached to the snapshots
+    this.lab = { on: false, paused: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
+    this.labId = LAB_ID_START;
     for (const p of ctx.players) this.onJoin(p);
   }
 
@@ -93,6 +97,10 @@ class BalanceGame {
     if (!p) return;
     this.#putBack(p);
     this.players.delete(id); // drop-in game: it just goes on, even with nobody in it
+    if (DEBUG && this.lab.on && this.lab.by === id) { // the level designer left with the lab still on: make it an ordinary level again
+      this.lab = { on: false, paused: false, by: null };
+      if (this.levelIdx >= 0 && this.levelIdx < levels.length) this.#startLevel(this.levelIdx);
+    }
   }
 
   onInput(id, data) {
@@ -138,7 +146,7 @@ class BalanceGame {
       total: this.total,
       why: this.why,
       still: round2(clamp(this.settle / tuning.settleTime, 0, 1)),
-      ...(DEBUG ? { drev: this.defsRev, dfrom: this.defsFrom, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
+      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, drev: this.defsRev, dfrom: this.defsFrom, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
   }
 
@@ -150,6 +158,7 @@ class BalanceGame {
   /** Nobody is in charge: every seated player may choose levels, restart and go back to the menu. */
   #input(id, p, d) {
     if (DEBUG && (d.debugChunk || d.defsRequest)) return this.#debugInput(id, d);
+    if (DEBUG && d.lab) return this.#labInput(id, p, d.lab);
     const settled = performance.now() - this.startedAt > START_GRACE * 1000;
     if (Number.isInteger(d.start)) {
       if (settled && d.start >= 0 && d.start < levels.length) this.#startLevel(d.start);
@@ -209,6 +218,70 @@ class BalanceGame {
     else if (this.levelIdx >= 0 && keys() !== before) this.#startLevel(this.levelIdx);
   }
 
+  /**
+   * Debug: the LEVEL LAB. While it is on nothing is won or lost, the drop zone is ignored, and the level designer can
+   *   { on: bool }              switch the lab on / off (off = the level is a normal level again; it is restarted by the client)
+   *   { paused: bool }          freeze / unfreeze physics. Held blocks still move, so you can place blocks precisely and THEN let gravity act.
+   *   { spawn: { shape, material, x, y, rot, held } }   a new block: held by you (default) or put straight into the world
+   *   { grab: id }              pick up a block that is already in the world (also static ones: letting go makes it static again)
+   *   { remove: id }            delete a block
+   *   { reload: true }          start the current level again (the lab stays on), { play: n } start level n (ignores the start grace)
+   */
+  #labInput(id, p, c) {
+    if (typeof c !== 'object' || c === null) return;
+    const lab = this.lab;
+    if (typeof c.on === 'boolean') {
+      lab.on = c.on;
+      lab.by = c.on ? id : null; // whoever switched it on: when they leave, the lab ends (see onLeave)
+      if (!c.on) lab.paused = false;
+      if (c.on && (this.phase === PHASE.WON || this.phase === PHASE.LOST)) {
+        this.phase = PHASE.PLAY;
+        this.why = 0;
+        this.settle = 0;
+        this.endedFor = 0;
+      }
+    }
+    if (typeof c.paused === 'boolean' && lab.on) lab.paused = c.paused;
+    if (c.play !== undefined) {
+      if (Number.isInteger(c.play) && c.play >= 0 && c.play < levels.length) this.#startLevel(c.play);
+      return;
+    }
+    if (c.reload === true) {
+      if (this.levelIdx >= 0 && this.levelIdx < levels.length) this.#startLevel(this.levelIdx);
+      return;
+    }
+    if (!lab.on || !this.world || this.phase !== PHASE.PLAY) return;
+    const num = (v, d, lo, hi) => clamp(Number.isFinite(v) ? v : d, lo, hi);
+
+    if (c.spawn && typeof c.spawn === 'object') {
+      const s = c.spawn;
+      if (!SHAPE_KEYS.includes(s.shape) || !MATERIAL_KEYS.includes(s.material) || this.recs.size >= LAB_MAX_BLOCKS) return;
+      const x = num(s.x, 0, -MAX_HOLD_X, MAX_HOLD_X);
+      const y = num(s.y, 12, MIN_HOLD_Y, MAX_HOLD_Y);
+      const rot = rad(num(s.rot, 0, -1e5, 1e5));
+      const item = { id: this.labId++, shape: s.shape, material: s.material, heldBy: null, slot: -1, lab: true };
+      if (s.held === false) {
+        this.#makeBlock(item, x, y, rot, false);
+        this.settle = 0;
+      } else {
+        this.#putBack(p);
+        p.held = { item, rec: this.#makeBlock(item, x, y, rot, true, p.slot), tx: x, ty: y, trot: rot };
+      }
+    } else if (Number.isInteger(c.grab)) {
+      const rec = this.recs.get(c.grab);
+      if (!rec || rec.held || rec.kind !== 'block') return;
+      this.#putBack(p);
+      const pos = rec.body.getPosition();
+      const angle = rec.body.getAngle();
+      const item = { id: rec.id, shape: SHAPE_KEYS[rec.si], material: MATERIAL_KEYS[rec.mi], heldBy: null, slot: -1, lab: true };
+      this.#removeBlock(rec);
+      p.held = { item, rec: this.#makeBlock(item, pos.x, pos.y, angle, true, p.slot), tx: pos.x, ty: pos.y, trot: angle };
+    } else if (Number.isInteger(c.remove)) {
+      const rec = this.recs.get(c.remove);
+      if (rec && !rec.held && rec.kind === 'block') this.#removeBlock(rec);
+    }
+  }
+
   /** Take a block from the table. Its slot stays empty (no refill) until the block is dropped into the play area. */
   #pick(id, p, d) {
     if (p.held) return;
@@ -237,15 +310,17 @@ class BalanceGame {
     if (!h) return;
     const level = levels[this.levelIdx];
     const pos = h.rec.body.getPosition();
-    if (!inDrop(level, pos.x, pos.y)) return this.#putBack(p);
+    if (!this.lab.on && !inDrop(level, pos.x, pos.y)) return this.#putBack(p); // (the level lab lets you drop anywhere)
 
     const angle = h.rec.body.getAngle();
     const item = h.item;
     this.#removeBlock(h.rec);
     p.held = null;
     this.#makeBlock(item, pos.x, pos.y, angle, false); // same id, now a normal falling body
-    this.table[item.slot] = this.queue.shift() ?? null; // only now does a new block appear in the empty slot
-    if (this.table[item.slot]) this.table[item.slot].slot = item.slot;
+    if (!item.lab) { // (blocks made in the level lab were never on the table)
+      this.table[item.slot] = this.queue.shift() ?? null; // only now does a new block appear in the empty slot
+      if (this.table[item.slot]) this.table[item.slot].slot = item.slot;
+    }
     this.settle = 0;
   }
 
@@ -272,6 +347,7 @@ class BalanceGame {
     }
     this.recOf.set(bowl, { kind: 'bowl' });
 
+    this.labId = LAB_ID_START;
     let nextId = 1;
     for (const ib of level.initialBlocks) {
       this.#makeBlock({ id: nextId++, shape: ib.shape, material: ib.material }, ib.x, ib.y, rad(ib.rot ?? 0), false);
@@ -390,6 +466,7 @@ class BalanceGame {
 
     this.acc += dt;
     let steps = 0;
+    if (this.lab.paused) this.acc = 0; // the lab froze physics
     while (this.acc >= STEP && steps < MAX_STEPS) {
       this.#buoyancy();
       this.world.step(STEP, 8, 4);
@@ -404,9 +481,9 @@ class BalanceGame {
       const pos = p.held.rec.body.getPosition();
       const inside = inDrop(level, pos.x, pos.y);
       if (inside) p.held.rec.armed = true;
-      p.held.rec.bad = p.held.rec.armed && !inside; // red = you have taken it out of the drop zone again (letting go sends it back to the table)
+      p.held.rec.bad = !this.lab.on && p.held.rec.armed && !inside; // red = you have taken it out of the drop zone again (letting go sends it back to the table)
     }
-    if (this.phase === PHASE.PLAY) this.#rules(dt);
+    if (this.phase === PHASE.PLAY && !this.lab.on) this.#rules(dt);
   }
 
   #moveHeld(dt) {

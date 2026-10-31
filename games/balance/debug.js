@@ -10,6 +10,10 @@
 //   Backgrounds  ground, mist and the placed models
 //   Export       download definitions.js, copy single tables, import JSON
 //
+// Two bigger tools open from the header (they live in studio.js):
+//   Shape studio  every shape side by side at one scale next to the bowl, corner editing, and a 3D preview as it looks in the game
+//   Level studio  a blueprint of the level next to the running game, with a live test lab (spawn / grab blocks, freeze gravity, capture)
+//
 // How edits travel: you change a DRAFT copy of the definitions. When it is valid it is sent to the server (after a short pause),
 // the server applies it and sends it back to every player, and each client redraws. So the server and every client always see
 // the same definitions at the same moment. Changes that touch the physics (shapes, bowls, materials, tuning, levels) apply to the
@@ -17,10 +21,11 @@
 // Your draft is also kept in this browser (localStorage) so a reload does not lose it: "Discard saved edits" on the Export tab clears it.
 
 import * as S from './shared.js';
+import { createStudio } from './studio.js';
+import { clone, h, NS, svg } from './ui.js';
 
 const STORE = 'balance.debug.defs';
 const PHYSICS = new Set(['tuning', 'materials', 'shapes', 'bowls', 'levels']);
-const NS = 'http://www.w3.org/2000/svg';
 
 const TUNING_HELP = {
   gravity: 'units / s². Applies at restart.',
@@ -42,26 +47,6 @@ const TUNING_HELP = {
   camera: 'fov = vertical field of view, pitch = degrees looking down, targetY = height it looks at.',
 };
 
-/** Tiny element builder: h('div', { class: 'x', onclick }, child, 'text', [more children]). Props are applied in order (put `type` first). */
-function h(tag, props, ...kids) {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(props ?? {})) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === 'class') e.className = v;
-    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
-    else if (k === 'value' || k === 'checked' || k === 'disabled') e[k] = v;
-    else e.setAttribute(k, v === true ? '' : v);
-  }
-  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
-  return e;
-}
-const svg = (name, attrs = {}, ...kids) => {
-  const e = document.createElementNS(NS, name);
-  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
-  kids.forEach((k) => e.append(k));
-  return e;
-};
-const clone = (v) => JSON.parse(JSON.stringify(v));
 const KEY = /^[A-Za-z][\w-]*$/;
 
 export function createDebugMenu(view) {
@@ -91,6 +76,7 @@ export function createDebugMenu(view) {
     if (PHYSICS.has(kind)) state.needsRestart = true;
     clearTimeout(timer);
     if (validate()) timer = setTimeout(send, 300);
+    studio.changed(kind); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
   }
 
   // The platform drops inbound messages over 4096 characters and the full definitions are far bigger, so they travel as
@@ -112,7 +98,7 @@ export function createDebugMenu(view) {
       localStorage.setItem(STORE, JSON.stringify(draft));
       state.restored = true;
     } catch { /* private mode */ }
-    if (state.autoRestart && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.ctx.sendInput({ restart: true });
+    if (state.autoRestart && !studio.current && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.ctx.sendInput({ restart: true });
     renderStatus();
   }
 
@@ -691,12 +677,42 @@ export function createDebugMenu(view) {
     helper('Show drop zone', 'showDrop', (on) => view.debugShowDrop(on)),
     helper('Auto-restart', 'autoRestart'),
     h('span', { class: 'bb-dbg-grow' }),
+    btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
+    btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
     btn('Restart', () => { flush(); view.ctx.sendInput({ restart: true }); }),
     btn('Menu', () => view.ctx.sendInput({ menu: true })),
     btn('✕', () => setOpen(false)));
   const panel = h('div', { class: 'bb-dbg-panel' }, header, statusEl, tabsEl, bodyEl);
   const toggle = h('button', { type: 'button', class: 'bb-dbg-toggle', title: 'Debug menu ( ` )', onclick: () => setOpen(!state.open) }, '🛠 Debug');
-  const root = h('div', { class: 'bb-dbg' }, toggle, panel);
+  // the studios (studio.js): a shape editor and a level editor with a live test lab. They edit the same draft as the tabs.
+  const studio = createStudio(view, {
+    draft: () => draft,
+    touch,
+    flush,
+    problems: () => state.problems,
+    showProblems(el) {
+      const n = state.problems.length;
+      el.textContent = n ? `⚠ ${n} problem${n > 1 ? 's' : ''}: ${state.problems[0]}` : '';
+      el.title = state.problems.join('\n');
+      el.classList.toggle('bb-on', n > 0);
+    },
+    w: { field, section, num, text, check, select, color, slider, btn, note },
+    open: (name) => openStudio(name),
+    close: () => closeStudio(),
+  });
+  const root = h('div', { class: 'bb-dbg' }, toggle, panel, studio.el);
+
+  function openStudio(name) {
+    setOpen(false);
+    flush();
+    root.classList.add('bb-st-open');
+    studio.open(name);
+  }
+  function closeStudio() {
+    flush();
+    studio.close();
+    root.classList.remove('bb-st-open');
+  }
 
   function setOpen(on) {
     state.open = on;
@@ -728,7 +744,8 @@ export function createDebugMenu(view) {
   const onKey = (e) => {
     if (e.key !== '`' || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? '')) return;
     e.preventDefault();
-    setOpen(!state.open);
+    if (studio.current) closeStudio();
+    else setOpen(!state.open);
   };
   window.addEventListener('keydown', onKey);
 
@@ -755,9 +772,11 @@ export function createDebugMenu(view) {
       draft = S.cloneDefinitions();
       validate();
       render();
+      studio.refresh();
     },
     dispose() {
       window.removeEventListener('keydown', onKey);
+      studio.dispose();
       clearTimeout(timer);
       view.onRun = null;
       view.debugFreeCam(false);

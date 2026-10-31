@@ -1,7 +1,7 @@
 import * as THREE from 'three'; // resolved by the import map in client/index.html
 import { el } from '../../client/dom.js';
 import {
-  applyDefinitions, backgroundKeyOf, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
+  applyDefinitions, backgroundKeyOf, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
   HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y,
 } from './shared.js';
 import { flatNormals, parseObj } from './obj.js';
@@ -148,7 +148,7 @@ function circleOutline(part, sides = 48) {
 }
 
 class BalanceView {
-  markerGeo = new THREE.SphereGeometry(0.55, 16, 12);
+  markerGeo = Object.assign(new THREE.SphereGeometry(0.55, 16, 12), { userData: { shared: true } }); // (never disposed with a scene)
   objCache = new Map(); //   model file -> Promise of the parsed .obj
   modelGeo = new Map(); //   file|flat/smooth -> [{ name, geo }] (shared by every instance of the model)
   worldToken = 0; //         bumps whenever the world is rebuilt, so late-loading models of the old one are dropped
@@ -162,6 +162,8 @@ class BalanceView {
   defsRev = 0; //            debug: which version of the definitions we have
   defsAsk = 0;
   onRun = null; //           debug: called when a level starts / restarts
+  onSnap = null; //          debug: called with every snapshot (the level studio draws the live world from it)
+  dock = 0; //               debug: pixels at the left that the studio panel covers (the game is drawn in the rest)
   ptr = null; //             pointer position in the play plane while carrying
   tableViews = new Map(); // blockId -> view of a block lying on the table
   bodyViews = new Map(); //  blockId -> view of a block in the play area (static, floating, falling, or held by somebody)
@@ -292,6 +294,7 @@ class BalanceView {
     }
 
     this.#updateHud(s);
+    this.onSnap?.(s);
   }
 
   dispose() {
@@ -371,6 +374,163 @@ class BalanceView {
     const off = this.camera.position.clone().sub(target);
     this.freeCam = { target, dist: off.length(), yaw: Math.atan2(off.x, off.z), pitch: Math.asin(off.y / off.length()) };
     this.mode = 'none';
+  }
+
+  /** Make room for a studio panel `px` pixels wide at the left: the game is drawn in the rest. */
+  debugDock(px) {
+    this.dock = px;
+    this.root.style.setProperty('--bb-dock', `${px}px`);
+    this.#resize();
+  }
+
+  /**
+   * A separate little 3D view for the shape studio. It shows the blocks of the DRAFT definitions as they look in the game (same chamfered
+   * geometry, same shaders) standing in a row on the table in front of the bowl, which is drawn at the same scale.
+   *   preview.set({ items: [{ def, shader, selected }], bowl, depth, chamfer })     rebuild (cheap enough to call on every edit)
+   *   preview.resetView()   preview.dispose()
+   * Drag = turn, wheel = zoom, double click = back to the game's camera.
+   */
+  debugPreview(canvas) {
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight('#ffffff', 0.9));
+    const sun = new THREE.DirectionalLight('#ffffff', 1.4);
+    sun.position.set(-20, 40, 40);
+    scene.add(sun);
+    const camera = new THREE.PerspectiveCamera(tuning.camera.fov, 1, 1, 3000);
+    const cam = { yaw: 0, pitch: THREE.MathUtils.degToRad(tuning.camera.pitch), dist: 120, target: new THREE.Vector3() };
+    let content = null;
+    let bounds = null; //   what resetView() must fit
+    let moved = false; //   the user turned the camera: do not fit again on every edit
+    let drag = null;
+    let raf = 0;
+    let dead = false;
+
+    const place = () => {
+      const cp = Math.cos(cam.pitch);
+      camera.position.set(cam.target.x + cam.dist * cp * Math.sin(cam.yaw), cam.target.y + cam.dist * Math.sin(cam.pitch), cam.target.z + cam.dist * cp * Math.cos(cam.yaw));
+      camera.lookAt(cam.target);
+      camera.updateMatrixWorld(true);
+    };
+    const fit = () => {
+      if (!bounds) return;
+      cam.yaw = 0;
+      cam.pitch = THREE.MathUtils.degToRad(tuning.camera.pitch);
+      cam.target.set(0, bounds.cy, 0);
+      const p = new THREE.Vector3();
+      for (cam.dist = 30; cam.dist < 1500; cam.dist += 2) {
+        place();
+        if (bounds.pts.every((k) => { p.copy(k).project(camera); return Math.abs(p.x) <= 0.95 && Math.abs(p.y) <= 0.95 && p.z < 1; })) break;
+      }
+      moved = false;
+    };
+    const resize = () => {
+      const w = Math.max(1, canvas.clientWidth);
+      const h = Math.max(1, canvas.clientHeight);
+      if (canvas.width !== Math.floor(w * renderer.getPixelRatio()) || canvas.height !== Math.floor(h * renderer.getPixelRatio())) {
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        if (!moved) fit();
+      }
+    };
+    const loop = () => {
+      if (dead) return;
+      raf = requestAnimationFrame(loop);
+      resize();
+      place();
+      renderer.render(scene, camera);
+    };
+
+    const onDown = (e) => { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); };
+    const onMove = (e) => {
+      if (!drag) return;
+      cam.yaw -= (e.clientX - drag.x) * 0.006;
+      cam.pitch = THREE.MathUtils.clamp(cam.pitch + (e.clientY - drag.y) * 0.006, -0.2, 1.5);
+      drag = { x: e.clientX, y: e.clientY };
+      moved = true;
+    };
+    const onUp = () => { drag = null; };
+    const onWheel = (e) => { e.preventDefault(); cam.dist = THREE.MathUtils.clamp(cam.dist * Math.exp(e.deltaY * 0.001), 8, 1500); moved = true; };
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointermove', onMove);
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointercancel', onUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('dblclick', fit);
+
+    const api = {
+      set: ({ items, bowl, depth, chamfer }) => {
+        if (content) {
+          content.removeFromParent();
+          this.#disposeTree(content);
+        }
+        content = new THREE.Group();
+        scene.add(content);
+        const bg = backgroundOf(this.currentLevel);
+        scene.background = new THREE.Color(bg.mist);
+        const groundY = groundYOf(bowl);
+        const gap = 2.5;
+        const built = items.map((it) => {
+          let shape = null;
+          try { shape = buildShape(it.def, '?'); } catch { /* an unfinished shape: skip it */ }
+          return { ...it, shape };
+        }).filter((it) => it.shape);
+        const rowW = built.reduce((a, it) => a + it.shape.w + gap, -gap);
+        const tableW = Math.max(TABLE.w, rowW + 14, bowl.a * 2 + 16);
+        const fog = { uFogColor: { value: rawColor(bg.mist) }, uFog: { value: new THREE.Vector2(1e5, 2e5) } };
+
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = groundY - TABLE.h;
+        content.add(floor);
+        const table = new THREE.Mesh(new THREE.BoxGeometry(tableW, TABLE.h, TABLE.d), this.#blockMaterial('floorwood', 0.7));
+        table.position.set(0, groundY - TABLE.h / 2, TABLE.z);
+        content.add(table);
+        const [wood, water] = this.#bowlMeshes(bowl);
+        content.add(wood, water);
+
+        let x = -rowW / 2;
+        let top = bowl.rimY;
+        for (const it of built) {
+          const group = new THREE.Group();
+          const mat = this.#blockMaterial(it.shader, (x * 0.13 + 1) % 1);
+          const outlines = it.shape.visual ? it.shape.visual.map((v) => v.pts) : it.shape.parts.map((q) => (q.type === 'circle' ? circleOutline(q) : q.pts));
+          for (const pts of outlines) group.add(new THREE.Mesh(chamferedPrism(pts, depth, chamfer), mat));
+          group.position.set(x + it.shape.w / 2, groundY + it.shape.h / 2, FRONT_Z);
+          content.add(group);
+          top = Math.max(top, groundY + it.shape.h);
+          if (it.selected) {
+            const dot = new THREE.Mesh(this.markerGeo, new THREE.MeshBasicMaterial({ color: '#f43f5e' }));
+            dot.position.set(group.position.x, groundY + it.shape.h + 1.6, FRONT_Z);
+            content.add(dot);
+          }
+          x += it.shape.w + gap;
+        }
+        const half = Math.max(rowW / 2, bowl.a) + 3;
+        bounds = {
+          cy: groundY + (top - groundY) / 2,
+          pts: [[-half, groundY, FRONT_Z + depth], [half, groundY, FRONT_Z + depth], [-half, top + 3, 0], [half, top + 3, 0], [0, bowl.rimY + 2, -bowl.a * bowl.zscale]].map(([a, b, c]) => new THREE.Vector3(a, b, c)),
+        };
+        if (!moved) fit();
+      },
+      resetView: fit,
+      dispose: () => {
+        dead = true;
+        cancelAnimationFrame(raf);
+        canvas.removeEventListener('pointerdown', onDown);
+        canvas.removeEventListener('pointermove', onMove);
+        canvas.removeEventListener('pointerup', onUp);
+        canvas.removeEventListener('pointercancel', onUp);
+        canvas.removeEventListener('wheel', onWheel);
+        canvas.removeEventListener('dblclick', fit);
+        if (content) this.#disposeTree(content);
+        renderer.dispose();
+      },
+    };
+    raf = requestAnimationFrame(loop);
+    return api;
   }
 
   /** A red wireframe of the drop zone of the current level. */
@@ -455,14 +615,27 @@ class BalanceView {
     world.add(table);
 
     // the bowl: the profile turned around the vertical axis (flat bottom, rounded corners), or a model if the bowl has one
-    const { inner, outer } = bowlProfile(BOWL_SEGS, bowl);
-    const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y)); // from the middle of the flat bottom up to the rim
+    const [wood, water] = this.#bowlMeshes(bowl);
     if (bowl.model) {
+      wood.geometry.dispose();
+      wood.material.dispose();
       this.#addModel(world, bowl.model, token, 0, null);
     } else {
-      const profile = [...half(outer), ...half(inner).reverse()]; // outer wall up, inner wall down: the normals come out facing away from the wood
-      world.add(new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide)));
+      world.add(wood);
     }
+    world.add(water);
+
+    // the scenery
+    for (const inst of bg.models) this.#addModel(world, inst, token, floorY, fog);
+    this.#fitCamera();
+  }
+
+  /** The two meshes of a generated bowl: the wood (turned profile, outer wall up and inner wall down) and the water inside it. */
+  #bowlMeshes(bowl) {
+    const { inner, outer } = bowlProfile(BOWL_SEGS, bowl);
+    const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y)); // from the middle of the flat bottom up to the rim
+    const profile = [...half(outer), ...half(inner).reverse()]; // the normals come out facing away from the wood
+    const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide));
 
     // the water: the inside of the bowl up to WATER_Y (a lathe too: the side, closed by a flat top)
     const wall = half(inner);
@@ -484,11 +657,7 @@ class BalanceView {
       new THREE.MeshBasicMaterial({ color: bowl.water.color, transparent: true, opacity: bowl.water.opacity, depthWrite: false, side: THREE.DoubleSide }),
     );
     water.renderOrder = 5;
-    world.add(water);
-
-    // the scenery
-    for (const inst of bg.models) this.#addModel(world, inst, token, floorY, fog);
-    this.#fitCamera();
+    return [wood, water];
   }
 
   #floorMaterial(bg, fog) {
@@ -866,7 +1035,7 @@ void main() {
 
   // ── layout ──
   #resize() {
-    const w = Math.max(1, this.ctx.container.clientWidth);
+    const w = Math.max(1, this.ctx.container.clientWidth - this.dock);
     const h = Math.max(1, this.ctx.container.clientHeight);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;

@@ -1,0 +1,1295 @@
+// CLIENT ONLY: the two studios of the debug menu (loaded by debug.js, so only with DEBUG on).
+//
+//   SHAPE STUDIO  A 2D board that shows EVERY shape at the same scale, side by side, next to the cross-section of a bowl, so you can judge
+//                 how they fit together. Drag corners to reshape, click an edge to add a corner, right-click a corner to remove it.
+//                 Next to it a 3D preview draws the same shapes with the game's own geometry and shaders, standing on the table in
+//                 front of the bowl, updating while you edit.
+//
+//   LEVEL STUDIO  A blueprint (side view of the bowl, water, drop zone, limits and blocks) next to the running game. Two modes:
+//                   Layout     the game shows the start layout frozen; drag blocks in the blueprint to place them, Q / E turn them.
+//                   Live test  gravity is on and you can spawn any shape, grab and move any block (also the static ones), freeze
+//                              and unfreeze gravity, reset, and capture what you built as the new start layout.
+//                 While the studio is open nothing is won or lost (the server's "lab" mode).
+//
+// Both edit the same DRAFT as the rest of the debug menu (see debug.js), so everything is sent to the server, shared with the other
+// players and exported like any other edit.
+
+import * as S from './shared.js';
+import { clone, h, svg } from './ui.js';
+
+const KEY = /^[A-Za-z][\w-]*$/;
+const DOCK = 470; // width of the level studio panel
+const SHADER_COLOR = { wood: '#c99a62', wood2: '#dcc294', glass: '#9fd3e6', stone1: '#8f9298', stone2: '#6d717a', float: '#86b0d6' };
+const SNAPS = [['0', 'free'], ['0.1', '0.1'], ['0.25', '0.25'], ['0.5', '0.5'], ['1', '1']];
+const ACCENT = '#f43f5e';
+
+const f3 = (n) => String(Math.round(n * 1000) / 1000);
+const parsePts = (str) => String(str ?? '').trim().split(/\s+/).filter(Boolean).map((p) => p.split(',').map(Number));
+const ptsStr = (pts) => pts.map(([x, y]) => `${f3(x)},${f3(y)}`).join(' ');
+const snapTo = (v, step) => (step > 0 ? Math.round(v / step) * step : Math.round(v * 1000) / 1000);
+const deg = (r) => (r * 180) / Math.PI;
+/** replaceChildren that skips null / false and flattens lists (a bare `null` would otherwise be drawn as the text "null"). */
+const put = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
+const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? '');
+
+function polyArea(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % pts.length];
+    a += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(a) / 2;
+}
+function isConvex(pts) {
+  let sign = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const c = pts[(i + 2) % pts.length];
+    const z = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+    if (Math.abs(z) < 1e-9) continue;
+    if (sign && Math.sign(z) !== sign) return false;
+    sign = Math.sign(z);
+  }
+  return true;
+}
+const circleOf = (p) => ({ x: p.x ?? p.diameter / 2, y: p.y ?? p.diameter / 2, r: p.diameter / 2 });
+/** Bounding box [x0, y0, x1, y1] of the parts that make up the body (drawing-only outlines are left out). */
+function boxOf(def) {
+  let b = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const p of def) {
+    if (p.visual) continue;
+    if (p.type === 'circle') {
+      const c = circleOf(p);
+      b = [Math.min(b[0], c.x - c.r), Math.min(b[1], c.y - c.r), Math.max(b[2], c.x + c.r), Math.max(b[3], c.y + c.r)];
+    } else {
+      for (const [x, y] of parsePts(p.points)) b = [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)];
+    }
+  }
+  return Number.isFinite(b[0]) && b.every(Number.isFinite) ? b : [0, 0, 1, 1];
+}
+const shapeCache = new Map();
+/** The built shape (centred, counter-clockwise) of a shape definition, or null while it is not valid. */
+function built(def) {
+  const k = JSON.stringify(def);
+  if (!shapeCache.has(k)) {
+    try { shapeCache.set(k, S.buildShape(def, '?')); } catch { shapeCache.set(k, null); }
+    if (shapeCache.size > 400) shapeCache.delete(shapeCache.keys().next().value);
+  }
+  return shapeCache.get(k);
+}
+const matColor = (draft, key) => SHADER_COLOR[draft.materials[key]?.shader] ?? '#b9b0a0';
+
+const bowlFull = (draft, key) => {
+  const b = draft.bowls[key] ?? {};
+  return { ...S.BOWL_DEFAULTS, ...b, water: { ...S.BOWL_DEFAULTS.water, ...b.water } };
+};
+
+/** SVG thumbnail of a shape definition, fitted into `w` x `hgt` pixels. */
+function thumb(def, color, w = 46, hgt = 34) {
+  const b = boxOf(def);
+  const bw = Math.max(0.1, b[2] - b[0]);
+  const bh = Math.max(0.1, b[3] - b[1]);
+  const k = Math.min((w - 4) / bw, (hgt - 4) / bh);
+  const root = svg('svg', { width: w, height: hgt, viewBox: `0 0 ${w} ${hgt}`, class: 'bb-st-thumb' });
+  const g = svg('g', { transform: `translate(${(w - bw * k) / 2 - b[0] * k} ${(hgt + bh * k) / 2 + b[1] * k}) scale(${k} ${-k})` });
+  for (const p of def) {
+    if (p.visual) continue;
+    const common = { fill: color, stroke: '#1f2937', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' };
+    if (p.type === 'circle') {
+      const c = circleOf(p);
+      g.append(svg('circle', { cx: c.x, cy: c.y, r: c.r, ...common }));
+    } else {
+      g.append(svg('polygon', { points: p.points, ...common }));
+    }
+  }
+  root.append(g);
+  return root;
+}
+
+/**
+ * A pan / zoom SVG board in world units (y up). Content is drawn into `board.g` by the owner; strokes should use
+ * vector-effect="non-scaling-stroke". `down(world, event)` may return { move(world, event), up(world, event) } to start a drag,
+ * anything else pans the board.
+ */
+function makeBoard({ down, context, wheel, resized }) {
+  const root = svg('svg', { class: 'bb-st-svg' });
+  const g = svg('g');
+  root.append(g);
+  const v = { tx: 0, ty: 0, k: 10, fitted: false, userMoved: false, bounds: null };
+  const size = () => {
+    const r = root.getBoundingClientRect();
+    return { w: r.width || 600, h: r.height || 400, r };
+  };
+  const apply = () => g.setAttribute('transform', `translate(${v.tx} ${v.ty}) scale(${v.k} ${-v.k})`);
+  const worldAt = (cx, cy) => {
+    const { r } = size();
+    return { x: (cx - r.left - v.tx) / v.k, y: -(cy - r.top - v.ty) / v.k };
+  };
+  const inside = (cx, cy) => {
+    const { r } = size();
+    return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+  };
+  const board = {
+    el: root, g, v, worldAt, inside,
+    /** The visible world rectangle. */
+    view() {
+      const { w, h: hh } = size();
+      return { x0: -v.tx / v.k, x1: (w - v.tx) / v.k, y1: v.ty / v.k, y0: -(hh - v.ty) / v.k };
+    },
+    fit(b = v.bounds) {
+      if (!b) return;
+      v.bounds = b;
+      const { w, h: hh } = size();
+      v.k = Math.max(0.5, Math.min(w / (b[2] - b[0]), hh / (b[3] - b[1])) * 0.94);
+      v.tx = w / 2 - ((b[0] + b[2]) / 2) * v.k;
+      v.ty = hh / 2 + ((b[1] + b[3]) / 2) * v.k;
+      v.fitted = true;
+      v.userMoved = false;
+      apply();
+    },
+    apply,
+  };
+
+  let drag = null;
+  root.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    root.setPointerCapture(e.pointerId);
+    drag = down?.(worldAt(e.clientX, e.clientY), e) ?? { pan: true, x: e.clientX, y: e.clientY, tx: v.tx, ty: v.ty };
+  });
+  root.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    if (drag.pan) {
+      v.tx = drag.tx + (e.clientX - drag.x);
+      v.ty = drag.ty + (e.clientY - drag.y);
+      v.userMoved = true;
+      apply();
+      resized?.(false);
+    } else {
+      drag.move?.(worldAt(e.clientX, e.clientY), e);
+    }
+  });
+  const end = (e) => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (!d.pan) d.up?.(worldAt(e.clientX, e.clientY), e);
+  };
+  root.addEventListener('pointerup', end);
+  root.addEventListener('pointercancel', end);
+  root.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    context?.(worldAt(e.clientX, e.clientY), e);
+  });
+  root.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (wheel?.(e)) return;
+    const w = worldAt(e.clientX, e.clientY);
+    const nk = Math.min(400, Math.max(0.8, v.k * Math.exp(-e.deltaY * 0.0015)));
+    const { r } = size();
+    v.tx = e.clientX - r.left - w.x * nk;
+    v.ty = e.clientY - r.top + w.y * nk;
+    v.k = nk;
+    v.userMoved = true;
+    apply();
+    resized?.(true);
+  }, { passive: false });
+  new ResizeObserver(() => {
+    if (!v.fitted && v.bounds) board.fit();
+    else if (!v.userMoved && v.bounds) board.fit();
+    resized?.(true);
+  }).observe(root);
+  return board;
+}
+
+/** Grid + bowl + water, drawn into `g` (world units). `px` = size of one screen pixel in world units. */
+function drawGrid(g, view, step, px) {
+  const lines = [];
+  const major = [];
+  const x0 = Math.floor(view.x0 / step) * step;
+  const y0 = Math.floor(view.y0 / step) * step;
+  if ((view.x1 - view.x0) / step > 400 || (view.y1 - view.y0) / step > 400) return;
+  for (let x = x0; x <= view.x1; x += step) (Math.round(x / step) % 5 === 0 ? major : lines).push(`M${x} ${view.y0}V${view.y1}`);
+  for (let y = y0; y <= view.y1; y += step) (Math.round(y / step) % 5 === 0 ? major : lines).push(`M${view.x0} ${y}H${view.x1}`);
+  g.append(
+    svg('path', { d: lines.join(''), stroke: 'rgba(148,163,184,.13)', fill: 'none', 'vector-effect': 'non-scaling-stroke' }),
+    svg('path', { d: major.join(''), stroke: 'rgba(148,163,184,.28)', fill: 'none', 'vector-effect': 'non-scaling-stroke' }),
+  );
+  void px;
+}
+
+let clipId = 0;
+/** The bowl: wood, water inside up to the water line, and the table top under it. */
+function drawBowl(g, bowl) {
+  const { inner, outer } = S.bowlProfile(48, bowl);
+  const id = `bbclip${clipId++}`;
+  const innerPoly = inner.map(([x, y]) => `${f3(x)},${f3(y)}`).join(' ');
+  const wood = [...inner, ...[...outer].reverse()].map(([x, y]) => `${f3(x)},${f3(y)}`).join(' ');
+  const groundY = S.groundYOf(bowl);
+  g.append(
+    svg('clipPath', { id }, svg('polygon', { points: innerPoly })),
+    svg('rect', { x: -bowl.a - 1, y: groundY - 4, width: bowl.a * 2 + 2, height: S.WATER_Y - groundY + 4, fill: bowl.water.color, opacity: Math.min(0.6, bowl.water.opacity + 0.1), 'clip-path': `url(#${id})` }),
+    svg('polygon', { points: wood, fill: '#b98a56', stroke: '#6b4a26', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', opacity: 0.95 }),
+    svg('line', { x1: -bowl.a - 8, x2: bowl.a + 8, y1: S.WATER_Y, y2: S.WATER_Y, stroke: '#38bdf8', 'stroke-dasharray': '4 4', 'vector-effect': 'non-scaling-stroke', opacity: 0.7 }),
+  );
+}
+
+function drawParts(def, fill, stroke, extra = {}) {
+  const out = [];
+  for (const p of def) {
+    const common = { fill, stroke, 'stroke-width': 1.2, 'vector-effect': 'non-scaling-stroke', ...extra };
+    if (p.type === 'circle') {
+      const c = circleOf(p);
+      out.push(svg('circle', { cx: c.x, cy: c.y, r: c.r, ...common, ...(p.visual ? { 'stroke-dasharray': '3 3', fill: 'none' } : {}) }));
+    } else {
+      out.push(svg('polygon', { points: p.points, ...common, ...(p.visual ? { 'stroke-dasharray': '3 3', fill: 'none' } : {}) }));
+    }
+  }
+  return out;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  SHAPE STUDIO
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+function shapeStudio(view, api) {
+  const st = { sel: null, snap: 0.25, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
+  let layout = null; // { cells: { key: { ox, oy, ax, ay } }, rows: [{ y, x0, x1 }], bowlKey }
+  let preview = null;
+  let raf = 0;
+  let previewRaf = 0;
+
+  const D = () => api.draft();
+  const keys = () => Object.keys(D().shapes);
+  const snapV = (v) => snapTo(v, st.snap);
+
+  // ── layout: bowl at the left, then every shape on a shelf, wrapped into rows. A shape keeps its place while you drag its corners. ──
+  function bowlKey() {
+    const d = D();
+    if (!d.bowls[st.bowl]) st.bowl = d.bowls[d.levels[view.snap?.lv ?? -1]?.bowl] ? d.levels[view.snap.lv].bowl : Object.keys(d.bowls)[0];
+    return st.bowl;
+  }
+  function relayout() {
+    const d = D();
+    const bowl = bowlFull(d, bowlKey());
+    const gY = S.groundYOf(bowl);
+    const start = bowl.a + bowl.t + 5;
+    const maxX = start + 46;
+    const cells = {};
+    const rows = [];
+    let x = start;
+    let y = gY;
+    let rowH = 0;
+    let row = { y, x0: start - 2, x1: start };
+    for (const key of keys()) {
+      const b = boxOf(d.shapes[key]);
+      const w = b[2] - b[0];
+      const hh = b[3] - b[1];
+      if (x > start && x + w > maxX) {
+        rows.push(row);
+        y -= rowH + 4;
+        x = start;
+        rowH = 0;
+        row = { y, x0: start - 2, x1: start };
+      }
+      cells[key] = { ox: x, oy: y, ax: b[0], ay: b[1], w, h: hh };
+      x += w + 2.5;
+      rowH = Math.max(rowH, hh);
+      row.x1 = Math.max(row.x1, x);
+    }
+    rows.push(row);
+    const top = gY + Math.max(bowl.rimY - gY + 3, 12);
+    layout = { cells, rows, bowlKey: bowlKey(), bounds: [-bowl.a - bowl.t - 3, y - 4, maxX + 3, top] };
+  }
+  const shift = (key) => {
+    const c = layout.cells[key];
+    return c ? { x: c.ox - c.ax, y: c.oy - c.ay } : { x: 0, y: 0 };
+  };
+
+  // ── the 2D board ──
+  const board = makeBoard({
+    down(w, e) {
+      const t = e.target;
+      const role = t.dataset?.role;
+      const d = D();
+      const def = d.shapes[st.sel];
+      if (role && def) {
+        const part = def[+t.dataset.part];
+        const sh = shift(st.sel);
+        const local = (q) => ({ x: snapV(q.x - sh.x), y: snapV(q.y - sh.y) });
+        if (role === 'v') {
+          const pts = parsePts(part.points);
+          const i = +t.dataset.idx;
+          return { move(q) { const p = local(q); pts[i] = [p.x, p.y]; part.points = ptsStr(pts); edited(true); }, up() { edited(); } };
+        }
+        if (role === 'e') {
+          const pts = parsePts(part.points);
+          const i = +t.dataset.idx;
+          const a = pts[i];
+          const b = pts[(i + 1) % pts.length];
+          pts.splice(i + 1, 0, [snapV((a[0] + b[0]) / 2), snapV((a[1] + b[1]) / 2)]);
+          part.points = ptsStr(pts);
+          edited(true);
+          return { move(q) { const p = local(q); pts[i + 1] = [p.x, p.y]; part.points = ptsStr(pts); edited(true); }, up() { edited(); } };
+        }
+        if (role === 'c') {
+          const c0 = circleOf(part);
+          return { move(q) { const p = local(q); part.x = p.x; part.y = p.y; part.diameter = c0.r * 2; edited(true); }, up() { edited(); } };
+        }
+        if (role === 'r') {
+          return {
+            move(q) {
+              const c = circleOf(part);
+              part.x = c.x;
+              part.y = c.y;
+              part.diameter = Math.max(0.2, snapTo(Math.hypot(q.x - sh.x - c.x, q.y - sh.y - c.y) * 2, st.snap || 0.05));
+              edited(true);
+            },
+            up() { edited(); },
+          };
+        }
+      }
+      const hit = t.closest?.('[data-shape]');
+      if (hit) {
+        select(hit.dataset.shape);
+        return { move() {}, up() {} };
+      }
+      return null;
+    },
+    context(w, e) {
+      const t = e.target;
+      if (t.dataset?.role !== 'v') return;
+      const part = D().shapes[st.sel]?.[+t.dataset.part];
+      const pts = part ? parsePts(part.points) : [];
+      if (pts.length <= 3) return;
+      pts.splice(+t.dataset.idx, 1);
+      part.points = ptsStr(pts);
+      edited();
+    },
+    resized() { scheduleDraw(); },
+  });
+
+  function scheduleDraw() {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; draw(); });
+  }
+
+  function draw() {
+    if (!st.open) return;
+    if (!layout || keys().some((k) => !layout.cells[k])) relayout();
+    const d = D();
+    const g = board.g;
+    g.replaceChildren();
+    const { k } = board.v;
+    const px = 1 / k;
+    const bowl = bowlFull(d, layout.bowlKey);
+    const view2 = board.view();
+    drawGrid(g, view2, k > 12 ? 1 : 5, px);
+    drawBowl(g, bowl);
+    const label = (text, x, y, size, fill = '#cbd5e1', anchor = 'start') => svg('text', { transform: `translate(${x} ${y}) scale(1 -1)`, 'font-size': size * px, fill, 'text-anchor': anchor, 'font-family': 'system-ui, sans-serif' }, text);
+    g.append(label(`bowl "${layout.bowlKey}"  ${f3(bowl.a * 2)} wide at the rim, ${f3(bowl.b)} deep`, -bowl.a, S.groundYOf(bowl) - 1.6, 11));
+    for (const r of layout.rows) {
+      g.append(svg('line', { x1: r.x0, x2: r.x1, y1: r.y, y2: r.y, stroke: '#8a7a5c', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke' }));
+    }
+    const mats = Object.keys(d.materials).filter((m) => !d.materials[m].static);
+    let n = 0;
+    const top = svg('g'); // the handles of the selected shape: above every shape
+    for (const key of keys()) {
+      const def = d.shapes[key];
+      const sh = shift(key);
+      const sel = key === st.sel;
+      const matKey = st.mat === '(mixed)' ? mats[n++ % mats.length] : st.mat;
+      const col = matColor(d, matKey);
+      const grp = svg('g', { transform: `translate(${sh.x} ${sh.y})`, 'data-shape': key, class: 'bb-st-shape' });
+      grp.append(...drawParts(def, col, sel ? ACCENT : '#1f2937', { opacity: sel ? 1 : 0.92 }));
+      for (const [pi, p] of def.entries()) { // a part that is not convex cannot be a collision shape
+        if (p.type !== 'circle' && !p.visual && !isConvex(parsePts(p.points))) grp.append(svg('polygon', { points: p.points, fill: 'none', stroke: '#ef4444', 'stroke-width': 3, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
+        void pi;
+      }
+      g.append(grp);
+      const c = layout.cells[key];
+      const box = boxOf(def);
+      g.append(label(key, c.ox + (box[2] - box[0]) / 2, c.oy - 1.7, sel ? 12 : 10.5, sel ? '#fff' : '#94a3b8', 'middle'));
+      if (sel) {
+        g.append(label(`${f3(box[2] - box[0])} × ${f3(box[3] - box[1])}`, c.ox + (box[2] - box[0]) / 2, c.oy - 3.2, 10.5, '#fda4af', 'middle'));
+        for (const [pi, p] of def.entries()) {
+          const hg = svg('g', { transform: `translate(${sh.x} ${sh.y})` });
+          if (p.type === 'circle') {
+            const cc = circleOf(p);
+            hg.append(
+              svg('circle', { cx: cc.x, cy: cc.y, r: 5.5 * px, fill: '#fff', stroke: ACCENT, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'data-role': 'c', 'data-part': pi, class: 'bb-st-handle' }),
+              svg('circle', { cx: cc.x + cc.r, cy: cc.y, r: 5.5 * px, fill: ACCENT, stroke: '#fff', 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke', 'data-role': 'r', 'data-part': pi, class: 'bb-st-handle' }),
+            );
+          } else {
+            const pts = parsePts(p.points);
+            pts.forEach((a, i) => {
+              const b = pts[(i + 1) % pts.length];
+              hg.append(svg('circle', { cx: (a[0] + b[0]) / 2, cy: (a[1] + b[1]) / 2, r: 3.5 * px, fill: 'rgba(255,255,255,.5)', stroke: ACCENT, 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', 'data-role': 'e', 'data-part': pi, 'data-idx': i, class: 'bb-st-handle' }));
+            });
+            pts.forEach((a, i) => hg.append(svg('circle', { cx: a[0], cy: a[1], r: 5.5 * px, fill: p.visual ? '#fde68a' : '#fff', stroke: ACCENT, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'data-role': 'v', 'data-part': pi, 'data-idx': i, class: 'bb-st-handle' })));
+          }
+          top.append(hg);
+        }
+      }
+    }
+    g.append(top);
+  }
+
+  // ── editing ──
+  /** The selected shape changed. `live` = still dragging (only redraw). */
+  function edited(live = false) {
+    api.touch('shapes'); // validates + sends after a short pause, and calls changed() below
+    scheduleDraw();
+    if (!live) renderInspector();
+    else renderInfo();
+  }
+  /** Zoom the board to one shape (the overview keeps everything in view; this is for precise work). */
+  function focus(key = st.sel) {
+    if (!layout) relayout();
+    const c = layout.cells[key];
+    if (!c) return;
+    const w = Math.max(c.w, 12) * 0.75;
+    const hh = Math.max(c.h, 8) * 0.9;
+    board.fit([c.ox + c.w / 2 - w, c.oy + c.h / 2 - hh, c.ox + c.w / 2 + w, c.oy + c.h / 2 + hh]);
+    scheduleDraw();
+  }
+  function select(key) {
+    st.sel = key;
+    st.msg = '';
+    renderList();
+    renderInspector();
+    scheduleDraw();
+    updatePreview();
+  }
+  function usage(key) {
+    let n = 0;
+    for (const L of D().levels) if (L.initialBlocks.some((b) => b.shape === key) || L.shapes.some((s) => s.shape === key)) n++;
+    return n;
+  }
+  const fitSoon = () => requestAnimationFrame(() => { relayout(); board.fit(layout.bounds); scheduleDraw(); });
+  const fail = (msg) => { st.msg = msg; renderList(); };
+  function addShape(key, def) {
+    const d = D();
+    if (!KEY.test(key)) return fail('A shape name starts with a letter and uses letters, digits, _ and - only.');
+    if (d.shapes[key]) return fail(`"${key}" already exists.`);
+    d.shapes[key] = def;
+    st.msg = '';
+    st.sel = key;
+    st.newName = '';
+    layout = null;
+    api.touch('shapes');
+    renderAll();
+    fitSoon();
+    return undefined;
+  }
+  function rename(from, to) {
+    const d = D();
+    if (!KEY.test(to)) return fail('A shape name starts with a letter and uses letters, digits, _ and - only.');
+    if (to === from) return undefined;
+    if (d.shapes[to]) return fail(`"${to}" already exists.`);
+    const entries = Object.entries(d.shapes).map(([k, v]) => [k === from ? to : k, v]);
+    for (const k of Object.keys(d.shapes)) delete d.shapes[k];
+    for (const [k, v] of entries) d.shapes[k] = v;
+    for (const L of d.levels) {
+      L.initialBlocks.forEach((b) => { if (b.shape === from) b.shape = to; });
+      L.shapes.forEach((s) => { if (s.shape === from) s.shape = to; });
+    }
+    st.sel = to;
+    st.msg = '';
+    layout = null;
+    api.touch('shapes');
+    api.touch('levels');
+    renderAll();
+    return undefined;
+  }
+  function removeShape(key) {
+    const d = D();
+    const n = usage(key);
+    if (n) return fail(`"${key}" is used in ${n} level${n > 1 ? 's' : ''}: replace it there first.`);
+    if (keys().length <= 1) return fail('Keep at least one shape.');
+    const at = keys().indexOf(key);
+    delete d.shapes[key];
+    st.sel = keys()[Math.min(at, keys().length - 1)];
+    st.msg = '';
+    layout = null;
+    api.touch('shapes');
+    renderAll();
+    fitSoon();
+    return undefined;
+  }
+  /** Apply fn([x, y]) -> [x, y] to every corner and circle centre, then move the lot so its lower left corner is 0,0. */
+  function transform(fn) {
+    const def = D().shapes[st.sel];
+    for (const p of def) {
+      if (p.type === 'circle') {
+        const c = circleOf(p);
+        const [x, y] = fn([c.x, c.y]);
+        p.x = x;
+        p.y = y;
+      } else {
+        p.points = ptsStr(parsePts(p.points).map(fn));
+      }
+    }
+    toOrigin();
+  }
+  function toOrigin() {
+    const def = D().shapes[st.sel];
+    const b = boxOf(def);
+    for (const p of def) {
+      if (p.type === 'circle') {
+        const c = circleOf(p);
+        p.x = c.x - b[0];
+        p.y = c.y - b[1];
+      } else {
+        p.points = ptsStr(parsePts(p.points).map(([x, y]) => [x - b[0], y - b[1]]));
+      }
+    }
+    edited();
+  }
+
+  // ── panels ──
+  const listEl = h('div', { class: 'bb-st-list' });
+  const listHead = h('div', { class: 'bb-st-listhead' });
+  const inspEl = h('div', { class: 'bb-st-insp' });
+  const infoEl = h('div', { class: 'bb-st-info' });
+  const canvas = h('canvas', { class: 'bb-st-canvas' });
+
+  function renderList() {
+    const d = D();
+    const mats = Object.keys(d.materials).filter((m) => !d.materials[m].static);
+    put(listEl, ...keys().map((key, i) => {
+      const n = usage(key);
+      return h('button', { type: 'button', class: `bb-st-item${key === st.sel ? ' bb-on' : ''}`, onclick: () => { select(key); focus(key); } },
+        thumb(d.shapes[key], matColor(d, st.mat === '(mixed)' ? mats[i % mats.length] : st.mat)),
+        h('span', { class: 'bb-st-itemname' }, key), n ? h('span', { class: 'bb-st-badge', title: `used in ${n} level(s)` }, `×${n}`) : null);
+    }));
+    const nameIn = h('input', { type: 'text', placeholder: 'new shape name', value: st.newName });
+    nameIn.addEventListener('input', () => { st.newName = nameIn.value; });
+    nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') addShape(nameIn.value.trim(), [{ type: 'poly', points: '0,0 4,0 4,1 0,1' }]); });
+    put(listHead,
+      h('div', { class: 'bb-st-row' }, nameIn, btn('New', () => addShape(nameIn.value.trim(), [{ type: 'poly', points: '0,0 4,0 4,1 0,1' }]))),
+      st.sel ? h('div', { class: 'bb-st-row' },
+        btn('Duplicate', () => { let n = `${st.sel}_copy`; for (let i = 2; D().shapes[n]; i++) n = `${st.sel}_copy${i}`; addShape(n, clone(D().shapes[st.sel])); }),
+        btn('Delete', () => removeShape(st.sel), 'bb-dbg-danger')) : null,
+      st.msg ? h('div', { class: 'bb-dbg-err' }, st.msg) : null);
+  }
+
+  const btn = (text, fn, cls = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, onclick: fn }, text);
+
+  function renderInfo() {
+    const def = D().shapes[st.sel];
+    if (!def) return put(infoEl);
+    const b = boxOf(def);
+    let area = 0;
+    for (const p of def) {
+      if (p.visual) continue;
+      area += p.type === 'circle' ? Math.PI * (p.diameter / 2) ** 2 : polyArea(parsePts(p.points));
+    }
+    const concave = def.some((p) => p.type !== 'circle' && !p.visual && !isConvex(parsePts(p.points)));
+    const n = usage(st.sel);
+    put(infoEl,
+      h('div', {}, `size ${f3(b[2] - b[0])} × ${f3(b[3] - b[1])} · area ${f3(area)} · used in ${n} level${n === 1 ? '' : 's'}`),
+      concave ? h('div', { class: 'bb-dbg-err' }, 'A part is not convex (a corner points inwards). Split it into several convex parts, or fix the corner.') : null);
+  }
+
+  function renderInspector() {
+    const d = D();
+    const def = d.shapes[st.sel];
+    if (!def) return put(inspEl, h('p', { class: 'bb-dbg-note' }, 'No shape selected.'));
+    renderInfo();
+    const rows = def.map((p, i) => {
+      const head = h('div', { class: 'bb-st-row' }, h('strong', {}, p.type === 'circle' ? `circle ${i + 1}` : `polygon ${i + 1}`), h('span', { class: 'bb-dbg-grow' }));
+      if (p.type !== 'circle') {
+        const vis = h('input', { type: 'checkbox', checked: !!p.visual });
+        vis.addEventListener('change', () => { if (vis.checked) p.visual = true; else delete p.visual; edited(); });
+        head.append(h('label', { class: 'bb-dbg-chk', title: 'A drawing-only outline: it replaces the parts when the block is drawn (collision stays the other parts)' }, vis, 'drawing only'));
+      }
+      head.append(btn('✕', () => { if (def.length > 1) { def.splice(i, 1); edited(); } }, 'bb-dbg-danger'));
+      let body;
+      if (p.type === 'circle') {
+        const mk = (label, get, set) => {
+          const inp = h('input', { type: 'number', step: 'any', value: get() });
+          inp.addEventListener('input', () => { const v = parseFloat(inp.value); if (Number.isFinite(v) && (label !== 'diameter' || v > 0)) { set(v); edited(true); } });
+          inp.addEventListener('change', () => edited());
+          return h('label', { class: 'bb-st-mini' }, label, inp);
+        };
+        body = h('div', { class: 'bb-st-row' }, mk('diameter', () => p.diameter, (v) => { p.diameter = v; }), mk('x', () => circleOf(p).x, (v) => { p.x = v; }), mk('y', () => circleOf(p).y, (v) => { p.y = v; }));
+      } else {
+        const ta = h('input', { type: 'text', value: p.points, spellcheck: 'false', class: 'bb-st-pts' });
+        ta.addEventListener('input', () => { p.points = ta.value; api.touch('shapes'); scheduleDraw(); renderInfo(); });
+        ta.addEventListener('change', () => edited());
+        body = h('div', {}, ta);
+      }
+      return h('div', { class: 'bb-dbg-part' }, head, body);
+    });
+    put(inspEl,
+      ...rows,
+      h('div', { class: 'bb-st-row' },
+        btn('+ rectangle', () => { def.push({ type: 'poly', points: '0,0 2,0 2,1 0,1' }); edited(); }),
+        btn('+ triangle', () => { def.push({ type: 'poly', points: '0,0 2,0 1,2' }); edited(); }),
+        btn('+ circle', () => { def.push({ type: 'circle', diameter: 2 }); edited(); })),
+      h('div', { class: 'bb-st-row' },
+        btn('Mirror ↔', () => transform(([x, y]) => [-x, y])),
+        btn('Mirror ↕', () => transform(([x, y]) => [x, -y])),
+        btn('Rotate 90°', () => transform(([x, y]) => [-y, x])),
+        btn('To 0,0', toOrigin)),
+      h('p', { class: 'bb-dbg-note' }, 'Drag a corner · click a small dot on an edge to add a corner · right-click a corner to remove it · drag the background to pan, wheel to zoom. Every part must be convex: build an L or a plus from several parts and, if you like, add a "drawing only" outline for the looks.'));
+  }
+
+  // ── 3D preview ──
+  function updatePreview() {
+    if (!st.open || !preview) return;
+    if (previewRaf) return;
+    previewRaf = requestAnimationFrame(() => {
+      previewRaf = 0;
+      if (!preview) return;
+      const d = D();
+      const mats = Object.keys(d.materials).filter((m) => !d.materials[m].static);
+      const items = keys().map((key, i) => ({
+        def: d.shapes[key],
+        shader: d.materials[st.mat === '(mixed)' ? mats[i % mats.length] : st.mat]?.shader ?? 'wood',
+        selected: key === st.sel,
+      }));
+      try {
+        preview.set({ items, bowl: bowlFull(d, bowlKey()), depth: d.tuning.depth, chamfer: d.tuning.chamfer });
+      } catch (e) {
+        console.error('balance: shape preview failed', e);
+      }
+    });
+  }
+
+  // ── the screen ──
+  const sel = (options, value, onchange) => {
+    const s = h('select', {}, options.map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return h('option', { value: v }, l); }));
+    s.value = value;
+    s.addEventListener('change', () => onchange(s.value));
+    return s;
+  };
+  const head = h('div', { class: 'bb-st-head' });
+  const probEl = h('span', { class: 'bb-st-prob' });
+  const renderProb = () => api.showProblems(probEl);
+  function renderHead() {
+    const d = D();
+    renderProb();
+    put(head,
+      h('strong', {}, 'Shape studio'),
+      h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
+      h('label', { class: 'bb-st-mini' }, 'preview material', sel(['(mixed)', ...Object.keys(d.materials)], st.mat, (v) => { st.mat = v; renderList(); scheduleDraw(); updatePreview(); })),
+      h('label', { class: 'bb-st-mini' }, 'bowl', sel(Object.keys(d.bowls), bowlKey(), (v) => { st.bowl = v; layout = null; scheduleDraw(); updatePreview(); })),
+      btn('Tidy', () => { layout = null; relayout(); board.fit(layout.bounds); scheduleDraw(); }),
+      btn('Fit all', () => { board.fit(layout.bounds); scheduleDraw(); }),
+      btn('Zoom to shape', () => focus()),
+      h('span', { class: 'bb-dbg-grow' }),
+      probEl,
+      btn('Level studio', () => api.open('levels')),
+      btn('✕ Close', () => api.close()));
+  }
+
+  const right = h('div', { class: 'bb-st-right' },
+    h('div', { class: 'bb-st-3d' }, canvas, h('span', { class: 'bb-st-3dhint' }, 'In the game · drag = turn · wheel = zoom · double-click = reset')),
+    infoEl, inspEl);
+  const root = h('div', { class: 'bb-st bb-st-full' },
+    head,
+    h('div', { class: 'bb-st-cols' }, h('div', { class: 'bb-st-left' }, listHead, listEl), h('div', { class: 'bb-st-board' }, board.el), right));
+
+  board.el.addEventListener('dblclick', (e) => {
+    const sh = e.target.closest?.('[data-shape]');
+    if (sh) { select(sh.dataset.shape); focus(); }
+  });
+
+  function renderAll() {
+    const d = D();
+    if (!d.shapes[st.sel]) st.sel = keys()[0] ?? null;
+    renderHead();
+    renderList();
+    renderInspector();
+    scheduleDraw();
+    updatePreview();
+  }
+
+  return {
+    el: root,
+    show() {
+      st.open = true;
+      root.classList.add('bb-show');
+      layout = null;
+      st.sel = D().shapes[st.sel] ? st.sel : keys()[0];
+      if (!preview) preview = view.debugPreview(canvas);
+      renderAll();
+      requestAnimationFrame(() => { relayout(); board.fit(layout.bounds); scheduleDraw(); });
+    },
+    hide() {
+      st.open = false;
+      root.classList.remove('bb-show');
+      preview?.dispose();
+      preview = null;
+    },
+    /** The draft changed (by this studio, another tab of the menu, or another player). */
+    changed(kind) {
+      if (!st.open) return;
+      renderProb();
+      if (kind === 'shapes' || kind === 'materials' || kind === 'bowls' || kind === 'tuning' || kind === 'all') {
+        if (kind === 'all') layout = null;
+        if (!layout) relayout();
+        renderList();
+        scheduleDraw();
+        updatePreview();
+      }
+    },
+    refresh() {
+      layout = null;
+      if (st.open) renderAll();
+    },
+    dispose() {
+      this.hide();
+    },
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  LEVEL STUDIO
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+function levelStudio(view, api) {
+  const st = { lvl: 0, mode: 'layout', sel: -1, snap: 0.25, mat: 'wood', open: false, lab: -1, msg: '', armDelete: 0 };
+  let applyTimer = 0;
+  let raf = 0;
+  let live = null; // a block we are carrying in live mode: { rot, off, x, y, last }
+
+  const D = () => api.draft();
+  const L = () => D().levels[st.lvl];
+  const lab = (c) => view.ctx.sendInput({ lab: c });
+  const snapV = (v) => snapTo(v, st.snap);
+  const btn = (text, fn, cls = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, onclick: fn }, text);
+  const sel = (options, value, onchange, cls = '') => {
+    const s = h('select', { class: cls }, options.map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return h('option', { value: v }, l); }));
+    s.value = value;
+    s.addEventListener('change', () => onchange(s.value));
+    return s;
+  };
+  const nonStatic = () => Object.keys(D().materials);
+
+  // ── talking to the lab on the server ──
+  /** Send pending edits, then restart the level so the game shows them (the lab stays on, and frozen in layout mode). */
+  function applyNow() {
+    clearTimeout(applyTimer);
+    applyTimer = 0;
+    if (!st.open) return;
+    api.flush();
+    if (api.problems().length || !L()) return;
+    lab({ play: st.lvl });
+    lab({ paused: st.mode === 'layout' });
+  }
+  function scheduleApply() {
+    clearTimeout(applyTimer);
+    applyTimer = setTimeout(applyNow, 350);
+  }
+
+  // ── blueprint ──
+  const bowlOfLevel = () => bowlFull(D(), L()?.bowl in D().bowls ? L().bowl : Object.keys(D().bowls)[0]);
+  function bounds() {
+    const bowl = bowlOfLevel();
+    const zone = { ...D().tuning.zone, ...L()?.zone };
+    return [Math.min(zone.x0, -bowl.a) - 6, S.groundYOf(bowl) - 3, Math.max(zone.x1, bowl.a) + 6, 30];
+  }
+
+  const board = makeBoard({
+    down(w, e) {
+      const l = L();
+      if (!l) return null;
+      const node = e.target.closest?.('[data-i],[data-id]');
+      if (st.mode === 'layout') {
+        if (!node || node.dataset.i === undefined) {
+          st.sel = -1;
+          renderBody();
+          scheduleDraw();
+          return null;
+        }
+        const i = +node.dataset.i;
+        const b = l.initialBlocks[i];
+        st.sel = i;
+        renderBody();
+        const off = { x: w.x - b.x, y: w.y - b.y };
+        return { move(q) { b.x = snapV(q.x - off.x); b.y = snapV(q.y - off.y); api.touch('levels'); scheduleDraw(); }, up() { renderBody(); } };
+      }
+      // live test: grab a block of the running level
+      if (!node || node.dataset.id === undefined) return null;
+      const id = +node.dataset.id;
+      const body = view.snap?.b.find((r) => r[0] === id);
+      if (!body || body[6] === S.BODY.HELD || body[6] === S.BODY.HELD_BAD) return null;
+      lab({ grab: id });
+      return startLive({ x: body[3], y: body[4], rot: deg(body[5]), off: { x: w.x - body[3], y: w.y - body[4] } });
+    },
+    resized() { scheduleDraw(); },
+  });
+
+  function scheduleDraw() {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; draw(); });
+  }
+
+  function blockNode(d, shapeKey, materialKey, x, y, rotRad, attrs, style = {}) {
+    const def = d.shapes[shapeKey];
+    if (!def) return null;
+    const grp = svg('g', { transform: `translate(${x} ${y}) rotate(${deg(rotRad)})`, ...attrs });
+    const built0 = built(def);
+    if (!built0) return grp;
+    const static_ = d.materials[materialKey]?.static;
+    for (const p of built0.parts) {
+      const common = { fill: matColor(d, materialKey), stroke: style.stroke ?? (static_ ? '#374151' : '#3b2a14'), 'stroke-width': style.width ?? 1.1, 'vector-effect': 'non-scaling-stroke', opacity: style.opacity ?? 0.93, ...(style.dash ? { 'stroke-dasharray': style.dash } : {}) };
+      grp.append(p.type === 'circle' ? svg('circle', { cx: p.cx, cy: p.cy, r: p.r, ...common }) : svg('polygon', { points: p.pts.map((q) => q.join(',')).join(' '), ...common }));
+    }
+    if (static_) grp.append(svg('circle', { cx: 0, cy: 0, r: 0.18, fill: '#111827', opacity: 0.6 }));
+    return grp;
+  }
+
+  function draw() {
+    if (!st.open) return;
+    const d = D();
+    const l = L();
+    const g = board.g;
+    g.replaceChildren();
+    if (!l) return;
+    const { k } = board.v;
+    const px = 1 / k;
+    const bowl = bowlOfLevel();
+    const gY = S.groundYOf(bowl);
+    const zone = { ...d.tuning.zone, ...l.zone };
+    const drop = { ...d.tuning.drop, ...l.drop };
+    const vw = board.view();
+    drawGrid(g, vw, 1, px);
+    const top = Math.min(drop.y1, vw.y1 + 2);
+    g.append(
+      svg('rect', { x: drop.x0, y: drop.y0, width: Math.max(0, drop.x1 - drop.x0), height: Math.max(0, top - drop.y0), fill: 'rgba(52,211,153,.07)', stroke: '#34d399', 'stroke-dasharray': '5 4', 'vector-effect': 'non-scaling-stroke' }),
+      svg('line', { x1: zone.x0, x2: zone.x0, y1: gY - 3, y2: 60, stroke: '#ef4444', 'stroke-dasharray': '2 4', 'vector-effect': 'non-scaling-stroke' }),
+      svg('line', { x1: zone.x1, x2: zone.x1, y1: gY - 3, y2: 60, stroke: '#ef4444', 'stroke-dasharray': '2 4', 'vector-effect': 'non-scaling-stroke' }),
+      svg('rect', { x: Math.min(zone.x0, -bowl.a) - 40, y: gY - 4, width: Math.max(zone.x1, bowl.a) - Math.min(zone.x0, -bowl.a) + 80, height: 4, fill: '#8a6a43', opacity: 0.85 }),
+    );
+    drawBowl(g, bowl);
+    const label = (text, x, y, size, fill) => svg('text', { transform: `translate(${x} ${y}) scale(1 -1)`, 'font-size': size * px, fill, 'font-family': 'system-ui, sans-serif' }, text);
+    g.append(label('drop zone', drop.x0 + 0.4, Math.min(top, vw.y1) - 1.6, 10.5, '#34d399'), label('limit', zone.x0 + 0.4, vw.y1 - 3.4, 10.5, '#f87171'), label('limit', zone.x1 - 3.6, vw.y1 - 3.4, 10.5, '#f87171'));
+
+    if (st.mode === 'layout') {
+      l.initialBlocks.forEach((b, i) => {
+        const node = blockNode(d, b.shape, b.material, b.x, b.y, ((b.rot ?? 0) * Math.PI) / 180, { 'data-i': i, class: 'bb-st-block' }, i === st.sel ? { stroke: ACCENT, width: 2.4 } : {});
+        if (node) g.append(node);
+      });
+    } else {
+      for (const [id, si, mi, x, y, a, state] of view.snap?.b ?? []) {
+        const held = state === S.BODY.HELD || state === S.BODY.HELD_BAD;
+        const node = blockNode(d, S.SHAPE_KEYS[si], S.MATERIAL_KEYS[mi], x, y, a, { 'data-id': id, class: 'bb-st-block' }, held ? { opacity: 0.55, dash: '4 3', stroke: ACCENT, width: 2 } : {});
+        if (node) g.append(node);
+      }
+    }
+  }
+
+  // ── live carrying: the blueprint is the controller of a block held on the server ──
+  function startLive({ x, y, rot, off }) {
+    live = { rot, off, x, y, last: 0 };
+    const send = (force) => {
+      const now = performance.now();
+      if (!force && now - live.last < 33) return;
+      live.last = now;
+      view.ctx.sendInput({ x: Math.round(live.x * 100) / 100, y: Math.round(live.y * 100) / 100, rot: Math.round(live.rot * 10) / 10 });
+    };
+    live.send = send;
+    return {
+      move(q) { live.x = q.x - live.off.x; live.y = q.y - live.off.y; send(false); },
+      up(q) { if (q) { live.x = q.x - live.off.x; live.y = q.y - live.off.y; } send(true); view.ctx.sendInput({ drop: true }); live = null; },
+    };
+  }
+  /** A palette thumbnail was pressed. Live: a new block appears in your hand. Layout: drag = a block in the start layout, click = add to the blocks to place. */
+  function paletteDown(e, shape) {
+    e.preventDefault();
+    const start = { x: e.clientX, y: e.clientY };
+    let drag = null;
+    const fromPointer = (ev) => (board.inside(ev.clientX, ev.clientY) ? board.worldAt(ev.clientX, ev.clientY) : null);
+    if (st.mode === 'live') {
+      const w0 = fromPointer(e) ?? { x: 0, y: 14 };
+      lab({ spawn: { shape, material: st.mat, x: w0.x, y: w0.y, rot: 0 } });
+      drag = startLive({ x: w0.x, y: w0.y, rot: 0, off: { x: 0, y: 0 } });
+    }
+    const move = (ev) => {
+      const w = fromPointer(ev);
+      if (st.mode === 'layout') {
+        if (!drag && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 6) {
+          const l = L();
+          const w1 = w ?? { x: 0, y: 8 };
+          l.initialBlocks.push({ shape, material: st.mat, rot: 0, x: snapV(w1.x), y: snapV(w1.y) });
+          st.sel = l.initialBlocks.length - 1;
+          const b = l.initialBlocks[st.sel];
+          drag = { move(q) { b.x = snapV(q.x); b.y = snapV(q.y); api.touch('levels'); scheduleDraw(); }, up() { renderBody(); } };
+          api.touch('levels');
+          renderBody();
+        }
+      }
+      if (drag && w) drag.move(w, ev);
+    };
+    const up = (ev) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if (drag) drag.up(fromPointer(ev), ev);
+      else if (st.mode === 'layout' && L()) { // a click
+        L().shapes.push({ shape, material: st.mat === 'static' ? 'wood' : st.mat });
+        api.touch('levels');
+        renderBody();
+      }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
+  function capture() {
+    const l = L();
+    const bodies = (view.snap?.b ?? []).filter((r) => r[6] !== S.BODY.HELD && r[6] !== S.BODY.HELD_BAD);
+    l.initialBlocks = bodies.map(([, si, mi, x, y, a]) => {
+      let r = Math.round(deg(a) * 10) / 10;
+      r = ((((r + 180) % 360) + 360) % 360) - 180;
+      return { shape: S.SHAPE_KEYS[si], material: S.MATERIAL_KEYS[mi], rot: r, x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 };
+    });
+    st.sel = -1;
+    st.msg = `Captured ${bodies.length} block${bodies.length === 1 ? '' : 's'} as the start layout.`;
+    setMode('layout');
+    api.touch('levels');
+  }
+
+  function setMode(m) {
+    st.mode = m;
+    if (live) { view.ctx.sendInput({ cancel: true }); live = null; }
+    if (m === 'layout') applyNow(); // restart with the draft, frozen
+    else {
+      if (applyTimer) applyNow();
+      lab({ paused: false }); // gravity on
+    }
+    renderAll();
+  }
+
+  // ── panel ──
+  const head = h('div', { class: 'bb-st-head' });
+  const bar = h('div', { class: 'bb-st-bar' });
+  const palette = h('div', { class: 'bb-st-palette' });
+  const body = h('div', { class: 'bb-st-body' });
+
+  const probEl = h('span', { class: 'bb-st-prob' });
+  function renderHead() {
+    const d = D();
+    api.showProblems(probEl);
+    put(head,
+      h('strong', {}, 'Level studio'),
+      sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; fitSoon(); applyNow(); renderAll(); }, 'bb-dbg-grow'),
+      btn('New', newLevel), btn('Copy', copyLevel),
+      btn(st.armDelete ? 'Really?' : 'Delete', deleteLevel, 'bb-dbg-danger'),
+      probEl,
+      btn('Shapes', () => api.open('shapes')),
+      btn('✕', () => api.close()));
+  }
+
+  function renderBar() {
+    const paused = view.snap?.lab === 2;
+    put(bar,
+      h('div', { class: 'bb-st-seg' },
+        h('button', { type: 'button', class: st.mode === 'layout' ? 'bb-on' : '', onclick: () => st.mode !== 'layout' && setMode('layout'), title: 'Edit the start layout: the game shows it frozen' }, 'Layout'),
+        h('button', { type: 'button', class: st.mode === 'live' ? 'bb-on' : '', onclick: () => st.mode !== 'live' && setMode('live'), title: 'Gravity on: spawn, grab and move blocks, test the level' }, 'Live test')),
+      st.mode === 'live'
+        ? [
+          btn(paused ? '▶ Gravity on' : '⏸ Freeze', () => lab({ paused: !paused }), paused ? 'bb-dbg-go' : ''),
+          btn('⟲ Reset', () => { applyNow(); lab({ paused: false }); }),
+          btn('⤓ Capture as start layout', capture, 'bb-dbg-go'),
+        ]
+        : [btn('Fit', () => board.fit(bounds()))],
+      h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
+      h('div', { class: 'bb-st-hint' }, st.mode === 'live'
+        ? 'Drag a shape from the palette into the bowl (or click it to drop it at the top). Drag any block to move it, Q / E or the wheel turn what you hold, Esc deletes it. Freeze gravity to place things precisely, then switch it on.'
+        : 'Drag blocks to move them, Q / E turn the selected one, Delete removes it. Drag a palette shape into the blueprint to add a start block; click it to add it to the blocks to place.'),
+      st.msg ? h('div', { class: 'bb-st-hint bb-st-msg' }, st.msg) : null);
+  }
+
+  function renderPalette() {
+    const d = D();
+    put(palette,
+      h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'palette'), h('label', { class: 'bb-st-mini' }, 'material', sel(nonStatic(), st.mat, (v) => { st.mat = v; renderPalette(); }))),
+      h('div', { class: 'bb-st-strip' }, Object.keys(d.shapes).map((key) => h('button', { type: 'button', class: 'bb-st-chip', title: key, onpointerdown: (e) => paletteDown(e, key) }, thumb(d.shapes[key], matColor(d, st.mat), 50, 36), h('span', {}, key)))));
+  }
+
+  const mini = (options, obj, key) => sel(options, obj[key], (v) => { obj[key] = v; api.touch('levels'); });
+  const numIn = (obj, key, step, cb) => {
+    const i = h('input', { type: 'number', step, class: 'bb-dbg-n', value: obj[key] ?? 0 });
+    i.addEventListener('input', () => { const v = parseFloat(i.value); if (Number.isFinite(v)) { obj[key] = v; api.touch('levels'); cb?.(); } });
+    return i;
+  };
+
+  function renderBody() {
+    const d = D();
+    const l = L();
+    if (!l) return put(body, h('p', { class: 'bb-dbg-note' }, 'There are no levels yet. Press New.'));
+    const w = api.w;
+    const shapesList = Object.keys(d.shapes);
+    const matList = Object.keys(d.materials);
+    const out = [];
+
+    // properties
+    const zoneOn = !!l.zone;
+    const dropOn = !!l.drop;
+    out.push(w.section('Level',
+      w.text('name', l, 'name', 'levels'),
+      w.select('difficulty', ['easy', 'medium', 'hard'], l, 'difficulty', 'levels'),
+      w.select('bowl', Object.keys(d.bowls), l, 'bowl', 'levels', renderAll),
+      w.select('background', Object.keys(d.backgrounds), l, 'background', 'levels'),
+      w.num('blocks on the table', l, 'chooseShapes', 'levels', { min: 1, max: 8, int: true }),
+      w.field('own side limits', (() => {
+        const c = h('input', { type: 'checkbox', checked: zoneOn });
+        c.addEventListener('change', () => { if (c.checked) l.zone = { ...D().tuning.zone }; else delete l.zone; api.touch('levels'); renderBody(); });
+        return c;
+      })(), zoneOn ? numIn(l.zone, 'x0', 1, scheduleDraw) : null, zoneOn ? numIn(l.zone, 'x1', 1, scheduleDraw) : null),
+      w.field('own drop zone', (() => {
+        const c = h('input', { type: 'checkbox', checked: dropOn });
+        c.addEventListener('change', () => { if (c.checked) l.drop = { ...D().tuning.drop }; else delete l.drop; api.touch('levels'); renderBody(); });
+        return c;
+      })()),
+      dropOn ? h('div', { class: 'bb-st-row' }, ...['x0', 'x1', 'y0', 'y1'].map((k) => h('label', { class: 'bb-st-mini' }, k, numIn(l.drop, k, 1, scheduleDraw)))) : null));
+
+    // start layout
+    const rows = l.initialBlocks.map((b, i) => h('button', { type: 'button', class: `bb-st-pill${i === st.sel ? ' bb-on' : ''}`, onclick: () => { st.sel = i; renderBody(); scheduleDraw(); } }, `${b.shape} · ${b.material}`));
+    const b = l.initialBlocks[st.sel];
+    out.push(w.section(`Start layout (${l.initialBlocks.length})`,
+      h('div', { class: 'bb-st-pills' }, rows.length ? rows : h('span', { class: 'bb-dbg-note' }, 'Empty: drag a shape from the palette into the blueprint.')),
+      b ? h('div', { class: 'bb-st-sel' },
+        h('div', { class: 'bb-st-row' }, mini(shapesList, b, 'shape'), mini(matList, b, 'material')),
+        h('div', { class: 'bb-st-row' },
+          ...[['x', 0.25], ['y', 0.25], ['rot', 5]].map(([k, step]) => h('label', { class: 'bb-st-mini' }, k, numIn(b, k, step, scheduleDraw))),
+          btn('⧉', () => { l.initialBlocks.push({ ...b, x: b.x + 1, y: b.y + 1 }); st.sel = l.initialBlocks.length - 1; api.touch('levels'); renderBody(); }),
+          btn('✕', () => { l.initialBlocks.splice(st.sel, 1); st.sel = -1; api.touch('levels'); renderBody(); }, 'bb-dbg-danger'))) : null));
+
+    // blocks to place
+    const seq = l.shapes.map((s, i) => {
+      const n = Math.min(l.chooseShapes, l.shapes.length);
+      return h('div', { class: `bb-st-seq${i < n ? ' bb-first' : ''}`, title: i < n ? 'on the table from the start' : 'appears later' },
+        h('span', { class: 'bb-dbg-idx' }, i + 1),
+        thumb(d.shapes[s.shape] ?? [], matColor(d, s.material), 34, 26),
+        mini(shapesList, s, 'shape'), mini(matList, s, 'material'),
+        btn('↑', () => { if (i > 0) { [l.shapes[i - 1], l.shapes[i]] = [l.shapes[i], l.shapes[i - 1]]; api.touch('levels'); renderBody(); } }),
+        btn('↓', () => { if (i < l.shapes.length - 1) { [l.shapes[i + 1], l.shapes[i]] = [l.shapes[i], l.shapes[i + 1]]; api.touch('levels'); renderBody(); } }),
+        btn('⧉', () => { l.shapes.splice(i + 1, 0, { ...s }); api.touch('levels'); renderBody(); }),
+        btn('✕', () => { if (l.shapes.length > 1) { l.shapes.splice(i, 1); api.touch('levels'); renderBody(); } }, 'bb-dbg-danger'));
+    });
+    let area = 0;
+    for (const s of l.shapes) {
+      for (const p of d.shapes[s.shape] ?? []) if (!p.visual) area += p.type === 'circle' ? Math.PI * (p.diameter / 2) ** 2 : polyArea(parsePts(p.points));
+    }
+    out.push(w.section(`Blocks to place (${l.shapes.length})`,
+      h('p', { class: 'bb-dbg-note' }, `The first ${Math.min(l.chooseShapes, l.shapes.length)} (highlighted) lie on the table at the start. Total area ${f3(area)}.`),
+      ...seq,
+      h('div', { class: 'bb-st-row' }, btn('+ add block', () => { l.shapes.push({ shape: shapesList[0], material: matList.find((m) => !d.materials[m].static) ?? matList[0] }); api.touch('levels'); renderBody(); }))));
+    put(body, ...out);
+  }
+
+  function renderAll() {
+    renderHead();
+    renderBar();
+    renderPalette();
+    renderBody();
+    scheduleDraw();
+  }
+
+  // ── levels ──
+  function newLevel() {
+    const d = D();
+    const shape = Object.keys(d.shapes)[0];
+    d.levels.push({ name: 'New level', difficulty: 'easy', bowl: Object.keys(d.bowls)[0], background: Object.keys(d.backgrounds)[0], initialBlocks: [], chooseShapes: 3, shapes: [{ shape, material: Object.keys(d.materials).find((m) => !d.materials[m].static) ?? 'wood' }] });
+    st.lvl = d.levels.length - 1;
+    afterLevelChange();
+  }
+  function copyLevel() {
+    const d = D();
+    if (!L()) return;
+    const c = clone(L());
+    c.name += ' copy';
+    d.levels.splice(st.lvl + 1, 0, c);
+    st.lvl++;
+    afterLevelChange();
+  }
+  function deleteLevel() {
+    if (!st.armDelete) {
+      st.armDelete = setTimeout(() => { st.armDelete = 0; renderHead(); }, 2500);
+      return renderHead();
+    }
+    clearTimeout(st.armDelete);
+    st.armDelete = 0;
+    const d = D();
+    if (d.levels.length <= 1) return renderHead();
+    d.levels.splice(st.lvl, 1);
+    st.lvl = Math.min(st.lvl, d.levels.length - 1);
+    afterLevelChange();
+    return undefined;
+  }
+  function afterLevelChange() {
+    st.sel = -1;
+    api.touch('levels');
+    fitSoon();
+    renderAll();
+    applyNow();
+  }
+  const fitSoon = () => requestAnimationFrame(() => { if (L()) board.fit(bounds()); scheduleDraw(); });
+
+  // ── keyboard ──
+  const onKey = (e) => {
+    if (!st.open || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    const step = e.shiftKey ? 1 : 15;
+    if (live) {
+      if (k === 'q' || k === 'e') { live.rot += (k === 'q' ? 1 : -1) * step; live.send(true); e.preventDefault(); } else if (k === 'escape') { view.ctx.sendInput({ cancel: true }); live = null; }
+      return;
+    }
+    const b = st.mode === 'layout' ? L()?.initialBlocks[st.sel] : null;
+    if (!b) return;
+    if (k === 'q' || k === 'e') {
+      b.rot = Math.round((((((b.rot ?? 0) + (k === 'q' ? 1 : -1) * step + 180) % 360) + 360) % 360 - 180) * 10) / 10;
+      api.touch('levels');
+      renderBody();
+      scheduleDraw();
+      e.preventDefault();
+    } else if (k === 'delete' || k === 'backspace') {
+      L().initialBlocks.splice(st.sel, 1);
+      st.sel = -1;
+      api.touch('levels');
+      renderBody();
+      scheduleDraw();
+      e.preventDefault();
+    }
+  };
+
+  // the blueprint turns a block it carries with the wheel
+  const wheelHook = (e) => {
+    if (!live) return false;
+    live.rot += (e.deltaY < 0 ? 1 : -1) * 15;
+    live.send(true);
+    return true;
+  };
+  board.el.addEventListener('wheel', (e) => { if (wheelHook(e)) e.stopImmediatePropagation(); }, { capture: true, passive: false });
+
+  const root = h('div', { class: 'bb-st bb-st-dock' }, head, bar, h('div', { class: 'bb-st-bp' }, board.el), palette, body);
+  window.addEventListener('keydown', onKey);
+
+  let askedAt = 0;
+  const onSnap = (s) => {
+    if (!st.open) return;
+    // the lab must be on while we are open (another player's studio, a server restart ...)
+    if (s.lab === 0 && performance.now() - askedAt > 1500) {
+      askedAt = performance.now();
+      lab({ on: true, paused: st.mode === 'layout' });
+      applyNow();
+    }
+    if (s.lab !== st.lab) {
+      st.lab = s.lab;
+      renderBar();
+    }
+    if (s.lv >= 0 && s.lv !== st.lvl && s.lv < D().levels.length && s.run !== st.run) { // somebody started another level
+      st.lvl = s.lv;
+      st.run = s.run;
+      fitSoon();
+      renderAll();
+    }
+    st.run = s.run;
+    if (s.lv < 0 && performance.now() - askedAt > 1500) { // back at the menu: the studio wants a level
+      askedAt = performance.now();
+      lab({ play: st.lvl });
+    }
+    if (st.mode === 'live') scheduleDraw();
+  };
+
+  return {
+    el: root,
+    show() {
+      const d = D();
+      st.open = true;
+      st.mode = 'layout';
+      const cur = view.snap?.lv ?? -1;
+      st.lvl = Math.max(0, Math.min(cur >= 0 ? cur : st.lvl, d.levels.length - 1));
+      st.sel = -1;
+      st.msg = '';
+      root.classList.add('bb-show');
+      view.debugDock(DOCK);
+      view.onSnap = onSnap;
+      lab({ on: true, paused: true });
+      renderAll();
+      requestAnimationFrame(() => { if (L()) board.fit(bounds()); scheduleDraw(); });
+      applyNow();
+    },
+    hide() {
+      if (!st.open) return;
+      st.open = false;
+      clearTimeout(applyTimer);
+      if (live) { view.ctx.sendInput({ cancel: true }); live = null; }
+      root.classList.remove('bb-show');
+      view.debugDock(0);
+      view.onSnap = null;
+      lab({ on: false });
+      lab({ reload: true }); // an ordinary level again
+    },
+    changed(kind) {
+      if (!st.open) return;
+      api.showProblems(probEl);
+      if (kind === 'levels' || kind === 'all') {
+        st.lvl = Math.min(st.lvl, Math.max(0, D().levels.length - 1));
+        if (st.mode === 'layout') scheduleApply();
+        scheduleDraw();
+      } else if (kind === 'shapes' || kind === 'materials' || kind === 'bowls' || kind === 'tuning') {
+        renderPalette();
+        scheduleDraw();
+        if (st.mode === 'layout') scheduleApply();
+      }
+    },
+    refresh() {
+      if (st.open) renderAll();
+    },
+    dispose() {
+      this.hide();
+      window.removeEventListener('keydown', onKey);
+    },
+  };
+}
+
+/**
+ * @param view  the BalanceView
+ * @param api   { draft(): the current draft, touch(kind), flush(), problems(): string[], w: the widget builders of the debug menu,
+ *                statusEl, open(name), close() }
+ */
+export function createStudio(view, api) {
+  const shapesS = shapeStudio(view, api);
+  const levelsS = levelStudio(view, api);
+  const root = h('div', { class: 'bb-st-host' }, shapesS.el, levelsS.el);
+  let current = null;
+  return {
+    el: root,
+    get current() { return current; },
+    open(name) {
+      if (current === name) return;
+      this.close();
+      current = name;
+      root.classList.add('bb-st-on');
+      (name === 'shapes' ? shapesS : levelsS).show();
+    },
+    close() {
+      if (!current) return;
+      (current === 'shapes' ? shapesS : levelsS).hide();
+      current = null;
+      root.classList.remove('bb-st-on');
+    },
+    /** The draft changed: `kind` is the table ('levels', 'shapes' ...) or 'all' (replaced wholesale). */
+    changed(kind) {
+      if (current === 'shapes') shapesS.changed(kind);
+      else if (current === 'levels') levelsS.changed(kind);
+    },
+    refresh() {
+      if (current === 'shapes') shapesS.refresh();
+      else if (current === 'levels') levelsS.refresh();
+    },
+    dispose() {
+      this.close();
+      shapesS.dispose();
+      levelsS.dispose();
+      root.remove();
+    },
+  };
+}
