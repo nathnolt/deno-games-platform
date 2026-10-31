@@ -2,8 +2,8 @@
 // To add a look: add a fragment shader here (copy one, change main()) and point a material at it.
 //
 // What a block shader can use (declared in `prelude`):
-//   vP        position on the block's face, in world units, centred on the shape and rotating with it (textures stay glued to the block)
-//   vP3       position in the mesh's own 3D space (used by the bowl and the table, which are not flat blocks)
+//   vP        texture coordinates in world units, glued to the block (front/back: x, y; sides and chamfers: distance along the edge, z)
+//   vP3       position in the mesh's own 3D space. Shaders that use it (bowlwood, wood2, ceramic, bark ...) work on ANY mesh: bowls, models, blocks
 //   uSeed     random number per block, so two wooden blocks do not have identical grain
 //   uTime     seconds
 //   finish()  call it for the final colour: it adds simple lighting (so the 3D sides are shaded), the coloured glow of a block
@@ -13,11 +13,14 @@ export const vertexShader = /* glsl */ `
 varying vec2 vP;
 varying vec3 vP3;
 varying vec3 vN;
+varying float vDist;
 void main() {
-  vP = position.xy;
+  vP = uv; //   texture coordinates made by the client: the front face is (x, y), the sides run along the outline and up the depth
   vP3 = position;
   vN = normalize(normalMatrix * normal);
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vDist = length(mv.xyz);
+  gl_Position = projectionMatrix * mv;
 }`;
 
 const prelude = /* glsl */ `
@@ -25,6 +28,9 @@ precision highp float;
 varying vec2 vP;
 varying vec3 vP3;
 varying vec3 vN;
+varying float vDist;
+uniform vec3 uFogColor;
+uniform vec2 uFog;
 uniform float uTime;
 uniform float uSeed;
 uniform vec3 uGlow;
@@ -43,10 +49,12 @@ float fbm(vec2 p) {
 }
 vec4 finish(vec3 c, float a) {
   vec3 n = normalize(vN);
+  if (!gl_FrontFacing) n = -n; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
   float light = 0.52 + 0.55 * max(dot(n, normalize(vec3(-0.35, 0.6, 0.72))), 0.0) + 0.12 * max(n.y, 0.0);
   c *= light;
   c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
   c += uGlow * 0.28;
+  c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, vDist)); // distant background models melt into the mist
   return vec4(c, a);
 }
 `;
@@ -130,10 +138,85 @@ void main() {
   vec3 c = mix(vec3(0.95, 0.42, 0.18), vec3(0.97, 0.94, 0.88), s);
   gl_FragColor = finish(c, 1.0);
 }`),
+
+  // ── 3D shaders (they use vP3, so they fit bowls and models) ──
+
+  // pale ash / beech: lighter than 'bowlwood', bands that follow the height
+  wood2: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3 + uSeed * 9.0;
+  float warp = fbm(q.xz * 0.3 + vec2(q.y * 0.25, 7.0));
+  float rings = sin((q.y * 2.2 + warp * 3.5) * 3.14159);
+  vec3 c = mix(vec3(0.84, 0.68, 0.46), vec3(0.72, 0.54, 0.33), 0.5 + 0.35 * rings);
+  c *= 0.92 + 0.16 * fbm(vec2(q.x + q.z, q.y * 4.0) * 1.2);
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  // white glaze with a cobalt band round the rim and a wavy line lower down
+  ceramic: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  float a = atan(q.z, q.x);
+  float rim = smoothstep(0.06, 0.0, abs(q.y - 0.0) - 0.5);
+  float wave = smoothstep(0.08, 0.0, abs(q.y + 2.6 + 0.5 * sin(a * 7.0)) - 0.18);
+  vec3 c = mix(vec3(0.95, 0.95, 0.92), vec3(0.20, 0.36, 0.60), clamp(rim + wave, 0.0, 1.0) * 0.92);
+  c *= 0.96 + 0.06 * noise(q.xz * 5.0 + q.y * 2.0);
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  bark: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  float a = atan(q.z, q.x);
+  float streak = fbm(vec2(a * 3.0, q.y * 0.9));
+  vec3 c = mix(vec3(0.24, 0.17, 0.12), vec3(0.44, 0.32, 0.21), streak);
+  c *= 0.82 + 0.3 * noise(vec2(a * 9.0, q.y * 3.0));
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  leaves: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  float n = fbm(q.xy * 1.2 + q.zy * 0.8);
+  vec3 c = mix(vec3(0.20, 0.42, 0.20), vec3(0.47, 0.66, 0.28), n);
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  blossom: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  float n = fbm(q.xy * 1.4 + q.zy * 0.9);
+  vec3 c = mix(vec3(0.93, 0.68, 0.76), vec3(1.0, 0.90, 0.92), n);
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  bamboo: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  float knot = smoothstep(0.05, 0.0, abs(fract(q.y) - 0.92) - 0.06);
+  vec3 c = mix(vec3(0.40, 0.58, 0.26), vec3(0.56, 0.70, 0.34), noise(vec2(q.y * 2.0, q.x * 9.0 + q.z * 9.0)));
+  c = mix(c, vec3(0.28, 0.40, 0.18), knot * 0.8);
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  // paper lantern light: warm and brighter than everything around it
+  paper: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  vec3 c = vec3(1.18, 0.98, 0.66) * (0.9 + 0.1 * noise(q.xy * 8.0));
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  // grey-blue rock turning to snow near the top (made for mountain.obj: 40 units tall)
+  mountain: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  float snow = smoothstep(27.0 + 3.0 * fbm(q.xz * 0.15), 36.0, q.y);
+  vec3 c = mix(vec3(0.46, 0.53, 0.60), vec3(0.62, 0.68, 0.72), fbm(q.xz * 0.12 + q.y * 0.05));
+  c = mix(c, vec3(0.95, 0.96, 0.97), snow);
+  gl_FragColor = finish(c, 1.0);
+}`),
 };
 
 /** Shaders whose blocks are see-through (drawn after the opaque ones, no depth writes). */
 export const transparentShaders = new Set(['glass']);
-
-/** Colour of the edge lines drawn around blocks of each shader (default '#1a1020'). */
-export const outlineColor = { glass: '#5f9fbf', stone2: '#0c0f16' };

@@ -5,20 +5,19 @@
 // planck is loaded straight from npm by Deno (no deno.json change needed). It needs no extra permissions.
 import * as planck from 'npm:planck@1';
 import {
-  BODY, BOWL, bowlProfile, densityOf, frictionOf, getShape, GRAVITY, inDrop, levels, LOSE, materials, MATERIAL_KEYS,
-  MAX_HOLD_X, MAX_HOLD_Y, meta, MIN_HOLD_Y, PHASE, SHAPE_KEYS, WATER_DENSITY, WATER_Y, zoneOf,
+  applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, inDrop, levels, LOSE,
+  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, meta, MIN_HOLD_Y, PHASE, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 const { Vec2 } = planck;
 
 const STEP = 1 / 120; //          fixed physics step (the platform ticks at 30 Hz, so ~4 physics steps per snapshot)
 const MAX_STEPS = 12; //          never do more than this per tick (protects the server if it falls behind)
-const SETTLE_TIME = 2; //         seconds everything must be (almost) still after the last block to win
-const SETTLE_SPEED = 0.25; //     "still" = linear and angular speed below this
 const FREEZE_AFTER = 5; //        stop simulating this long after the level has ended
-const FOLLOW = 30; //             how quickly a held block chases its player's pointer
 const FLOAT_SIDES = 24; //        circles are approximated by a polygon when computing buoyancy
 const BOWL_SEGMENTS = 36;
+const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along in every snapshot after a change
+// settleTime, settleSpeed and follow come from `tuning` (definitions.js)
 const START_GRACE = 0.8; //       seconds after a level starts during which start / restart clicks are ignored (two players clicking the same button)
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -78,6 +77,9 @@ class BalanceGame {
     this.why = 0;
     this.acc = 0;
     this.startedAt = -Infinity;
+    this.defsRev = 0; //          debug: bumps every time somebody changes the definitions
+    this.defsFrom = null; //      debug: who made the last change
+    this.defsBurst = 0; //        debug: > 0 while the definitions are attached to the snapshots
     for (const p of ctx.players) this.onJoin(p);
   }
 
@@ -104,6 +106,7 @@ class BalanceGame {
   }
 
   update(dt) {
+    if (this.defsBurst > 0) this.defsBurst -= dt;
     try {
       this.#update(dt);
     } catch (e) {
@@ -134,13 +137,19 @@ class BalanceGame {
       left: this.#remaining(),
       total: this.total,
       why: this.why,
-      still: round2(clamp(this.settle / SETTLE_TIME, 0, 1)),
+      still: round2(clamp(this.settle / tuning.settleTime, 0, 1)),
+      ...(DEBUG ? { drev: this.defsRev, dfrom: this.defsFrom, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
+  }
+
+  #defs() {
+    return (this.defsCache ??= cloneDefinitions());
   }
 
   // ── input ──
   /** Nobody is in charge: every seated player may choose levels, restart and go back to the menu. */
   #input(id, p, d) {
+    if (DEBUG && (d.debugChunk || d.defsRequest)) return this.#debugInput(id, d);
     const settled = performance.now() - this.startedAt > START_GRACE * 1000;
     if (Number.isInteger(d.start)) {
       if (settled && d.start >= 0 && d.start < levels.length) this.#startLevel(d.start);
@@ -161,6 +170,43 @@ class BalanceGame {
       if (Number.isFinite(d.y)) p.held.ty = clamp(d.y, MIN_HOLD_Y, MAX_HOLD_Y);
       if (Number.isFinite(d.rot)) p.held.trot = rad(clamp(d.rot, -1e5, 1e5));
     }
+  }
+
+  /** Debug menu: somebody sends new definitions (levels, shapes, bowls ...) or asks for the current ones. */
+  #debugInput(id, d) {
+    if (d.defsRequest) {
+      this.defsBurst = DEFS_BURST;
+      return;
+    }
+    // definitions arrive as numbered pieces of JSON text (the platform limits one message to 4096 characters)
+    const c = d.debugChunk;
+    if (!c || !Number.isInteger(c.i) || !Number.isInteger(c.n) || c.n < 1 || c.n > 40 || c.i < 0 || c.i >= c.n || typeof c.s !== 'string' || c.s.length > 3000) return;
+    this.defsParts ??= new Map();
+    let asm = this.defsParts.get(id);
+    if (!asm || asm.id !== c.id || asm.n !== c.n) this.defsParts.set(id, (asm = { id: c.id, n: c.n, parts: new Array(c.n), got: 0 }));
+    if (asm.parts[c.i] === undefined) asm.got++;
+    asm.parts[c.i] = c.s;
+    if (asm.got < asm.n) return;
+    this.defsParts.delete(id);
+    let defs;
+    try { defs = JSON.parse(asm.parts.join('')); } catch { return; }
+    if (!defs || typeof defs !== 'object') return;
+    const problems = validateDefinitions(defs); // shader names are a client matter: not checked here
+    if (problems.length) {
+      console.warn('balance: refused new definitions:', problems.slice(0, 5));
+      return;
+    }
+    const keys = () => `${SHAPE_KEYS.join()}|${MATERIAL_KEYS.join()}`;
+    const before = keys();
+    applyDefinitions(defs);
+    this.defsCache = null;
+    this.defsRev++;
+    this.defsFrom = id;
+    this.defsBurst = DEFS_BURST;
+    if (this.world) this.world.setGravity(new Vec2(0, -GRAVITY));
+    // blocks are sent as indexes into the shape / material lists, and a level may have been deleted: start over when that changed
+    if (this.levelIdx >= levels.length) this.#toMenu();
+    else if (this.levelIdx >= 0 && keys() !== before) this.#startLevel(this.levelIdx);
   }
 
   /** Take a block from the table. Its slot stays empty (no refill) until the block is dropped into the play area. */
@@ -217,9 +263,9 @@ class BalanceGame {
     this.startedAt = performance.now();
     this.world = new planck.World({ gravity: new Vec2(0, -GRAVITY) });
 
-    // the wooden bowl: a ring of convex quads following the lower half of an ellipse
+    // the bowl: a ring of convex quads following the profile of the bowl this level uses
     const bowl = this.world.createBody({ type: 'static', position: new Vec2(0, 0) });
-    const { inner, outer } = bowlProfile(BOWL_SEGMENTS);
+    const { inner, outer } = bowlProfile(BOWL_SEGMENTS, bowlOf(level));
     for (let k = 0; k < BOWL_SEGMENTS; k++) {
       const quad = [inner[k], inner[k + 1], outer[k + 1], outer[k]].map(([x, y]) => new Vec2(x, y));
       bowl.createFixture({ shape: new planck.Polygon(quad), friction: 0.6 });
@@ -312,6 +358,7 @@ class BalanceGame {
       held,
       owner,
       bad: false,
+      armed: false, // becomes true once the held block has been inside the drop zone; before that it is never shown as 'bad'
       body,
       floatPolys,
       area,
@@ -355,14 +402,16 @@ class BalanceGame {
     for (const p of this.players.values()) {
       if (!p.held) continue;
       const pos = p.held.rec.body.getPosition();
-      p.held.rec.bad = !inDrop(level, pos.x, pos.y); // red = outside the drop zone (letting go here sends the block back to the table)
+      const inside = inDrop(level, pos.x, pos.y);
+      if (inside) p.held.rec.armed = true;
+      p.held.rec.bad = p.held.rec.armed && !inside; // red = you have taken it out of the drop zone again (letting go sends it back to the table)
     }
     if (this.phase === PHASE.PLAY) this.#rules(dt);
   }
 
   #moveHeld(dt) {
     const TAU = Math.PI * 2;
-    const k = 1 - Math.exp(-FOLLOW * dt);
+    const k = 1 - Math.exp(-tuning.follow * dt);
     for (const p of this.players.values()) {
       const h = p.held;
       if (!h) continue;
@@ -410,13 +459,13 @@ class BalanceGame {
         }
       }
       const v = body.getLinearVelocity();
-      if (Math.hypot(v.x, v.y) > SETTLE_SPEED || Math.abs(body.getAngularVelocity()) > SETTLE_SPEED) still = false;
+      if (Math.hypot(v.x, v.y) > tuning.settleSpeed || Math.abs(body.getAngularVelocity()) > tuning.settleSpeed) still = false;
     }
 
     // won: every block is placed and the whole structure has stayed still for a moment
     if (this.#remaining() === 0 && still) {
       this.settle += dt;
-      if (this.settle >= SETTLE_TIME) {
+      if (this.settle >= tuning.settleTime) {
         this.phase = PHASE.WON;
         this.endedFor = 0;
       }
