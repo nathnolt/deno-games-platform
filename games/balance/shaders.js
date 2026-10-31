@@ -2,24 +2,28 @@
 // To add a look: add a fragment shader here (copy one, change main()) and point a material at it.
 //
 // What a block shader can use (declared in `prelude`):
-//   vP        position inside the shape, in world units, centred on the shape and rotating with it (so textures stay glued to the block)
+//   vP        position on the block's face, in world units, centred on the shape and rotating with it (textures stay glued to the block)
 //   uSeed     random number per block, so two wooden blocks do not have identical grain
 //   uTime     seconds
-//   finish()  call it for the final colour: it adds the "being held" glow and the red "cannot drop here" tint
+//   finish()  call it for the final colour: it adds simple lighting (so the 3D sides are shaded), the coloured glow of a block
+//             somebody is holding, and the red tint of a block that cannot be dropped where it is
 
 export const vertexShader = /* glsl */ `
 varying vec2 vP;
+varying vec3 vN;
 void main() {
   vP = position.xy;
+  vN = normalize(normalMatrix * normal);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
 
 const prelude = /* glsl */ `
 precision highp float;
 varying vec2 vP;
+varying vec3 vN;
 uniform float uTime;
 uniform float uSeed;
-uniform float uHeld;
+uniform vec3 uGlow;
 uniform float uBad;
 
 float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
@@ -34,15 +38,18 @@ float fbm(vec2 p) {
   return s;
 }
 vec4 finish(vec3 c, float a) {
-  c = mix(c, vec3(1.0, 0.22, 0.22), uBad * 0.6);
-  c += uHeld * 0.07;
+  vec3 n = normalize(vN);
+  float light = 0.52 + 0.55 * max(dot(n, normalize(vec3(-0.35, 0.6, 0.72))), 0.0) + 0.12 * max(n.y, 0.0);
+  c *= light;
+  c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
+  c += uGlow * 0.28;
   return vec4(c, a);
 }
 `;
 
 const frag = (body) => prelude + body;
 
-/** name -> fragment shader source. `transparent: true` for shaders that output alpha < 1. */
+/** name -> fragment shader source. */
 export const shaders = {
   wood: frag(/* glsl */ `
 void main() {
@@ -54,13 +61,25 @@ void main() {
   gl_FragColor = finish(c, 1.0);
 }`),
 
+  // the wooden bowl: darker, with the grain running along the curve
+  bowlwood: frag(/* glsl */ `
+void main() {
+  vec2 p = vP * 0.55;
+  float r = length(vec2(p.x * 0.8, p.y * 1.7));
+  float warp = fbm(p * 1.4);
+  float rings = sin((r * 9.0 + warp * 4.0) * 3.14159);
+  vec3 c = mix(vec3(0.50, 0.30, 0.14), vec3(0.34, 0.19, 0.08), 0.5 + 0.4 * rings);
+  c *= 0.88 + 0.24 * fbm(p * 9.0);
+  gl_FragColor = finish(c, 1.0);
+}`),
+
   glass: frag(/* glsl */ `
 void main() {
   vec2 p = vP + uSeed * 5.0;
   vec3 c = mix(vec3(0.55, 0.80, 0.93), vec3(0.82, 0.95, 1.0), 0.5 + 0.5 * sin(p.x * 0.7 + p.y * 0.5));
   float streak = smoothstep(0.0, 0.35, sin((p.x - p.y) * 1.2 + 1.0));
   c += streak * 0.16;
-  gl_FragColor = finish(c, 0.82);
+  gl_FragColor = finish(c, 0.8);
 }`),
 
   stone1: frag(/* glsl */ `
@@ -77,7 +96,7 @@ void main() {
   stone2: frag(/* glsl */ `
 void main() {
   vec2 p = vP + uSeed * 3.0;
-  vec3 c = vec3(0.22, 0.25, 0.32) * (0.8 + 0.4 * fbm(p * 2.5));
+  vec3 c = vec3(0.30, 0.34, 0.43) * (0.8 + 0.4 * fbm(p * 2.5));
   float rows = smoothstep(0.03, 0.0, abs(fract(p.y * 0.8) - 0.5) - 0.47);
   float hatch = step(0.5, fract((p.x + p.y) * 2.2)) * 0.035;
   c = c * (1.0 - rows * 0.35) + hatch;
@@ -90,53 +109,12 @@ void main() {
   vec2 p = vP;
   float s = step(0.5, fract(p.x * 0.42 + 0.1));
   vec3 c = mix(vec3(0.95, 0.42, 0.18), vec3(0.97, 0.94, 0.88), s);
-  c *= 0.93 + 0.07 * sin(uTime * 1.3 + p.x);
   gl_FragColor = finish(c, 1.0);
 }`),
 };
 
-/** Colour of the outline drawn around blocks of each shader (default '#150f1f'). */
+/** Shaders whose blocks are see-through (drawn after the opaque ones, no depth writes). */
+export const transparentShaders = new Set(['glass']);
+
+/** Colour of the edge lines drawn around blocks of each shader (default '#1a1020'). */
 export const outlineColor = { glass: '#5f9fbf', stone2: '#0c0f16' };
-
-// ── scenery ──
-export const waterVertex = /* glsl */ `
-varying vec2 vW;
-void main() {
-  vec4 w = modelMatrix * vec4(position, 1.0);
-  vW = w.xy;
-  gl_Position = projectionMatrix * viewMatrix * w;
-}`;
-
-/** Water: wavy surface at y = 0, drawn over the blocks so submerged parts look submerged. */
-export const waterFrag = /* glsl */ `
-precision highp float;
-varying vec2 vW;
-uniform float uTime;
-uniform float uDepth;
-void main() {
-  float surf = 0.18 * sin(vW.x * 0.9 + uTime * 1.6) + 0.12 * sin(vW.x * 1.7 - uTime * 1.1);
-  if (vW.y > surf) discard;
-  float d = clamp((surf - vW.y) / uDepth, 0.0, 1.0);
-  vec3 c = mix(vec3(0.30, 0.72, 0.92), vec3(0.03, 0.18, 0.42), pow(d, 0.6));
-  c += 0.07 * sin(vW.x * 2.0 + vW.y * 3.0 + uTime) * (1.0 - d);
-  c += smoothstep(0.14, 0.0, surf - vW.y) * 0.35;
-  gl_FragColor = vec4(c, mix(0.58, 0.85, d));
-}`;
-
-export const backgroundVertex = /* glsl */ `
-varying vec2 vUv;
-void main() {
-  vUv = uv;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}`;
-
-export const backgroundFrag = /* glsl */ `
-precision highp float;
-varying vec2 vUv;
-void main() {
-  vec3 top = vec3(0.10, 0.12, 0.26);
-  vec3 bottom = vec3(0.05, 0.06, 0.14);
-  vec3 c = mix(bottom, top, smoothstep(0.0, 1.0, vUv.y));
-  c += 0.05 * smoothstep(0.7, 0.0, distance(vUv, vec2(0.5, 0.65)));
-  gl_FragColor = vec4(c, 1.0);
-}`;

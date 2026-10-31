@@ -7,36 +7,61 @@
 export const meta = {
   id: 'balance',
   name: 'Balance',
-  description: 'Stack the blocks without letting anything fall. Pick a level, place every block, and keep it all standing.',
-  maxPlayers: 1, // one seat: single player. Anybody else who joins the room spectates the same live physics
+  description: 'Stack the blocks without letting anything fall. Pick a level, then place every block together (1-4 players).',
   minPlayers: 1,
-  dropIn: true, // no setup page: the level menu is part of the game itself
+  maxPlayers: 4, // up to four people work on the same tower; one person is also a normal single-player game
+  seatNames: ['Red', 'Blue', 'Green', 'Yellow'],
+  seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'],
   tickRate: 30, // snapshots per second; the physics runs on its own fixed (finer) step inside the server
+  soloSettings: {}, // enables "Play solo". There are no settings: the level is chosen in the game's own menu
   settings: [],
 };
 
 // ── World units ──────────────────────────────────────────────────────────────────────────────────────────────
-// x = right, y = up. y = 0 is the surface of the water. Shape coordinates are in these same units
+// The GAMEPLAY is 2D: x = right, y = up, in the plane z = PLAY_Z. y = 0 is the surface of the water.
+// The VISUALS are 3D: every block is the same DEPTH thick. Shape coordinates are in these same units
 // (a 4x4 square is 4 units wide). Level x/y positions are the CENTRE of the shape.
+//
+//   z (towards the camera)
+//   HOVER_Z   ← a block you hold floats here, in front of everything (the drop zone is drawn in this plane)
+//   FRONT_Z   ← blocks waiting on the table
+//   PLAY_Z    ← the tower, the pillars and the bowl: this is where the physics happens
 
 export const WATER_Y = 0;
 export const GRAVITY = 30; // units / s²  (a bit heavy, so blocks feel chunky rather than floaty)
 export const WATER_DENSITY = 1; // see densityOf(): material density = weight / 10, so weight 10 == as dense as water
 
-/** The bowl of water at the bottom. Its walls are static; blocks that are not 'float' blocks lose the level if they touch it. */
-export const BOWL = { halfW: 18, depth: 8, wall: 1.2, rim: 1.2 }; // rim = how far the walls stick up above the water
+export const DEPTH = 2.4; //      thickness of every block along z
+export const PLAY_Z = 0;
+export const FRONT_Z = 8;
+export const HOVER_Z = 4.5;
 
-/** Default play zone. A block whose centre leaves it (sideways) loses the level. Levels can override with `zone`. */
+/**
+ * The wooden bowl: the lower half of an ellipse (a = half width, b = depth below the rim), wall thickness t.
+ * Its rim is at y = rimY, a little above the water. Blocks that are not 'float' blocks lose the level if they touch it.
+ */
+export const BOWL = { a: 18, b: 9, t: 1, rimY: 1 };
+/** Height of the table the bowl and the waiting blocks stand on. */
+export const GROUND_Y = BOWL.rimY - BOWL.b - BOWL.t;
+
+/** Default sideways limit. A block whose centre leaves it loses the level. Levels can override with `zone`. */
 export const ZONE = { x0: -30, x1: 30 };
 
-/** What the camera must always show: a wide, zoomed-out view. Height follows the window aspect, but never less than h. */
-export const VIEW = { w: 84, h: 46, cy: 9 };
+/**
+ * The DROP ZONE: a rectangle above the bowl and a bit wider than it. Let go of a block with its centre inside and it falls
+ * into the play area; let go outside and it goes back to the table. Levels can override with `drop`.
+ */
+export const DROP = { x0: -23, x1: 23, y0: 1.5, y1: 32 };
 
-/** The tray of blocks you can choose from: a column at the left edge of the view. */
-export const TRAY = { x: -36, top: 27, gap: 7.6, cell: 6.6 };
+/** What the camera must always show. Height follows the window aspect, but never less than h. */
+export const VIEW = { w: 84, h: 46, cy: 10 };
 
-/** How high above the water a held block may be carried. */
+/** The waiting blocks lie on the table in a row, this far apart (centre to centre). */
+export const SLOT_GAP = 19;
+
+/** How high above the water a held block may be carried, and how far sideways. */
 export const MAX_HOLD_Y = 34;
+export const MAX_HOLD_X = 40;
 
 // ── Materials ────────────────────────────────────────────────────────────────────────────────────────────────
 // friction: 0..20 (mu = friction / 20)         weight: density, 10 = same density as water (mass = area * weight / 10)
@@ -68,6 +93,7 @@ export const shapes = {
   raft1: [{ type: 'poly', points: '0,0 16,0 16,3 0,3' }],
   raft2: [{ type: 'poly', points: '0,0 11,0 11,3 0,3' }],
   pillar1: [{ type: 'poly', points: '0,0 2,0 2,10 0,10' }],
+  pillar2: [{ type: 'poly', points: '0,0 2,0 2,7 0,7' }],
   tri1: [{ type: 'poly', points: '0,0 4,0 2,3' }],
   plus1: [
     { type: 'poly', points: '0,1 3,1 3,2 0,2' },
@@ -142,11 +168,13 @@ export function getShape(key) {
 // name, difficulty     shown in the menu
 // initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)
 //                      'static' material = fixed to the world. Anything else is a normal physics body.
-// chooseShapes         how many of the upcoming blocks are visible in the tray at once
+// chooseShapes         how many blocks lie on the table at once = how many can be held at the same time (4 = all four players)
 // shapes               the ordered list of blocks you must place: { shape, material }. Rotate with Q / E while holding.
 // zone (optional)      { x0, x1 }: sideways limits (default ZONE). Leaving it, or touching the water/bowl, loses the level.
+// drop (optional)      { x0, x1, y0, y1 }: the drop zone rectangle (default DROP)
 //
-// Pillars below are 'pillar1' (2 x 10) centred at y = -3: they stand on the bowl floor (y = -8) and top out at y = 2.
+// Pillars below are 'pillar1' (2 x 10) centred at y = -3: they stand in the bottom of the bowl and top out at y = 2.
+// (pillar2 is 2 x 7, for pillars near the bowl's edge where the bowl is shallower.)
 export const levels = [
   {
     name: 'First Steps',
@@ -155,7 +183,7 @@ export const levels = [
       { shape: 'pillar1', material: 'static', rot: 0, x: -5, y: -3 },
       { shape: 'pillar1', material: 'static', rot: 0, x: 5, y: -3 },
     ],
-    chooseShapes: 3,
+    chooseShapes: 4,
     shapes: [
       { shape: 'plank1', material: 'wood' },
       { shape: 'square1', material: 'wood' },
@@ -172,7 +200,7 @@ export const levels = [
       { shape: 'pillar1', material: 'static', rot: 0, x: 0, y: -3 },
       { shape: 'slab1', material: 'static', rot: 14, x: 0, y: 2.75 },
     ],
-    chooseShapes: 3,
+    chooseShapes: 4,
     shapes: [
       { shape: 'rect1', material: 'wood' },
       { shape: 'square1', material: 'stone' },
@@ -241,7 +269,7 @@ export const levels = [
     zone: { x0: -22, x1: 22 },
     initialBlocks: [
       { shape: 'raft2', material: 'floatBlock', rot: 0, x: 0, y: 0.6 },
-      { shape: 'pillar1', material: 'static', rot: 0, x: -14, y: -3 },
+      { shape: 'pillar2', material: 'static', rot: 0, x: -14, y: -1.5 },
     ],
     chooseShapes: 2,
     shapes: [
@@ -257,7 +285,7 @@ export const levels = [
 
 // ── Wire constants (server and client agree on these) ─────────────────────────────────────────────────────
 export const PHASE = { MENU: 0, PLAY: 1, WON: 2, LOST: 3 };
-/** Per-body state in snapshots. */
+/** Per-body state in snapshots. HELD_BAD = held, inside the drop zone, but overlapping something (cannot be dropped there). */
 export const BODY = { NORMAL: 0, HELD: 1, HELD_BAD: 2, STATIC: 3 };
 /** Why a level was lost. */
 export const LOSE = { WATER: 1, OUT: 2, BOWL: 3 };
@@ -269,3 +297,29 @@ export const LOSE_TEXT = {
 
 /** Sideways limits for a level. */
 export const zoneOf = (level) => level.zone ?? ZONE;
+export const dropOf = (level) => level.drop ?? DROP;
+export const inDrop = (level, x, y) => {
+  const d = dropOf(level);
+  return x >= d.x0 && x <= d.x1 && y >= d.y0 && y <= d.y1;
+};
+
+/** Where waiting block number i of n lies on the table (centre), unrotated. */
+export function slotPos(i, n, shapeKey) {
+  return { x: (i - (n - 1) / 2) * SLOT_GAP, y: GROUND_Y + getShape(shapeKey).h / 2 };
+}
+
+/**
+ * Outline of the wooden bowl: the lower half of an ellipse, as inner and outer point lists (left rim to right rim).
+ * The server turns each pair of neighbouring points into a convex collision quad; the client extrudes the same ring.
+ */
+export function bowlProfile(n = 36) {
+  const { a, b, t, rimY } = BOWL;
+  const inner = [];
+  const outer = [];
+  for (let i = 0; i <= n; i++) {
+    const th = Math.PI + (i / n) * Math.PI;
+    inner.push([a * Math.cos(th), rimY + b * Math.sin(th)]);
+    outer.push([(a + t) * Math.cos(th), rimY + (b + t) * Math.sin(th)]);
+  }
+  return { inner, outer };
+}

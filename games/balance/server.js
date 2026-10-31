@@ -1,12 +1,12 @@
 // SERVER: the authoritative physics simulation (planck.js = Box2D for JavaScript).
-// Clients never simulate anything: they receive body positions every tick and draw them, so every
-// player and spectator sees exactly the same physics.
+// Clients never simulate anything: they receive body positions every tick and draw them, so all players and
+// spectators see exactly the same physics. The gameplay is 2D (x, y); the 3D look is purely client-side.
 //
 // planck is loaded straight from npm by Deno (no deno.json change needed). It needs no extra permissions.
 import * as planck from 'npm:planck@1';
 import {
-  BODY, BOWL, densityOf, frictionOf, getShape, GRAVITY, levels, LOSE, materials, MATERIAL_KEYS, MAX_HOLD_Y, meta, PHASE,
-  SHAPE_KEYS, WATER_DENSITY, WATER_Y, zoneOf,
+  BODY, BOWL, bowlProfile, densityOf, frictionOf, getShape, GRAVITY, inDrop, levels, LOSE, materials, MATERIAL_KEYS,
+  MAX_HOLD_X, MAX_HOLD_Y, meta, PHASE, SHAPE_KEYS, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 const { Vec2 } = planck;
@@ -16,8 +16,9 @@ const MAX_STEPS = 12; //          never do more than this per tick (protects the
 const SETTLE_TIME = 2; //         seconds everything must be (almost) still after the last block to win
 const SETTLE_SPEED = 0.25; //     "still" = linear and angular speed below this
 const FREEZE_AFTER = 5; //        stop simulating this long after the level has ended
-const FOLLOW = 30; //             how quickly the held block chases the pointer
+const FOLLOW = 30; //             how quickly a held block chases its player's pointer
 const FLOAT_SIDES = 24; //        circles are approximated by a polygon when computing buoyancy
+const BOWL_SEGMENTS = 36;
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const round2 = (v) => Math.round(v * 100) / 100;
@@ -60,39 +61,42 @@ export function clipBelow(pts, y0) {
 class BalanceGame {
   constructor(ctx) {
     this.ctx = ctx;
-    this.player = null; //       playerId of the one seated player (null: nobody, everyone is spectating)
+    this.players = new Map(); //  playerId -> { slot, held: null | { item, rec, tx, ty, trot } }
     this.phase = PHASE.MENU;
     this.levelIdx = -1;
+    this.run = 0; //              bumps on every level start / return to menu, so clients know to rebuild their view
     this.world = null;
-    this.recs = new Map(); //     blockId -> block record (everything that is drawn: statics, floats, placed, held)
-    this.recOf = new Map(); //    planck Body -> record (blocks and bowl walls)
-    this.queue = []; //           blocks still to place, in order: { id, shape, material }
-    this.held = null; //         { item, from, rec, tx, ty, trot }
+    this.recs = new Map(); //     blockId -> block record (everything drawn in the play area: statics, floats, placed, held)
+    this.recOf = new Map(); //    planck Body -> record (blocks and the bowl)
+    this.table = []; //           blocks lying on the table: a fixed row of slots, each an item or null
+    this.queue = []; //           blocks that have not appeared on the table yet, in order
     this.floaters = [];
     this.total = 0;
     this.settle = 0;
     this.endedFor = 0;
     this.why = 0;
     this.acc = 0;
-    this.run = 0; //             bumps on every level start / return to menu, so clients know to rebuild their view
     for (const p of ctx.players) this.onJoin(p);
   }
 
   // ── GameInstance ──
-  onJoin({ id }) {
-    if (this.player === null) this.player = id;
+  onJoin({ id, slot }) {
+    if (!this.players.has(id)) this.players.set(id, { slot, held: null });
   }
 
   onLeave(id) {
-    if (id !== this.player) return;
-    this.#cancelHeld();
-    this.player = null;
+    const p = this.players.get(id);
+    if (!p) return;
+    this.#putBack(p);
+    this.players.delete(id);
+    if (this.players.size === 0) this.ctx.end({ reason: 'everyone left' });
   }
 
   onInput(id, data) {
-    if (id !== this.player || typeof data !== 'object' || data === null) return;
+    const p = this.players.get(id); // spectators are not in the map: ignored
+    if (!p || typeof data !== 'object' || data === null) return;
     try {
-      this.#input(data);
+      this.#input(id, p, data);
     } catch (e) {
       console.error('balance: input failed', e);
     }
@@ -110,18 +114,24 @@ class BalanceGame {
   snapshot() {
     const b = [];
     for (const r of this.recs.values()) {
-      const p = r.body.getPosition();
+      const pos = r.body.getPosition();
       let st = r.static ? BODY.STATIC : BODY.NORMAL;
-      if (this.held && this.held.rec === r) st = r.bad ? BODY.HELD_BAD : BODY.HELD;
-      b.push([r.id, r.si, r.mi, round2(p.x), round2(p.y), round3(r.body.getAngle()), st]);
+      if (r.held) st = r.bad ? BODY.HELD_BAD : BODY.HELD;
+      b.push([r.id, r.si, r.mi, round2(pos.x), round2(pos.y), round3(r.body.getAngle()), st, r.held ? r.owner : -1]);
     }
+    const tbl = [];
+    this.table.forEach((item, i) => {
+      if (item) tbl.push([item.id, SHAPE_KEYS.indexOf(item.shape), MATERIAL_KEYS.indexOf(item.material), i, item.heldBy ? (this.players.get(item.heldBy)?.slot ?? -1) : -1]);
+    });
     return {
-      ph: this.phase,
       run: this.run,
+      ph: this.phase,
       lv: this.levelIdx,
+      host: this.#hostSlot(),
       b,
-      tray: this.#visible().map((i) => [i.id, SHAPE_KEYS.indexOf(i.shape), MATERIAL_KEYS.indexOf(i.material)]),
-      left: this.queue.length + (this.held ? 1 : 0),
+      tbl,
+      n: this.table.length,
+      left: this.#remaining(),
       total: this.total,
       why: this.why,
       still: round2(clamp(this.settle / SETTLE_TIME, 0, 1)),
@@ -129,67 +139,83 @@ class BalanceGame {
   }
 
   // ── input ──
-  #input(d) {
+  /** The "host" of the game is the lowest seat: only they may choose levels and restart (so nobody can ruin a game by accident). */
+  #hostSlot() {
+    let lo = -1;
+    for (const p of this.players.values()) if (lo < 0 || p.slot < lo) lo = p.slot;
+    return lo;
+  }
+
+  #input(id, p, d) {
+    const isHost = p.slot === this.#hostSlot();
     if (Number.isInteger(d.start)) {
-      if (d.start >= 0 && d.start < levels.length && this.phase !== PHASE.PLAY) this.#startLevel(d.start);
+      if (isHost && d.start >= 0 && d.start < levels.length) this.#startLevel(d.start);
     } else if (d.restart === true) {
-      if (this.levelIdx >= 0) this.#startLevel(this.levelIdx);
+      if (isHost && this.levelIdx >= 0) this.#startLevel(this.levelIdx);
     } else if (d.menu === true) {
-      this.#toMenu();
+      if (isHost) this.#toMenu();
     } else if (this.phase !== PHASE.PLAY) {
       return;
     } else if (Number.isInteger(d.pick)) {
-      this.#pick(d);
+      this.#pick(id, p, d);
     } else if (d.drop === true) {
-      this.#drop();
+      this.#drop(p);
     } else if (d.cancel === true) {
-      this.#cancelHeld();
-    } else if (this.held) {
+      this.#putBack(p);
+    } else if (p.held) {
       const zone = zoneOf(levels[this.levelIdx]);
-      if (Number.isFinite(d.x)) this.held.tx = clamp(d.x, zone.x0, zone.x1);
-      if (Number.isFinite(d.y)) this.held.ty = clamp(d.y, WATER_Y + 1, MAX_HOLD_Y);
-      if (Number.isFinite(d.rot)) this.held.trot = rad(clamp(d.rot, -1e5, 1e5));
+      if (Number.isFinite(d.x)) p.held.tx = clamp(d.x, Math.max(zone.x0, -MAX_HOLD_X), Math.min(zone.x1, MAX_HOLD_X));
+      if (Number.isFinite(d.y)) p.held.ty = clamp(d.y, WATER_Y - 12, MAX_HOLD_Y);
+      if (Number.isFinite(d.rot)) p.held.trot = rad(clamp(d.rot, -1e5, 1e5));
     }
   }
 
-  #pick(d) {
-    if (this.held) return;
-    const level = levels[this.levelIdx];
-    const idx = this.queue.slice(0, level.chooseShapes).findIndex((i) => i.id === d.pick);
-    if (idx < 0) return;
-    const [item] = this.queue.splice(idx, 1);
-    const zone = zoneOf(level);
-    const x = clamp(Number.isFinite(d.x) ? d.x : 0, zone.x0, zone.x1);
-    const y = clamp(Number.isFinite(d.y) ? d.y : 10, WATER_Y + 1, MAX_HOLD_Y);
+  /** Take a block from the table. Its slot stays empty (no refill) until the block is dropped into the play area. */
+  #pick(id, p, d) {
+    if (p.held) return;
+    const item = this.table.find((i) => i && i.id === d.pick && !i.heldBy);
+    if (!item) return; // somebody else was faster, or it is not on the table
+    const x = clamp(Number.isFinite(d.x) ? d.x : 0, -MAX_HOLD_X, MAX_HOLD_X);
+    const y = clamp(Number.isFinite(d.y) ? d.y : 0, WATER_Y - 12, MAX_HOLD_Y);
     const rot = Number.isFinite(d.rot) ? rad(d.rot) : 0;
-    const rec = this.#makeBlock(item, x, y, rot, true);
-    this.held = { item, from: idx, rec, tx: x, ty: y, trot: rot };
+    item.heldBy = id;
+    const rec = this.#makeBlock(item, x, y, rot, true, p.slot);
+    p.held = { item, rec, tx: x, ty: y, trot: rot };
   }
 
-  #cancelHeld() {
-    const h = this.held;
+  /** Put the block a player is holding back on the table, in its own slot. */
+  #putBack(p) {
+    const h = p.held;
     if (!h) return;
     this.#removeBlock(h.rec);
-    this.queue.splice(Math.min(h.from, this.queue.length), 0, h.item); // back where it came from
-    this.held = null;
+    h.item.heldBy = null;
+    p.held = null;
   }
 
-  #drop() {
-    const h = this.held;
-    if (!h || h.rec.bad) return; // not allowed while it overlaps something: the client shows it in red
-    const p = h.rec.body.getPosition();
+  /** Let go. Inside the drop zone (and not overlapping anything) it falls into the play area; outside, it returns to the table. */
+  #drop(p) {
+    const h = p.held;
+    if (!h) return;
+    const level = levels[this.levelIdx];
+    const pos = h.rec.body.getPosition();
+    if (!inDrop(level, pos.x, pos.y)) return this.#putBack(p);
+    if (h.rec.bad) return; // overlapping something: refused, the player keeps holding it (the client shows it in red)
+
     const angle = h.rec.body.getAngle();
+    const item = h.item;
     this.#removeBlock(h.rec);
-    this.held = null;
-    this.#makeBlock(h.item, p.x, p.y, angle, false); // same id, now a normal falling body
+    p.held = null;
+    this.#makeBlock(item, pos.x, pos.y, angle, false); // same id, now a normal falling body
+    this.table[item.slot] = this.queue.shift() ?? null; // only now does a new block appear in the empty slot
+    if (this.table[item.slot]) this.table[item.slot].slot = item.slot;
     this.settle = 0;
   }
 
   // ── levels ──
   #startLevel(i) {
     this.#teardown();
-    this.run++;
     const level = levels[i];
+    this.run++;
     this.levelIdx = i;
     this.phase = PHASE.PLAY;
     this.why = 0;
@@ -198,27 +224,29 @@ class BalanceGame {
     this.acc = 0;
     this.world = new planck.World({ gravity: new Vec2(0, -GRAVITY) });
 
-    // the bowl: floor + two walls, all static
-    const { halfW, depth, wall, rim } = BOWL;
-    const top = WATER_Y + rim;
-    const wallH = top + depth;
-    const walls = [
-      [0, -depth - wall / 2, halfW + wall, wall / 2], //                         floor
-      [-halfW - wall / 2, top - wallH / 2, wall / 2, wallH / 2], //              left wall
-      [halfW + wall / 2, top - wallH / 2, wall / 2, wallH / 2], //               right wall
-    ];
-    for (const [x, y, hx, hy] of walls) {
-      const body = this.world.createBody({ type: 'static', position: new Vec2(x, y) });
-      body.createFixture({ shape: new planck.Box(hx, hy), friction: 0.6 });
-      this.recOf.set(body, { kind: 'bowl' });
+    // the wooden bowl: a ring of convex quads following the lower half of an ellipse
+    const bowl = this.world.createBody({ type: 'static', position: new Vec2(0, 0) });
+    const { inner, outer } = bowlProfile(BOWL_SEGMENTS);
+    for (let k = 0; k < BOWL_SEGMENTS; k++) {
+      const quad = [inner[k], inner[k + 1], outer[k + 1], outer[k]].map(([x, y]) => new Vec2(x, y));
+      bowl.createFixture({ shape: new planck.Polygon(quad), friction: 0.6 });
     }
+    this.recOf.set(bowl, { kind: 'bowl' });
 
     let nextId = 1;
     for (const ib of level.initialBlocks) {
       this.#makeBlock({ id: nextId++, shape: ib.shape, material: ib.material }, ib.x, ib.y, rad(ib.rot ?? 0), false);
     }
-    this.queue = level.shapes.map((s) => ({ id: nextId++, shape: s.shape, material: s.material }));
-    this.total = this.queue.length;
+    const items = level.shapes.map((s) => ({ id: nextId++, shape: s.shape, material: s.material, heldBy: null, slot: -1 }));
+    this.total = items.length;
+    const n = Math.max(1, Math.min(level.chooseShapes, items.length));
+    this.table = Array.from({ length: n }, (_, k) => {
+      const item = items[k] ?? null;
+      if (item) item.slot = k;
+      return item;
+    });
+    this.queue = items.slice(n);
+    for (const p of this.players.values()) p.held = null;
   }
 
   #toMenu() {
@@ -235,17 +263,21 @@ class BalanceGame {
     this.recs.clear();
     this.recOf.clear();
     this.floaters = [];
+    this.table = [];
     this.queue = [];
-    this.held = null;
+    for (const p of this.players.values()) p.held = null;
   }
 
-  #visible() {
-    return this.phase === PHASE.PLAY ? this.queue.slice(0, levels[this.levelIdx].chooseShapes) : [];
+  /** Blocks still to be placed: on the table, held, or waiting to appear. */
+  #remaining() {
+    let n = this.queue.length;
+    for (const item of this.table) if (item) n++;
+    return n;
   }
 
   // ── bodies ──
   /** Create the physics body for a block. A held block is a gravity-free sensor: it detects overlaps but pushes nothing. */
-  #makeBlock(item, x, y, angle, held) {
+  #makeBlock(item, x, y, angle, held, owner = -1) {
     const mat = materials[item.material];
     const shape = getShape(item.shape);
     const isStatic = !!mat.static && !held;
@@ -260,7 +292,6 @@ class BalanceGame {
     });
     const def = { density: densityOf(item.material), friction: frictionOf(item.material), restitution: isStatic ? 0 : 0.04, isSensor: held };
     const floatPolys = [];
-    let area = 0;
     for (const part of shape.parts) {
       if (part.type === 'circle') {
         body.createFixture({ ...def, shape: new planck.Circle(new Vec2(part.cx, part.cy), part.r) });
@@ -271,11 +302,11 @@ class BalanceGame {
         }
         floatPolys.push(poly);
       } else {
-        const pts = part.pts.map(([px, py]) => new Vec2(px, py));
-        body.createFixture({ ...def, shape: new planck.Polygon(pts) });
+        body.createFixture({ ...def, shape: new planck.Polygon(part.pts.map(([px, py]) => new Vec2(px, py))) });
         floatPolys.push(part.pts.map(([px, py]) => ({ x: px, y: py })));
       }
     }
+    let area = 0;
     for (const poly of floatPolys) area += clipBelow(poly, Infinity).area;
 
     const rec = {
@@ -285,6 +316,8 @@ class BalanceGame {
       mi: MATERIAL_KEYS.indexOf(item.material),
       static: isStatic,
       float: !!mat.float,
+      held,
+      owner,
       bad: false,
       body,
       floatPolys,
@@ -325,22 +358,29 @@ class BalanceGame {
     }
     if (this.acc > STEP) this.acc = 0; // fell behind: drop the backlog instead of spiralling
 
-    if (this.held) this.held.rec.bad = this.#overlapping(this.held.rec);
+    const level = levels[this.levelIdx];
+    for (const p of this.players.values()) {
+      if (!p.held) continue;
+      const pos = p.held.rec.body.getPosition();
+      p.held.rec.bad = inDrop(level, pos.x, pos.y) && this.#overlapping(p.held.rec); // only matters inside the drop zone
+    }
     if (this.phase === PHASE.PLAY) this.#rules(dt);
   }
 
   #moveHeld(dt) {
-    const h = this.held;
-    if (!h) return;
-    const body = h.rec.body;
-    const p = body.getPosition();
-    const k = 1 - Math.exp(-FOLLOW * dt);
-    const a = body.getAngle();
     const TAU = Math.PI * 2;
-    const da = ((((h.trot - a + Math.PI) % TAU) + TAU) % TAU) - Math.PI; // shortest way round
-    body.setTransform(new Vec2(p.x + (h.tx - p.x) * k, p.y + (h.ty - p.y) * k), a + da * k);
-    body.setLinearVelocity(new Vec2(0, 0));
-    body.setAngularVelocity(0);
+    const k = 1 - Math.exp(-FOLLOW * dt);
+    for (const p of this.players.values()) {
+      const h = p.held;
+      if (!h) continue;
+      const body = h.rec.body;
+      const pos = body.getPosition();
+      const a = body.getAngle();
+      const da = ((((h.trot - a + Math.PI) % TAU) + TAU) % TAU) - Math.PI; // shortest way round
+      body.setTransform(new Vec2(pos.x + (h.tx - pos.x) * k, pos.y + (h.ty - pos.y) * k), a + da * k);
+      body.setLinearVelocity(new Vec2(0, 0));
+      body.setAngularVelocity(0);
+    }
   }
 
   /** Archimedes: push each floating block up by the weight of the water its submerged part displaces. */
@@ -362,10 +402,12 @@ class BalanceGame {
     }
   }
 
-  /** Is the (sensor) held block touching anything? */
+  /** Is the (sensor) held block touching a placed block or the bowl? Other players' held blocks do not count. */
   #overlapping(rec) {
     for (let ce = rec.body.getContactList(); ce; ce = ce.next) {
-      if (ce.contact.isTouching() && this.recOf.has(ce.other)) return true;
+      if (!ce.contact.isTouching()) continue;
+      const other = this.recOf.get(ce.other);
+      if (other && !other.held) return true;
     }
     return false;
   }
@@ -374,7 +416,7 @@ class BalanceGame {
     const zone = zoneOf(levels[this.levelIdx]);
     let still = true;
     for (const rec of this.recs.values()) {
-      if (rec.static || (this.held && this.held.rec === rec)) continue;
+      if (rec.static || rec.held) continue;
       const body = rec.body;
       const p = body.getPosition();
       if (!rec.float) {
@@ -389,7 +431,7 @@ class BalanceGame {
     }
 
     // won: every block is placed and the whole structure has stayed still for a moment
-    if (this.queue.length === 0 && !this.held && still) {
+    if (this.#remaining() === 0 && still) {
       this.settle += dt;
       if (this.settle >= SETTLE_TIME) {
         this.phase = PHASE.WON;
@@ -405,7 +447,7 @@ class BalanceGame {
     this.why = why;
     this.endedFor = 0;
     this.settle = 0;
-    this.#cancelHeld();
+    for (const p of this.players.values()) this.#putBack(p);
   }
 }
 

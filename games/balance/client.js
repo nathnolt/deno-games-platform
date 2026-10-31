@@ -1,11 +1,10 @@
 import * as THREE from 'three'; // resolved by the import map in client/index.html
 import { el } from '../../client/dom.js';
 import {
-  BOWL, getShape, levels, LOSE_TEXT, materials, MATERIAL_KEYS, meta, PHASE, BODY, SHAPE_KEYS, TRAY, VIEW, WATER_Y, zoneOf,
+  BODY, BOWL, bowlProfile, DEPTH, dropOf, FRONT_Z, getShape, GROUND_Y, HOVER_Z, inDrop, levels, LOSE_TEXT, materials, MATERIAL_KEYS,
+  meta, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, VIEW, WATER_Y,
 } from './shared.js';
-import {
-  backgroundFrag, backgroundVertex, outlineColor, shaders, vertexShader, waterFrag, waterVertex,
-} from './shaders.js';
+import { outlineColor, shaders, transparentShaders, vertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
 function loadStyles() {
@@ -20,7 +19,9 @@ function loadStyles() {
 const SEND_GAP = 33; //          ms between move messages (~30 per second)
 const ROTATE_SPEED = 150; //     degrees per second while Q / E is held
 const WHEEL_STEP = 15; //        degrees per mouse-wheel notch
-const OUTLINE = 0.09; //         outline thickness in world units
+const FOV = 28;
+const BOWL_Z = DEPTH + 1.4; //   the wooden bowl is a little thicker than the blocks...
+const WATER_Z = DEPTH + 0.9; //  ...and the water fills it, so it shows in front of the submerged blocks
 const STORE = 'balance.done'; // localStorage: indexes of completed levels
 
 const loadDone = () => {
@@ -36,29 +37,12 @@ const saveDone = (set) => {
   } catch { /* private mode: progress just is not remembered */ }
 };
 
-/** Grow a convex counter-clockwise polygon outwards by d (mitred corners). */
-function offsetPoly(pts, d) {
-  return pts.map((c, i) => {
-    const p = pts[(i + pts.length - 1) % pts.length];
-    const n = pts[(i + 1) % pts.length];
-    const norm = (a, b) => {
-      const dx = b[0] - a[0];
-      const dy = b[1] - a[1];
-      const l = Math.hypot(dx, dy) || 1;
-      return [dy / l, -dx / l]; // outward normal for a counter-clockwise polygon
-    };
-    const n1 = norm(p, c);
-    const n2 = norm(c, n);
-    const k = d / Math.max(0.25, 1 + n1[0] * n2[0] + n1[1] * n2[1]);
-    return [c[0] + (n1[0] + n2[0]) * k, c[1] + (n1[1] + n2[1]) * k];
-  });
-}
-
 class BalanceView {
-  views = new Map(); //      blockId -> { group, mats, si, mi, st, tx, ty, ta, x, y, a, s, static }
-  trayViews = new Map(); //  blockId -> view of a block waiting in the tray
-  trayPose = new Map(); //   blockId -> last drawn pose of a tray block (so a picked block grows out of its slot)
-  geoCache = new Map(); //   shape key -> { fill: [], outline: [] }
+  tableViews = new Map(); // blockId -> view of a block lying on the table
+  bodyViews = new Map(); //  blockId -> view of a block in the play area (static, floating, falling, or held by somebody)
+  poseMem = new Map(); //    blockId -> last drawn pose of a removed view (a block picked up / put back moves from there)
+  geoCache = new Map(); //   shape key -> [{ geo, edges }]
+  players = []; //           room players: { id, name, slot }
   snap = null;
   run = -1;
   phase = -1;
@@ -66,15 +50,19 @@ class BalanceView {
 
   // input state. mode: none | drag (button down, carrying) | carry (carrying after a click) | released (sent drop, waiting to see)
   mode = 'none';
-  local = { x: 0, y: 12, rot: 0 }; // where WE are holding the block (instant), rot in degrees
+  local = { x: 0, y: 12, rot: 0 }; // where WE hold the block (play-plane coordinates, instant), rot in degrees
+  grab = { x: 0, y: 0 }; //          pointer-to-block-centre offset, so the block does not jump
   modeTime = 0;
   downAt = { x: 0, y: 0, t: 0 };
   keys = { q: false, e: false };
   lastSent = 0;
   raf = 0;
   lastFrame = performance.now();
-  half = { w: VIEW.w / 2, h: VIEW.h / 2 };
   uTime = { value: 0 };
+  ray = new THREE.Raycaster();
+  ndc = new THREE.Vector2();
+  hit = new THREE.Vector3();
+  plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -PLAY_Z);
 
   constructor(ctx) {
     this.ctx = ctx; // ctx.me.slot is -1 for spectators: they watch the same physics, no input
@@ -100,10 +88,23 @@ class BalanceView {
       window.addEventListener('keydown', this.#onKeyDown);
       window.addEventListener('keyup', this.#onKeyUp);
     }
+    this.onRoom(ctx.room);
     this.raf = requestAnimationFrame(this.#frame);
   }
 
   // ── GameView ──
+  onRoom(room) {
+    this.players = room.players.filter((p) => p.slot >= 0);
+    this.legend.replaceChildren(
+      ...this.players.map((p) => {
+        const dot = el('span', { class: 'bb-dot' });
+        dot.style.setProperty('--c', meta.seatColors[p.slot] ?? '#fff'); // the colour is the only dynamic style; the rest is in style.css
+        return el('div', { class: 'bb-player' }, dot, p.id === this.ctx.me.id ? `${p.name} (you)` : p.name);
+      }),
+    );
+    if (this.snap) this.#updateHud(this.snap);
+  }
+
   onSnapshot(s) {
     this.snap = s;
     const now = performance.now();
@@ -111,43 +112,49 @@ class BalanceView {
     if (s.run !== this.run) { // new level, restart or back to the menu: rebuild everything from scratch
       this.#clearViews();
       this.run = s.run;
-      this.#onLevel(s.lv);
       this.mode = 'none';
+      this.#onLevel(s.lv);
     }
     if (s.ph !== this.phase) this.#onPhase(s.ph, s);
 
-    this.#syncTray(s.tray); // first: a block that was just picked leaves the tray here and grows out of its slot below
+    // 1. drop views whose block is gone (remembering where they were, so the block can move on smoothly from there)
+    const inBody = new Set(s.b.map((r) => r[0]));
+    const onTable = new Set(s.tbl.filter((r) => r[4] < 0).map((r) => r[0]));
+    for (const [id, v] of this.bodyViews) if (!inBody.has(id)) this.#remove(this.bodyViews, id, v);
+    for (const [id, v] of this.tableViews) if (!onTable.has(id)) this.#remove(this.tableViews, id, v);
 
-    // blocks
-    const seen = new Set();
-    let heldId = null;
-    for (const [id, si, mi, x, y, a, st] of s.b) {
-      seen.add(id);
-      let v = this.views.get(id);
-      if (!v) v = this.#makeView(id, si, mi, x, y, a, st);
-      v.st = st;
-      v.tx = x;
-      v.ty = y;
-      v.ta = a;
+    // 2. blocks on the table
+    for (const [id, si, mi, slot, heldBy] of s.tbl) {
+      if (heldBy >= 0) continue;
+      const v = this.tableViews.get(id) ?? this.#makeView(this.tableViews, id, si, mi, { table: true, slot, n: s.n });
+      v.slot = slot;
+      v.n = s.n;
+    }
+
+    // 3. blocks in the play area
+    let mine = null;
+    let inZone = false;
+    const level = levels[s.lv];
+    for (const [id, si, mi, x, y, a, st, owner] of s.b) {
+      const v = this.bodyViews.get(id) ?? this.#makeView(this.bodyViews, id, si, mi, { x, y, a, st, owner });
+      Object.assign(v, { tx: x, ty: y, ta: a, st, owner });
+      v.static = st === BODY.STATIC;
       const held = st === BODY.HELD || st === BODY.HELD_BAD;
-      if (held) heldId = id;
+      if (held && owner === this.ctx.me.slot) mine = id;
+      if (held && level && inDrop(level, x, y)) inZone = true;
+      const glow = held ? new THREE.Color(meta.seatColors[owner] ?? '#ffffff') : null;
       v.mats.forEach((m) => {
-        m.uniforms.uHeld.value = held ? 1 : 0;
+        m.uniforms.uGlow.value.set(glow?.r ?? 0, glow?.g ?? 0, glow?.b ?? 0);
         m.uniforms.uBad.value = st === BODY.HELD_BAD ? 1 : 0;
       });
     }
-    for (const [id, v] of this.views) {
-      if (seen.has(id)) continue;
-      this.#disposeView(v);
-      this.views.delete(id);
-    }
-    this.heldId = heldId;
+    this.anyHeldInZone = inZone;
 
     // reconcile our pointer state with what the server says we are holding
     if (this.mode === 'released') {
-      if (heldId === null) this.mode = 'none';
+      if (mine === null) this.mode = 'none';
       else if (now - this.modeTime > 350) this.mode = 'carry'; // the drop was refused (overlap): keep carrying it
-    } else if ((this.mode === 'drag' || this.mode === 'carry') && heldId === null && now - this.modeTime > 500) {
+    } else if ((this.mode === 'drag' || this.mode === 'carry') && mine === null && now - this.modeTime > 500) {
       this.mode = 'none';
     }
 
@@ -167,7 +174,7 @@ class BalanceView {
     window.removeEventListener('keydown', this.#onKeyDown);
     window.removeEventListener('keyup', this.#onKeyUp);
     this.#clearViews();
-    for (const g of this.geoCache.values()) [...g.fill, ...g.outline].forEach((geo) => geo.dispose());
+    for (const parts of this.geoCache.values()) parts.forEach((p) => { p.geo.dispose(); p.edges.dispose(); });
     this.scene.traverse((o) => {
       o.geometry?.dispose();
       o.material?.dispose();
@@ -179,190 +186,163 @@ class BalanceView {
   // ── scene ──
   #buildScene() {
     this.scene = new THREE.Scene();
-    this.camera = new THREE.OrthographicCamera(-VIEW.w / 2, VIEW.w / 2, VIEW.h / 2, -VIEW.h / 2, 0.1, 50);
-    this.camera.position.set(0, VIEW.cy, 20);
+    this.scene.background = new THREE.Color('#121833');
+    this.camera = new THREE.PerspectiveCamera(FOV, 1, 1, 600);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.domElement.className = 'bb-canvas';
 
-    // background
-    const bg = new THREE.Mesh(
-      new THREE.PlaneGeometry(400, 200),
-      new THREE.ShaderMaterial({ vertexShader: backgroundVertex, fragmentShader: backgroundFrag, depthWrite: false }),
-    );
-    bg.position.set(0, VIEW.cy, -5);
-    this.scene.add(bg);
+    this.scene.add(new THREE.AmbientLight('#ffffff', 0.9));
+    const sun = new THREE.DirectionalLight('#ffffff', 1.4);
+    sun.position.set(-20, 40, 40);
+    this.scene.add(sun);
 
-    // the bowl: three static slabs, in the same stone as static blocks
-    const { halfW, depth, wall, rim } = BOWL;
-    const top = WATER_Y + rim;
-    const wallH = top + depth;
-    this.bowl = new THREE.Group();
-    const stone = this.#blockMaterial('stone2', 0.5);
-    for (const [x, y, w, h] of [
-      [0, -depth - wall / 2, halfW * 2 + wall * 2, wall],
-      [-halfW - wall / 2, top - wallH / 2, wall, wallH],
-      [halfW + wall / 2, top - wallH / 2, wall, wallH],
-    ]) {
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), stone);
-      m.position.set(x, y, 0.1);
-      this.bowl.add(m);
-    }
+    // the table: the bowl stands on it at the back, waiting blocks lie on it at the front
+    const table = new THREE.Mesh(new THREE.BoxGeometry(110, 3, 26), new THREE.MeshLambertMaterial({ color: '#5a3d26' }));
+    table.position.set(0, GROUND_Y - 1.5, 4);
+    this.scene.add(table);
+
+    // the wooden bowl: the half-ellipse ring from shared.js, extruded
+    const { inner, outer } = bowlProfile(48);
+    const ring = new THREE.Shape();
+    ring.moveTo(...outer[0]);
+    outer.slice(1).forEach(([x, y]) => ring.lineTo(x, y));
+    inner.slice().reverse().forEach(([x, y]) => ring.lineTo(x, y));
+    ring.closePath();
+    this.bowl = new THREE.Mesh(
+      new THREE.ExtrudeGeometry(ring, { depth: BOWL_Z, bevelEnabled: false, curveSegments: 1 }).translate(0, 0, -BOWL_Z / 2),
+      this.#blockMaterial('bowlwood', 0.35),
+    );
+    this.bowl.position.z = PLAY_Z;
     this.scene.add(this.bowl);
 
-    // water, drawn in front of the blocks
+    // the water: simple, slightly transparent blue. It is the part of the bowl's inside below WATER_Y.
+    const k = (BOWL.rimY - WATER_Y) / BOWL.b;
+    const th0 = Math.PI + Math.asin(k);
+    const th1 = 2 * Math.PI - Math.asin(k);
+    const water = new THREE.Shape();
+    for (let i = 0; i <= 48; i++) {
+      const th = th0 + ((th1 - th0) * i) / 48;
+      const x = BOWL.a * Math.cos(th);
+      const y = BOWL.rimY + BOWL.b * Math.sin(th);
+      if (i === 0) water.moveTo(x, y);
+      else water.lineTo(x, y);
+    }
+    water.closePath();
     this.water = new THREE.Mesh(
-      new THREE.PlaneGeometry(halfW * 2, depth + 0.6),
-      new THREE.ShaderMaterial({
-        vertexShader: waterVertex,
-        fragmentShader: waterFrag,
-        uniforms: { uTime: this.uTime, uDepth: { value: depth } },
-        transparent: true,
-        depthWrite: false,
-      }),
+      new THREE.ExtrudeGeometry(water, { depth: WATER_Z, bevelEnabled: false, curveSegments: 1 }).translate(0, 0, -WATER_Z / 2),
+      new THREE.MeshBasicMaterial({ color: '#3d9bff', transparent: true, opacity: 0.4, depthWrite: false }),
     );
-    this.water.position.set(0, -depth / 2 + 0.3, 1);
+    this.water.renderOrder = 5;
     this.scene.add(this.water);
 
-    // sideways limits of the play area, shown while playing
-    this.zoneLines = [-1, 1].map(() => {
-      const m = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.14, 200),
-        new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.12, depthWrite: false }),
-      );
-      m.position.z = -1;
-      m.visible = false;
-      this.scene.add(m);
-      return m;
-    });
-
-    // backdrop for the tray
-    const panelW = TRAY.cell + 1.4;
-    this.trayPanel = new THREE.Mesh(
-      new THREE.PlaneGeometry(panelW, 60),
-      new THREE.MeshBasicMaterial({ color: '#0b1020', transparent: true, opacity: 0.45, depthWrite: false }),
+    // the drop zone: a translucent rectangle in the play plane, above the bowl and a bit wider than it
+    this.zone = new THREE.Group();
+    this.zoneFill = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ color: '#7dd3fc', transparent: true, opacity: 0.06, depthWrite: false }),
     );
-    this.trayPanel.position.set(TRAY.x, VIEW.cy, -2);
-    this.trayPanel.visible = false;
-    this.scene.add(this.trayPanel);
+    this.zoneLine = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints([[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]].map(([x, y]) => new THREE.Vector3(x, y, 0))),
+      new THREE.LineBasicMaterial({ color: '#7dd3fc', transparent: true, opacity: 0.55 }),
+    );
+    this.zone.add(this.zoneFill, this.zoneLine);
+    this.zone.position.z = DEPTH / 2 + 0.1;
+    this.zone.renderOrder = 4;
+    this.zone.visible = false;
+    this.scene.add(this.zone);
   }
 
   /** One ShaderMaterial per block; the time uniform is shared by all of them. */
   #blockMaterial(shaderName, seed) {
-    const src = shaders[shaderName] ?? shaders.stone1;
+    const transparent = transparentShaders.has(shaderName);
     return new THREE.ShaderMaterial({
       vertexShader,
-      fragmentShader: src,
-      uniforms: { uTime: this.uTime, uSeed: { value: seed }, uHeld: { value: 0 }, uBad: { value: 0 } },
-      transparent: shaderName === 'glass',
-      depthWrite: shaderName !== 'glass',
-      side: THREE.DoubleSide,
+      fragmentShader: shaders[shaderName] ?? shaders.stone1,
+      uniforms: { uTime: this.uTime, uSeed: { value: seed }, uGlow: { value: new THREE.Vector3() }, uBad: { value: 0 } },
+      transparent,
+      depthWrite: !transparent,
     });
   }
 
+  /** Extruded geometry (and edge lines) for each part of a shape. Every block has the same depth. */
   #geometries(key) {
     let g = this.geoCache.get(key);
     if (g) return g;
-    g = { fill: [], outline: [] };
-    for (const part of getShape(key).parts) {
-      if (part.type === 'circle') {
-        g.fill.push(new THREE.CircleGeometry(part.r, 56).translate(part.cx, part.cy, 0));
-        g.outline.push(new THREE.CircleGeometry(part.r + OUTLINE, 56).translate(part.cx, part.cy, 0));
-      } else {
-        const toShape = (pts) => new THREE.ShapeGeometry(new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y))));
-        g.fill.push(toShape(part.pts));
-        g.outline.push(toShape(offsetPoly(part.pts, OUTLINE)));
-      }
-    }
+    g = getShape(key).parts.map((part) => {
+      const shape = new THREE.Shape();
+      if (part.type === 'circle') shape.absarc(part.cx, part.cy, part.r, 0, Math.PI * 2, false);
+      else part.pts.forEach(([x, y], i) => (i === 0 ? shape.moveTo(x, y) : shape.lineTo(x, y)));
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: DEPTH, bevelEnabled: false, curveSegments: 40 }).translate(0, 0, -DEPTH / 2);
+      return { geo, edges: new THREE.EdgesGeometry(geo, 30) };
+    });
     this.geoCache.set(key, g);
     return g;
   }
 
-  #makeView(id, si, mi, x, y, a, st, tray = false) {
+  /** @param {Map} map  @param opts `{table, slot, n}` for a block on the table, `{x, y, a, st, owner}` for one in the play area */
+  #makeView(map, id, si, mi, opts) {
     const shapeKey = SHAPE_KEYS[si];
-    const matKey = MATERIAL_KEYS[mi];
-    const shaderName = materials[matKey].shader;
-    const geos = this.#geometries(shapeKey);
+    const shaderName = materials[MATERIAL_KEYS[mi]].shader;
     const mat = this.#blockMaterial(shaderName, (id * 0.6180339) % 1);
-    const edge = new THREE.MeshBasicMaterial({ color: outlineColor[shaderName] ?? '#150f1f', side: THREE.DoubleSide });
+    const edge = new THREE.LineBasicMaterial({ color: outlineColor[shaderName] ?? '#1a1020' });
 
     const group = new THREE.Group();
-    geos.outline.forEach((geo) => {
-      const m = new THREE.Mesh(geo, edge);
-      m.position.z = 0;
-      group.add(m);
-    });
-    geos.fill.forEach((geo) => {
-      const m = new THREE.Mesh(geo, mat);
-      m.position.z = 0.02;
-      group.add(m);
-    });
+    for (const { geo, edges } of this.#geometries(shapeKey)) {
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.userData.id = id;
+      if (transparentShaders.has(shaderName)) mesh.renderOrder = 3;
+      group.add(mesh, new THREE.LineSegments(edges, edge));
+    }
     this.scene.add(group);
 
-    const from = this.trayPose.get(id); // a block picked from the tray starts where (and as big as) it was
     const v = {
-      group, mats: [mat], edge, si, mi, st, tray,
-      static: st === BODY.STATIC,
-      tx: x, ty: y, ta: a,
-      x: from?.x ?? x, y: from?.y ?? y, a, s: from?.s ?? 1,
-      size: getShape(shapeKey),
+      id, group, mats: [mat], edge, size: getShape(shapeKey), shapeKey,
+      table: !!opts.table, slot: opts.slot ?? 0, n: opts.n ?? 4,
+      tx: opts.x ?? 0, ty: opts.y ?? 0, ta: opts.a ?? 0, st: opts.st ?? BODY.NORMAL, owner: opts.owner ?? -1,
+      static: opts.st === BODY.STATIC,
+      cur: null,
     };
-    this.trayPose.delete(id);
-    (tray ? this.trayViews : this.views).set(id, v);
+    v.cur = this.poseMem.get(id) ?? this.#target(v); // a block that was picked up / put back moves on from where it was
+    this.poseMem.delete(id);
+    map.set(id, v);
     return v;
   }
 
-  #disposeView(v) {
+  #remove(map, id, v) {
+    this.poseMem.set(id, { ...v.cur });
+    this.#dispose(v);
+    map.delete(id);
+  }
+
+  #dispose(v) {
     this.scene.remove(v.group);
     v.mats.forEach((m) => m.dispose());
     v.edge.dispose();
   }
 
   #clearViews() {
-    for (const v of this.views.values()) this.#disposeView(v);
-    for (const v of this.trayViews.values()) this.#disposeView(v);
-    this.views.clear();
-    this.trayViews.clear();
-    this.trayPose.clear();
-  }
-
-  #syncTray(tray) {
-    const ids = new Set(tray.map((t) => t[0]));
-    for (const [id, v] of this.trayViews) {
-      if (ids.has(id)) continue;
-      this.trayPose.set(id, { x: v.x, y: v.y, s: v.s }); // remembered: if it became a held block, it grows out of this spot
-      this.#disposeView(v);
-      this.trayViews.delete(id);
-    }
-    tray.forEach(([id, si, mi], i) => {
-      let v = this.trayViews.get(id);
-      const slotX = TRAY.x;
-      const slotY = TRAY.top - i * TRAY.gap;
-      if (!v) {
-        v = this.#makeView(id, si, mi, slotX, slotY, 0, BODY.NORMAL, true);
-        v.s = 0.01; // pops in
-      }
-      v.tx = slotX;
-      v.ty = slotY;
-      v.ta = 0;
-      v.ts = Math.min(1, TRAY.cell / Math.max(v.size.w, v.size.h));
-    });
+    for (const v of this.bodyViews.values()) this.#dispose(v);
+    for (const v of this.tableViews.values()) this.#dispose(v);
+    this.bodyViews.clear();
+    this.tableViews.clear();
+    this.poseMem.clear();
   }
 
   #onLevel(lv) {
     const level = levels[lv];
-    const zone = level ? zoneOf(level) : null;
-    this.zoneLines.forEach((m, i) => {
-      m.visible = !!zone;
-      if (zone) m.position.x = i === 0 ? zone.x0 : zone.x1;
-      m.position.y = VIEW.cy;
-    });
+    this.zone.visible = !!level;
+    if (!level) return;
+    const d = dropOf(level);
+    this.zone.position.x = (d.x0 + d.x1) / 2;
+    this.zone.position.y = (d.y0 + d.y1) / 2;
+    this.zone.scale.set(d.x1 - d.x0, d.y1 - d.y0, 1);
   }
 
   #onPhase(ph, s) {
     this.phase = ph;
-    this.trayPanel.visible = ph === PHASE.PLAY || ph === PHASE.WON || ph === PHASE.LOST;
+    if (ph !== PHASE.PLAY) this.mode = 'none';
     if (ph === PHASE.WON && !this.spectator && s.lv >= 0) {
       this.done.add(s.lv);
       saveDone(this.done);
@@ -374,58 +354,78 @@ class BalanceView {
     if (ph === PHASE.WON || ph === PHASE.LOST) this.#fillResult(ph, s);
   }
 
+  // ── where things are drawn ──
+  /** A block held at play-plane point (x, y) is drawn nearer the camera, but along the same line of sight, so it looks like it is at (x, y). */
+  #hoverPose(x, y, a) {
+    const c = this.camera.position;
+    const t = (c.z - HOVER_Z) / c.z;
+    return { x: c.x + (x - c.x) * t, y: c.y + (y - c.y) * t, z: HOVER_Z, s: t, a };
+  }
+
+  #target(v) {
+    if (v.table) {
+      const p = slotPos(v.slot, v.n, v.shapeKey);
+      return { x: p.x, y: p.y, z: FRONT_Z, s: 1, a: 0 };
+    }
+    if (v.st === BODY.HELD || v.st === BODY.HELD_BAD) {
+      if (v.owner === this.ctx.me.slot && this.#carrying()) return this.#hoverPose(this.local.x, this.local.y, (this.local.rot * Math.PI) / 180);
+      return this.#hoverPose(v.tx, v.ty, v.ta);
+    }
+    return { x: v.tx, y: v.ty, z: PLAY_Z, s: 1, a: v.ta };
+  }
+
   // ── UI (DOM) ──
+  #isHost() {
+    return !this.spectator && this.snap?.host === this.ctx.me.slot;
+  }
+
+  #hostName() {
+    return this.players.find((p) => p.slot === this.snap?.host)?.name ?? 'the host';
+  }
+
   #buildUi() {
     const send = (d) => !this.spectator && this.ctx.sendInput(d);
 
     // level menu
     this.cards = levels.map((lv, i) => {
-      const done = el('span', { class: 'bb-done', title: 'Completed' }, '✓');
       const card = el(
         'button',
-        { class: `bb-card bb-d-${lv.difficulty}`, disabled: this.spectator, onclick: () => send({ start: i }) },
+        { class: `bb-card bb-d-${lv.difficulty}`, onclick: () => send({ start: i }) },
         el('span', { class: 'bb-num' }, String(i + 1)),
         el('span', { class: 'bb-card-name' }, lv.name),
         el('span', { class: 'bb-card-meta' }, `${lv.difficulty} · ${lv.shapes.length} blocks`),
-        done,
+        el('span', { class: 'bb-done', title: 'Completed' }, '✓'),
       );
-      card.dataset.i = String(i);
       return card;
     });
+    this.menuSub = el('p', { class: 'bb-menu-sub' });
     this.menu = el(
       'div',
       { class: 'bb-menu' },
-      el(
-        'div',
-        { class: 'bb-menu-inner' },
-        el('h1', { class: 'bb-menu-title' }, meta.name),
-        el('p', { class: 'bb-menu-sub' }, this.spectator ? 'Watching: the player is choosing a level…' : 'Choose a level'),
-        el('div', { class: 'bb-cards' }, ...this.cards),
-      ),
+      el('div', { class: 'bb-menu-inner' }, el('h1', { class: 'bb-menu-title' }, meta.name), this.menuSub, el('div', { class: 'bb-cards' }, ...this.cards)),
     );
     this.#markDone();
 
     // in-game HUD
     this.titleEl = el('div', { class: 'bb-title' });
+    this.legend = el('div', { class: 'bb-legend' });
     this.leftEl = el('div', { class: 'bb-left' });
     this.barFill = el('div', { class: 'bb-bar-fill' });
     this.barEl = el('div', { class: 'bb-bar' }, this.barFill);
     this.barLabel = el('div', { class: 'bb-bar-label' }, 'Hold steady…');
-    const buttons = this.spectator
-      ? []
-      : [
-        el('button', { class: 'bb-btn', title: 'Restart (R)', onclick: () => send({ restart: true }) }, 'Restart'),
-        el('button', { class: 'bb-btn', onclick: () => send({ menu: true }) }, 'Levels'),
-      ];
-    this.hintEl = el(
-      'div',
-      { class: 'bb-hint' },
-      this.spectator ? 'Spectating' : 'Click a block and move it, release to drop · Q / E or mouse wheel to rotate · right-click or X to put it back',
-    );
+    this.restartBtn = el('button', { class: 'bb-btn', onclick: () => send({ restart: true }) }, 'Restart');
+    this.levelsBtn = el('button', { class: 'bb-btn', onclick: () => send({ menu: true }) }, 'Levels');
+    this.hintEl = el('div', { class: 'bb-hint' });
     this.hud = el(
       'div',
       { class: 'bb-hud' },
-      el('div', { class: 'bb-hud-top' }, this.titleEl, el('div', { class: 'bb-hud-mid' }, this.leftEl, this.barEl, this.barLabel), el('div', { class: 'bb-hud-btns' }, ...buttons)),
+      el(
+        'div',
+        { class: 'bb-hud-top' },
+        el('div', { class: 'bb-hud-left' }, this.titleEl, this.legend),
+        el('div', { class: 'bb-hud-mid' }, this.leftEl, this.barEl, this.barLabel),
+        el('div', { class: 'bb-hud-btns' }, ...(this.spectator ? [] : [this.restartBtn, this.levelsBtn])),
+      ),
       this.hintEl,
     );
 
@@ -441,21 +441,33 @@ class BalanceView {
   }
 
   #fillResult(ph, s) {
-    const send = (d) => this.ctx.sendInput(d);
-    const btn = (label, d, primary) => el('button', { class: `bb-btn${primary ? ' bb-primary' : ''}`, disabled: this.spectator, onclick: () => send(d) }, label);
+    const host = this.#isHost();
+    const btn = (label, d, primary) => el('button', { class: `bb-btn${primary ? ' bb-primary' : ''}`, disabled: !host, onclick: () => this.ctx.sendInput(d) }, label);
+    const wait = host ? [] : [el('div', { class: 'bb-wait' }, `Waiting for ${this.#hostName()}…`)];
     if (ph === PHASE.WON) {
       this.resultTitle.textContent = 'Level complete!';
       this.resultText.textContent = `All ${s.total} blocks are standing.`;
       const next = s.lv + 1 < levels.length;
-      this.resultBtns.replaceChildren(...(next ? [btn('Next level', { start: s.lv + 1 }, true)] : []), btn('Replay', { restart: true }, !next), btn('Levels', { menu: true }));
+      this.resultBtns.replaceChildren(...(next ? [btn('Next level', { start: s.lv + 1 }, true)] : []), btn('Replay', { restart: true }, !next), btn('Levels', { menu: true }), ...wait);
     } else {
       this.resultTitle.textContent = 'Level lost';
       this.resultText.textContent = LOSE_TEXT[s.why] ?? '';
-      this.resultBtns.replaceChildren(btn('Try again', { restart: true }, true), btn('Levels', { menu: true }));
+      this.resultBtns.replaceChildren(btn('Try again', { restart: true }, true), btn('Levels', { menu: true }), ...wait);
     }
   }
 
   #updateHud(s) {
+    const host = this.#isHost();
+    const solo = this.players.length <= 1;
+    this.menuSub.textContent = this.spectator ? 'Watching: the players are choosing a level…' : host ? 'Choose a level' : `Waiting for ${this.#hostName()} to choose a level…`;
+    this.cards.forEach((c) => (c.disabled = !host));
+    this.restartBtn.disabled = !host;
+    this.levelsBtn.disabled = !host;
+    this.legend.classList.toggle('bb-hide', solo);
+    this.hintEl.textContent = this.spectator
+      ? 'Spectating'
+      : 'Click a block on the table and move it into the dashed zone · release or click to drop it · Q / E or mouse wheel rotates · right-click or X puts it back';
+
     const playing = s.ph !== PHASE.MENU;
     this.hud.classList.toggle('bb-hide', !playing);
     if (!playing) return;
@@ -467,6 +479,7 @@ class BalanceView {
     this.barEl.classList.toggle('bb-show', settling);
     this.barLabel.classList.toggle('bb-show', settling);
     this.barFill.style.width = `${Math.round(s.still * 100)}%`;
+    if (this.result.classList.contains('bb-show') && this.resultBtns.children.length) this.#fillResult(s.ph, s);
   }
 
   // ── layout ──
@@ -475,11 +488,14 @@ class BalanceView {
     const h = Math.max(1, this.ctx.container.clientHeight);
     this.renderer.setSize(w, h, false);
     const aspect = w / h;
-    const halfH = Math.max(VIEW.h / 2, VIEW.w / 2 / aspect); // always show the whole 84-unit-wide world, and at least 46 high
-    const halfW = halfH * aspect;
-    this.half = { w: halfW, h: halfH };
-    Object.assign(this.camera, { left: -halfW, right: halfW, top: halfH, bottom: -halfH });
+    this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
+    // always fit the whole play width (84 units) and at least 46 units of height at the play plane
+    const t = Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
+    const dist = Math.max(VIEW.h / 2 / t, VIEW.w / 2 / (t * aspect));
+    this.camera.position.set(0, VIEW.cy + 4, dist);
+    this.camera.lookAt(0, VIEW.cy, 0);
+    this.camera.updateMatrixWorld();
   }
 
   #frame = () => {
@@ -491,45 +507,35 @@ class BalanceView {
 
     // Q / E rotate the block we are holding
     if (this.#carrying() && (this.keys.q || this.keys.e)) {
-      this.local.rot += (this.keys.e ? -1 : 0) * ROTATE_SPEED * dt + (this.keys.q ? 1 : 0) * ROTATE_SPEED * dt;
+      this.local.rot += ((this.keys.q ? 1 : 0) - (this.keys.e ? 1 : 0)) * ROTATE_SPEED * dt;
       this.#sendMove(now);
     }
 
     const TAU = Math.PI * 2;
-    const ease = (v, k) => {
-      v.x += (v.tx - v.x) * k;
-      v.y += (v.ty - v.y) * k;
-      const da = ((((v.ta - v.a + Math.PI) % TAU) + TAU) % TAU) - Math.PI;
-      v.a += da * k;
-      v.s += ((v.ts ?? 1) - v.s) * (1 - Math.exp(-14 * dt));
-    };
-    const place = (v, z) => {
-      v.group.position.set(v.x, v.y, z);
-      v.group.rotation.z = v.a;
-      v.group.scale.setScalar(v.s);
+    const draw = (v, rate) => {
+      const t = this.#target(v);
+      const c = v.cur;
+      const k = rate >= 1 ? 1 : 1 - Math.exp(-rate * dt);
+      c.x += (t.x - c.x) * k;
+      c.y += (t.y - c.y) * k;
+      c.z += (t.z - c.z) * k;
+      c.s += (t.s - c.s) * k;
+      c.a += (((((t.a - c.a + Math.PI) % TAU) + TAU) % TAU) - Math.PI) * k;
+      v.group.position.set(c.x, c.y, c.z);
+      v.group.rotation.z = c.a;
+      v.group.scale.setScalar(c.s);
     };
 
-    for (const v of this.views.values()) {
-      const held = v.st === BODY.HELD || v.st === BODY.HELD_BAD;
-      if (v.static) {
-        v.x = v.tx; v.y = v.ty; v.a = v.ta; v.s = 1;
-        place(v, 0.05);
-      } else if (held && this.#carrying()) {
-        // our own held block follows the pointer instantly (the server follows a moment later)
-        v.tx = this.local.x;
-        v.ty = this.local.y;
-        v.ta = (this.local.rot * Math.PI) / 180;
-        ease(v, 1 - Math.exp(-45 * dt));
-        place(v, 0.6);
-      } else {
-        ease(v, 1 - Math.exp(-(held ? 25 : 22) * dt));
-        place(v, held ? 0.6 : 0.2);
-      }
+    for (const v of this.bodyViews.values()) {
+      const mineHeld = v.owner === this.ctx.me.slot && (v.st === BODY.HELD || v.st === BODY.HELD_BAD) && this.#carrying();
+      draw(v, v.static ? 1 : mineHeld ? 45 : 24);
     }
-    for (const v of this.trayViews.values()) {
-      ease(v, 1 - Math.exp(-14 * dt));
-      place(v, 0.3);
-    }
+    for (const v of this.tableViews.values()) draw(v, 14);
+
+    // the drop zone glows while somebody holds a block inside it
+    const holding = this.snap?.b.some((r) => r[6] === BODY.HELD || r[6] === BODY.HELD_BAD);
+    this.zoneFill.material.opacity = this.anyHeldInZone ? 0.16 : holding ? 0.09 : 0.04;
+    this.zoneLine.material.opacity = this.anyHeldInZone ? 0.95 : holding ? 0.7 : 0.35;
 
     this.renderer.render(this.scene, this.camera);
   };
@@ -539,28 +545,23 @@ class BalanceView {
     return this.mode === 'drag' || this.mode === 'carry' || this.mode === 'released';
   }
 
-  #toWorld(e) {
+  #setRay(e) {
     const r = this.renderer.domElement.getBoundingClientRect();
-    return {
-      x: ((e.clientX - r.left) / r.width * 2 - 1) * this.half.w,
-      y: VIEW.cy + (1 - (e.clientY - r.top) / r.height * 2) * this.half.h,
-    };
+    this.ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    this.ray.setFromCamera(this.ndc, this.camera);
   }
 
-  #trayAt(p) {
-    let best = null;
-    let bestD = Infinity;
-    for (const [id, v] of this.trayViews) {
-      const dx = Math.abs(p.x - v.x);
-      const dy = Math.abs(p.y - v.y);
-      const hw = (v.size.w * v.s) / 2 + 0.7;
-      const hh = (v.size.h * v.s) / 2 + 0.7;
-      if (dx <= hw && dy <= hh && dx + dy < bestD) {
-        best = id;
-        bestD = dx + dy;
-      }
-    }
-    return best;
+  /** Pointer position in the play plane (z = 0), in world units. */
+  #toWorld(e) {
+    this.#setRay(e);
+    return this.ray.ray.intersectPlane(this.plane, this.hit) ? { x: this.hit.x, y: this.hit.y } : null;
+  }
+
+  /** Id of the table block under the pointer (the ray from #setRay must be current). */
+  #tableAt() {
+    const meshes = [];
+    for (const v of this.tableViews.values()) v.group.children.forEach((c) => c.isMesh && meshes.push(c));
+    return this.ray.intersectObjects(meshes, false)[0]?.object.userData.id ?? null;
   }
 
   #sendMove(now = performance.now(), force = false) {
@@ -576,9 +577,10 @@ class BalanceView {
   #onDown = (e) => {
     if (this.snap?.ph !== PHASE.PLAY || e.button !== 0) return;
     const p = this.#toWorld(e);
-    if (this.mode === 'carry') {
-      this.local.x = p.x;
-      this.local.y = p.y;
+    if (!p) return;
+    if (this.mode === 'carry') { // second click: let go
+      this.local.x = p.x + this.grab.x;
+      this.local.y = p.y + this.grab.y;
       this.#sendMove(performance.now(), true);
       this.ctx.sendInput({ drop: true });
       this.mode = 'released';
@@ -586,10 +588,17 @@ class BalanceView {
       return;
     }
     if (this.mode !== 'none') return;
-    const id = this.#trayAt(p);
+    const id = this.#tableAt();
     if (id === null) return;
-    this.local = { x: p.x, y: p.y, rot: 0 };
-    this.ctx.sendInput({ pick: id, x: p.x, y: p.y, rot: 0 });
+    const v = this.tableViews.get(id);
+    // the block's centre, seen along the line of sight, lands at this point of the play plane: start there, no jump
+    const cam = this.camera.position;
+    const k = cam.z / (cam.z - v.cur.z);
+    const cx = cam.x + (v.cur.x - cam.x) * k;
+    const cy = cam.y + (v.cur.y - cam.y) * k;
+    this.grab = { x: cx - p.x, y: cy - p.y };
+    this.local = { x: cx, y: cy, rot: 0 };
+    this.ctx.sendInput({ pick: id, x: cx, y: cy, rot: 0 });
     this.mode = 'drag';
     this.modeTime = performance.now();
     this.downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
@@ -599,19 +608,22 @@ class BalanceView {
   #onMove = (e) => {
     const p = this.#toWorld(e);
     if (!this.#carrying()) {
-      this.renderer.domElement.classList.toggle('bb-grab', this.snap?.ph === PHASE.PLAY && this.mode === 'none' && this.#trayAt(p) !== null);
+      this.renderer.domElement.classList.toggle('bb-grab', this.snap?.ph === PHASE.PLAY && this.#tableAt() !== null);
       return;
     }
-    this.local.x = p.x;
-    this.local.y = p.y;
+    if (!p) return;
+    this.local.x = p.x + this.grab.x;
+    this.local.y = p.y + this.grab.y;
     this.#sendMove();
   };
 
   #onUp = (e) => {
     if (this.mode !== 'drag') return;
     const p = this.#toWorld(e);
-    this.local.x = p.x;
-    this.local.y = p.y;
+    if (p) {
+      this.local.x = p.x + this.grab.x;
+      this.local.y = p.y + this.grab.y;
+    }
     const moved = Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y);
     if (moved > 12 || performance.now() - this.downAt.t > 300) { // dragged: letting go drops it
       this.#sendMove(performance.now(), true);
@@ -646,7 +658,6 @@ class BalanceView {
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     if (k === 'q' || k === 'e') this.keys[k] = true;
     else if (k === 'x') this.#putBack();
-    else if (k === 'r' && this.snap?.ph !== PHASE.MENU) this.ctx.sendInput({ restart: true });
   };
 
   #onKeyUp = (e) => {
