@@ -1,8 +1,8 @@
 import * as THREE from 'three'; // resolved by the import map in client/index.html
 import { el } from '../../client/dom.js';
 import {
-  BODY, BOWL, bowlProfile, DEPTH, dropOf, FRONT_Z, getShape, GROUND_Y, HOVER_Z, inDrop, levels, LOSE_TEXT, materials, MATERIAL_KEYS,
-  meta, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, VIEW, WATER_Y,
+  BODY, BOWL, BOWL_ZSCALE, bowlProfile, DEPTH, FRONT_Z, getShape, GROUND_Y, HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS,
+  meta, PHASE, PLAY_Z, SHAPE_KEYS, SLOT_GAP, slotPos, VIEW, WATER_Y,
 } from './shared.js';
 import { outlineColor, shaders, transparentShaders, vertexShader } from './shaders.js';
 
@@ -20,8 +20,10 @@ const SEND_GAP = 33; //          ms between move messages (~30 per second)
 const ROTATE_SPEED = 150; //     degrees per second while Q / E is held
 const WHEEL_STEP = 15; //        degrees per mouse-wheel notch
 const FOV = 28;
-const BOWL_Z = DEPTH + 1.4; //   the wooden bowl is a little thicker than the blocks...
-const WATER_Z = DEPTH + 0.9; //  ...and the water fills it, so it shows in front of the submerged blocks
+const CAM_PITCH = 20; //         degrees the camera looks down
+const CAM_TARGET_Y = 8; //       the point the camera looks at (x = 0, z = 0)
+const BOWL_SEGS = 72;
+const TABLE = { w: 110, d: 52, h: 4, z: 2 }; // the wooden table the bowl and the waiting blocks stand on
 const STORE = 'balance.done'; // localStorage: indexes of completed levels
 
 const loadDone = () => {
@@ -113,7 +115,6 @@ class BalanceView {
       this.#clearViews();
       this.run = s.run;
       this.mode = 'none';
-      this.#onLevel(s.lv);
     }
     if (s.ph !== this.phase) this.#onPhase(s.ph, s);
 
@@ -133,22 +134,18 @@ class BalanceView {
 
     // 3. blocks in the play area
     let mine = null;
-    let inZone = false;
-    const level = levels[s.lv];
     for (const [id, si, mi, x, y, a, st, owner] of s.b) {
       const v = this.bodyViews.get(id) ?? this.#makeView(this.bodyViews, id, si, mi, { x, y, a, st, owner });
       Object.assign(v, { tx: x, ty: y, ta: a, st, owner });
       v.static = st === BODY.STATIC;
       const held = st === BODY.HELD || st === BODY.HELD_BAD;
       if (held && owner === this.ctx.me.slot) mine = id;
-      if (held && level && inDrop(level, x, y)) inZone = true;
       const glow = held ? new THREE.Color(meta.seatColors[owner] ?? '#ffffff') : null;
       v.mats.forEach((m) => {
         m.uniforms.uGlow.value.set(glow?.r ?? 0, glow?.g ?? 0, glow?.b ?? 0);
         m.uniforms.uBad.value = st === BODY.HELD_BAD ? 1 : 0;
       });
     }
-    this.anyHeldInZone = inZone;
 
     // reconcile our pointer state with what the server says we are holding
     if (this.mode === 'released') {
@@ -177,6 +174,7 @@ class BalanceView {
     for (const parts of this.geoCache.values()) parts.forEach((p) => { p.geo.dispose(); p.edges.dispose(); });
     this.scene.traverse((o) => {
       o.geometry?.dispose();
+      o.material?.map?.dispose();
       o.material?.dispose();
     });
     this.renderer.dispose();
@@ -187,7 +185,7 @@ class BalanceView {
   #buildScene() {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#121833');
-    this.camera = new THREE.PerspectiveCamera(FOV, 1, 1, 600);
+    this.camera = new THREE.PerspectiveCamera(FOV, 1, 1, 800);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -198,64 +196,60 @@ class BalanceView {
     sun.position.set(-20, 40, 40);
     this.scene.add(sun);
 
-    // the table: the bowl stands on it at the back, waiting blocks lie on it at the front
-    const table = new THREE.Mesh(new THREE.BoxGeometry(110, 3, 26), new THREE.MeshLambertMaterial({ color: '#5a3d26' }));
-    table.position.set(0, GROUND_Y - 1.5, 4);
+    // the background: a dark floor and a wall with a soft gradient, far behind the table
+    const floorY = GROUND_Y - TABLE.h;
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(900, 900), new THREE.MeshLambertMaterial({ color: '#1c2550' }));
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = floorY;
+    this.scene.add(floor);
+    const grad = document.createElement('canvas');
+    grad.width = 2;
+    grad.height = 256;
+    const g = grad.getContext('2d');
+    const gg = g.createLinearGradient(0, 0, 0, 256);
+    gg.addColorStop(0, '#0b1020');
+    gg.addColorStop(1, '#2b3770');
+    g.fillStyle = gg;
+    g.fillRect(0, 0, 2, 256);
+    const wall = new THREE.Mesh(new THREE.PlaneGeometry(900, 260), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(grad) }));
+    wall.position.set(0, floorY + 130, -90);
+    this.scene.add(wall);
+
+    // the table: a 3D wooden rectangle. The bowl stands on it at the back, the waiting blocks lie on it at the front.
+    const table = new THREE.Mesh(new THREE.BoxGeometry(TABLE.w, TABLE.h, TABLE.d), this.#blockMaterial('floorwood', 0.7));
+    table.position.set(0, GROUND_Y - TABLE.h / 2, TABLE.z);
     this.scene.add(table);
 
-    // the wooden bowl: the half-ellipse ring from shared.js, extruded
-    const { inner, outer } = bowlProfile(48);
-    const ring = new THREE.Shape();
-    ring.moveTo(...outer[0]);
-    outer.slice(1).forEach(([x, y]) => ring.lineTo(x, y));
-    inner.slice().reverse().forEach(([x, y]) => ring.lineTo(x, y));
-    ring.closePath();
+    // the wooden bowl: a real bowl (the profile from shared.js turned around the vertical axis), squeezed a little along z.
+    // Lathe profile: outer wall from the bottom up to the rim, then the inner wall back down (this orders the normals correctly).
+    const { inner, outer } = bowlProfile(BOWL_SEGS);
+    const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y));
+    const profile = [...half(outer), ...half(inner).reverse()];
     this.bowl = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(ring, { depth: BOWL_Z, bevelEnabled: false, curveSegments: 1 }).translate(0, 0, -BOWL_Z / 2),
-      this.#blockMaterial('bowlwood', 0.35),
+      new THREE.LatheGeometry(profile, 96).scale(1, 1, BOWL_ZSCALE),
+      this.#blockMaterial('bowlwood', 0.35, THREE.DoubleSide),
     );
-    this.bowl.position.z = PLAY_Z;
     this.scene.add(this.bowl);
 
-    // the water: simple, slightly transparent blue. It is the part of the bowl's inside below WATER_Y.
+    // the water: the inside of the bowl up to WATER_Y, slightly transparent blue (a lathe too: the side, closed by a flat top)
     const k = (BOWL.rimY - WATER_Y) / BOWL.b;
-    const th0 = Math.PI + Math.asin(k);
-    const th1 = 2 * Math.PI - Math.asin(k);
-    const water = new THREE.Shape();
-    for (let i = 0; i <= 48; i++) {
-      const th = th0 + ((th1 - th0) * i) / 48;
-      const x = BOWL.a * Math.cos(th);
-      const y = BOWL.rimY + BOWL.b * Math.sin(th);
-      if (i === 0) water.moveTo(x, y);
-      else water.lineTo(x, y);
+    const thEnd = 2 * Math.PI - Math.asin(k);
+    const wp = [];
+    for (let i = 0; i <= 40; i++) {
+      const th = 1.5 * Math.PI + ((thEnd - 1.5 * Math.PI) * i) / 40;
+      wp.push(new THREE.Vector2(BOWL.a * Math.cos(th) * 0.996, BOWL.rimY + BOWL.b * Math.sin(th) + 0.02));
     }
-    water.closePath();
+    wp.push(new THREE.Vector2(0, WATER_Y));
     this.water = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(water, { depth: WATER_Z, bevelEnabled: false, curveSegments: 1 }).translate(0, 0, -WATER_Z / 2),
-      new THREE.MeshBasicMaterial({ color: '#3d9bff', transparent: true, opacity: 0.4, depthWrite: false }),
+      new THREE.LatheGeometry(wp, 96).scale(1, 1, BOWL_ZSCALE),
+      new THREE.MeshBasicMaterial({ color: '#3d9bff', transparent: true, opacity: 0.4, depthWrite: false, side: THREE.DoubleSide }),
     );
     this.water.renderOrder = 5;
     this.scene.add(this.water);
-
-    // the drop zone: a translucent rectangle in the play plane, above the bowl and a bit wider than it
-    this.zone = new THREE.Group();
-    this.zoneFill = new THREE.Mesh(
-      new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshBasicMaterial({ color: '#7dd3fc', transparent: true, opacity: 0.06, depthWrite: false }),
-    );
-    this.zoneLine = new THREE.LineLoop(
-      new THREE.BufferGeometry().setFromPoints([[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]].map(([x, y]) => new THREE.Vector3(x, y, 0))),
-      new THREE.LineBasicMaterial({ color: '#7dd3fc', transparent: true, opacity: 0.55 }),
-    );
-    this.zone.add(this.zoneFill, this.zoneLine);
-    this.zone.position.z = DEPTH / 2 + 0.1;
-    this.zone.renderOrder = 4;
-    this.zone.visible = false;
-    this.scene.add(this.zone);
   }
 
   /** One ShaderMaterial per block; the time uniform is shared by all of them. */
-  #blockMaterial(shaderName, seed) {
+  #blockMaterial(shaderName, seed, side = THREE.FrontSide) {
     const transparent = transparentShaders.has(shaderName);
     return new THREE.ShaderMaterial({
       vertexShader,
@@ -263,6 +257,7 @@ class BalanceView {
       uniforms: { uTime: this.uTime, uSeed: { value: seed }, uGlow: { value: new THREE.Vector3() }, uBad: { value: 0 } },
       transparent,
       depthWrite: !transparent,
+      side,
     });
   }
 
@@ -330,16 +325,6 @@ class BalanceView {
     this.poseMem.clear();
   }
 
-  #onLevel(lv) {
-    const level = levels[lv];
-    this.zone.visible = !!level;
-    if (!level) return;
-    const d = dropOf(level);
-    this.zone.position.x = (d.x0 + d.x1) / 2;
-    this.zone.position.y = (d.y0 + d.y1) / 2;
-    this.zone.scale.set(d.x1 - d.x0, d.y1 - d.y0, 1);
-  }
-
   #onPhase(ph, s) {
     this.phase = ph;
     if (ph !== PHASE.PLAY) this.mode = 'none';
@@ -374,15 +359,7 @@ class BalanceView {
     return { x: v.tx, y: v.ty, z: PLAY_Z, s: 1, a: v.ta };
   }
 
-  // ── UI (DOM) ──
-  #isHost() {
-    return !this.spectator && this.snap?.host === this.ctx.me.slot;
-  }
-
-  #hostName() {
-    return this.players.find((p) => p.slot === this.snap?.host)?.name ?? 'the host';
-  }
-
+  // ── UI (DOM) ──  (nobody is in charge: every player may press every button)
   #buildUi() {
     const send = (d) => !this.spectator && this.ctx.sendInput(d);
 
@@ -440,33 +417,29 @@ class BalanceView {
     this.cards.forEach((c, i) => c.classList.toggle('bb-complete', this.done.has(i)));
   }
 
+  /** Built once when the level ends (never on every snapshot: replacing a button under the pointer swallows the click). */
   #fillResult(ph, s) {
-    const host = this.#isHost();
-    const btn = (label, d, primary) => el('button', { class: `bb-btn${primary ? ' bb-primary' : ''}`, disabled: !host, onclick: () => this.ctx.sendInput(d) }, label);
-    const wait = host ? [] : [el('div', { class: 'bb-wait' }, `Waiting for ${this.#hostName()}…`)];
+    const btn = (label, d, primary) => el('button', { class: `bb-btn${primary ? ' bb-primary' : ''}`, disabled: this.spectator, onclick: () => this.ctx.sendInput(d) }, label);
     if (ph === PHASE.WON) {
       this.resultTitle.textContent = 'Level complete!';
       this.resultText.textContent = `All ${s.total} blocks are standing.`;
       const next = s.lv + 1 < levels.length;
-      this.resultBtns.replaceChildren(...(next ? [btn('Next level', { start: s.lv + 1 }, true)] : []), btn('Replay', { restart: true }, !next), btn('Levels', { menu: true }), ...wait);
+      this.resultBtns.replaceChildren(...(next ? [btn('Next level', { start: s.lv + 1 }, true)] : []), btn('Replay', { restart: true }, !next), btn('Levels', { menu: true }));
     } else {
       this.resultTitle.textContent = 'Level lost';
       this.resultText.textContent = LOSE_TEXT[s.why] ?? '';
-      this.resultBtns.replaceChildren(btn('Try again', { restart: true }, true), btn('Levels', { menu: true }), ...wait);
+      this.resultBtns.replaceChildren(btn('Try again', { restart: true }, true), btn('Levels', { menu: true }));
     }
   }
 
   #updateHud(s) {
-    const host = this.#isHost();
     const solo = this.players.length <= 1;
-    this.menuSub.textContent = this.spectator ? 'Watching: the players are choosing a level…' : host ? 'Choose a level' : `Waiting for ${this.#hostName()} to choose a level…`;
-    this.cards.forEach((c) => (c.disabled = !host));
-    this.restartBtn.disabled = !host;
-    this.levelsBtn.disabled = !host;
+    this.menuSub.textContent = this.spectator ? 'Watching: the players are choosing a level…' : 'Choose a level';
+    this.cards.forEach((c) => (c.disabled = this.spectator));
     this.legend.classList.toggle('bb-hide', solo);
     this.hintEl.textContent = this.spectator
       ? 'Spectating'
-      : 'Click a block on the table and move it into the dashed zone · release or click to drop it · Q / E or mouse wheel rotates · right-click or X puts it back';
+      : 'Click a block on the table and carry it above the bowl · release or click to drop it (red = cannot be dropped there) · Q / E or mouse wheel rotates · right-click or X puts it back';
 
     const playing = s.ph !== PHASE.MENU;
     this.hud.classList.toggle('bb-hide', !playing);
@@ -479,7 +452,6 @@ class BalanceView {
     this.barEl.classList.toggle('bb-show', settling);
     this.barLabel.classList.toggle('bb-show', settling);
     this.barFill.style.width = `${Math.round(s.still * 100)}%`;
-    if (this.result.classList.contains('bb-show') && this.resultBtns.children.length) this.#fillResult(s.ph, s);
   }
 
   // ── layout ──
@@ -487,15 +459,27 @@ class BalanceView {
     const w = Math.max(1, this.ctx.container.clientWidth);
     const h = Math.max(1, this.ctx.container.clientHeight);
     this.renderer.setSize(w, h, false);
-    const aspect = w / h;
-    this.camera.aspect = aspect;
+    this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    // always fit the whole play width (84 units) and at least 46 units of height at the play plane
-    const t = Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
-    const dist = Math.max(VIEW.h / 2 / t, VIEW.w / 2 / (t * aspect));
-    this.camera.position.set(0, VIEW.cy + 4, dist);
-    this.camera.lookAt(0, VIEW.cy, 0);
-    this.camera.updateMatrixWorld();
+
+    // the camera looks down at the table from the front; move it back until everything that matters is on screen:
+    // the full play width, the top of the tower, and the waiting blocks on the table in front of the bowl
+    const pitch = THREE.MathUtils.degToRad(CAM_PITCH);
+    const target = new THREE.Vector3(0, CAM_TARGET_Y, 0);
+    const dir = new THREE.Vector3(0, Math.sin(pitch), Math.cos(pitch));
+    const slotX = ((4 - 1) / 2) * SLOT_GAP + 7;
+    const key = [
+      [-VIEW.w / 2, 10, 0], [VIEW.w / 2, 10, 0], [0, 30, 0], [-23, 28, 0], [23, 28, 0],
+      [-slotX, GROUND_Y, FRONT_Z + DEPTH / 2], [slotX, GROUND_Y, FRONT_Z + DEPTH / 2],
+    ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
+    const p = new THREE.Vector3();
+    let dist = 40;
+    for (; dist < 400; dist += 1) {
+      this.camera.position.copy(target).addScaledVector(dir, dist);
+      this.camera.lookAt(target);
+      this.camera.updateMatrixWorld(true);
+      if (key.every((k) => { p.copy(k).project(this.camera); return Math.abs(p.x) <= 0.94 && Math.abs(p.y) <= 0.94 && p.z < 1; })) break;
+    }
   }
 
   #frame = () => {
@@ -531,11 +515,6 @@ class BalanceView {
       draw(v, v.static ? 1 : mineHeld ? 45 : 24);
     }
     for (const v of this.tableViews.values()) draw(v, 14);
-
-    // the drop zone glows while somebody holds a block inside it
-    const holding = this.snap?.b.some((r) => r[6] === BODY.HELD || r[6] === BODY.HELD_BAD);
-    this.zoneFill.material.opacity = this.anyHeldInZone ? 0.16 : holding ? 0.09 : 0.04;
-    this.zoneLine.material.opacity = this.anyHeldInZone ? 0.95 : holding ? 0.7 : 0.35;
 
     this.renderer.render(this.scene, this.camera);
   };

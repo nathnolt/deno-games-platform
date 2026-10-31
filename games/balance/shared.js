@@ -7,13 +7,13 @@
 export const meta = {
   id: 'balance',
   name: 'Balance',
-  description: 'Stack the blocks without letting anything fall. Pick a level, then place every block together (1-4 players).',
+  description: 'Stack the blocks without letting anything fall. Join or leave whenever you like; everybody can pick levels (1-4 players).',
   minPlayers: 1,
+  dropIn: true, // no setup page: people join and leave while the game runs, and nobody is in charge
   maxPlayers: 4, // up to four people work on the same tower; one person is also a normal single-player game
   seatNames: ['Red', 'Blue', 'Green', 'Yellow'],
   seatColors: ['#ef4444', '#3b82f6', '#22c55e', '#eab308'],
   tickRate: 30, // snapshots per second; the physics runs on its own fixed (finer) step inside the server
-  soloSettings: {}, // enables "Play solo". There are no settings: the level is chosen in the game's own menu
   settings: [],
 };
 
@@ -23,7 +23,7 @@ export const meta = {
 // (a 4x4 square is 4 units wide). Level x/y positions are the CENTRE of the shape.
 //
 //   z (towards the camera)
-//   HOVER_Z   ← a block you hold floats here, in front of everything (the drop zone is drawn in this plane)
+//   HOVER_Z   ← a block you hold floats here, in front of everything (the drop zone is invisible, only the red tint tells you)
 //   FRONT_Z   ← blocks waiting on the table
 //   PLAY_Z    ← the tower, the pillars and the bowl: this is where the physics happens
 
@@ -33,7 +33,7 @@ export const WATER_DENSITY = 1; // see densityOf(): material density = weight / 
 
 export const DEPTH = 2.4; //      thickness of every block along z
 export const PLAY_Z = 0;
-export const FRONT_Z = 8;
+export const FRONT_Z = 17; // in front of the bowl (the bowl is a real 3D bowl, about 13 units deep towards the camera)
 export const HOVER_Z = 4.5;
 
 /**
@@ -41,6 +41,8 @@ export const HOVER_Z = 4.5;
  * Its rim is at y = rimY, a little above the water. Blocks that are not 'float' blocks lose the level if they touch it.
  */
 export const BOWL = { a: 18, b: 9, t: 1, rimY: 1 };
+/** The bowl is a bowl of revolution squeezed along z by this factor (the physics only sees the slice at z = 0, which is unchanged). */
+export const BOWL_ZSCALE = 0.7;
 /** Height of the table the bowl and the waiting blocks stand on. */
 export const GROUND_Y = BOWL.rimY - BOWL.b - BOWL.t;
 
@@ -57,11 +59,12 @@ export const DROP = { x0: -23, x1: 23, y0: 1.5, y1: 32 };
 export const VIEW = { w: 84, h: 46, cy: 10 };
 
 /** The waiting blocks lie on the table in a row, this far apart (centre to centre). */
-export const SLOT_GAP = 19;
+export const SLOT_GAP = 17;
 
 /** How high above the water a held block may be carried, and how far sideways. */
 export const MAX_HOLD_Y = 34;
-export const MAX_HOLD_X = 40;
+export const MAX_HOLD_X = 45;
+export const MIN_HOLD_Y = -25; // the waiting blocks are closer to the camera, so their pick-up point on the play plane is a bit low
 
 // ── Materials ────────────────────────────────────────────────────────────────────────────────────────────────
 // friction: 0..20 (mu = friction / 20)         weight: density, 10 = same density as water (mass = area * weight / 10)

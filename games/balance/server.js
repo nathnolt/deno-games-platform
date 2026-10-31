@@ -6,7 +6,7 @@
 import * as planck from 'npm:planck@1';
 import {
   BODY, BOWL, bowlProfile, densityOf, frictionOf, getShape, GRAVITY, inDrop, levels, LOSE, materials, MATERIAL_KEYS,
-  MAX_HOLD_X, MAX_HOLD_Y, meta, PHASE, SHAPE_KEYS, WATER_DENSITY, WATER_Y, zoneOf,
+  MAX_HOLD_X, MAX_HOLD_Y, meta, MIN_HOLD_Y, PHASE, SHAPE_KEYS, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 const { Vec2 } = planck;
@@ -19,6 +19,7 @@ const FREEZE_AFTER = 5; //        stop simulating this long after the level has 
 const FOLLOW = 30; //             how quickly a held block chases its player's pointer
 const FLOAT_SIDES = 24; //        circles are approximated by a polygon when computing buoyancy
 const BOWL_SEGMENTS = 36;
+const START_GRACE = 0.8; //       seconds after a level starts during which start / restart clicks are ignored (two players clicking the same button)
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const round2 = (v) => Math.round(v * 100) / 100;
@@ -76,6 +77,7 @@ class BalanceGame {
     this.endedFor = 0;
     this.why = 0;
     this.acc = 0;
+    this.startedAt = -Infinity;
     for (const p of ctx.players) this.onJoin(p);
   }
 
@@ -88,8 +90,7 @@ class BalanceGame {
     const p = this.players.get(id);
     if (!p) return;
     this.#putBack(p);
-    this.players.delete(id);
-    if (this.players.size === 0) this.ctx.end({ reason: 'everyone left' });
+    this.players.delete(id); // drop-in game: it just goes on, even with nobody in it
   }
 
   onInput(id, data) {
@@ -127,7 +128,6 @@ class BalanceGame {
       run: this.run,
       ph: this.phase,
       lv: this.levelIdx,
-      host: this.#hostSlot(),
       b,
       tbl,
       n: this.table.length,
@@ -139,21 +139,15 @@ class BalanceGame {
   }
 
   // ── input ──
-  /** The "host" of the game is the lowest seat: only they may choose levels and restart (so nobody can ruin a game by accident). */
-  #hostSlot() {
-    let lo = -1;
-    for (const p of this.players.values()) if (lo < 0 || p.slot < lo) lo = p.slot;
-    return lo;
-  }
-
+  /** Nobody is in charge: every seated player may choose levels, restart and go back to the menu. */
   #input(id, p, d) {
-    const isHost = p.slot === this.#hostSlot();
+    const settled = performance.now() - this.startedAt > START_GRACE * 1000;
     if (Number.isInteger(d.start)) {
-      if (isHost && d.start >= 0 && d.start < levels.length) this.#startLevel(d.start);
+      if (settled && d.start >= 0 && d.start < levels.length) this.#startLevel(d.start);
     } else if (d.restart === true) {
-      if (isHost && this.levelIdx >= 0) this.#startLevel(this.levelIdx);
+      if (settled && this.levelIdx >= 0) this.#startLevel(this.levelIdx);
     } else if (d.menu === true) {
-      if (isHost) this.#toMenu();
+      this.#toMenu();
     } else if (this.phase !== PHASE.PLAY) {
       return;
     } else if (Number.isInteger(d.pick)) {
@@ -163,9 +157,8 @@ class BalanceGame {
     } else if (d.cancel === true) {
       this.#putBack(p);
     } else if (p.held) {
-      const zone = zoneOf(levels[this.levelIdx]);
-      if (Number.isFinite(d.x)) p.held.tx = clamp(d.x, Math.max(zone.x0, -MAX_HOLD_X), Math.min(zone.x1, MAX_HOLD_X));
-      if (Number.isFinite(d.y)) p.held.ty = clamp(d.y, WATER_Y - 12, MAX_HOLD_Y);
+      if (Number.isFinite(d.x)) p.held.tx = clamp(d.x, -MAX_HOLD_X, MAX_HOLD_X);
+      if (Number.isFinite(d.y)) p.held.ty = clamp(d.y, MIN_HOLD_Y, MAX_HOLD_Y);
       if (Number.isFinite(d.rot)) p.held.trot = rad(clamp(d.rot, -1e5, 1e5));
     }
   }
@@ -176,7 +169,7 @@ class BalanceGame {
     const item = this.table.find((i) => i && i.id === d.pick && !i.heldBy);
     if (!item) return; // somebody else was faster, or it is not on the table
     const x = clamp(Number.isFinite(d.x) ? d.x : 0, -MAX_HOLD_X, MAX_HOLD_X);
-    const y = clamp(Number.isFinite(d.y) ? d.y : 0, WATER_Y - 12, MAX_HOLD_Y);
+    const y = clamp(Number.isFinite(d.y) ? d.y : 0, MIN_HOLD_Y, MAX_HOLD_Y);
     const rot = Number.isFinite(d.rot) ? rad(d.rot) : 0;
     item.heldBy = id;
     const rec = this.#makeBlock(item, x, y, rot, true, p.slot);
@@ -222,6 +215,7 @@ class BalanceGame {
     this.settle = 0;
     this.endedFor = 0;
     this.acc = 0;
+    this.startedAt = performance.now();
     this.world = new planck.World({ gravity: new Vec2(0, -GRAVITY) });
 
     // the wooden bowl: a ring of convex quads following the lower half of an ellipse
@@ -362,7 +356,7 @@ class BalanceGame {
     for (const p of this.players.values()) {
       if (!p.held) continue;
       const pos = p.held.rec.body.getPosition();
-      p.held.rec.bad = inDrop(level, pos.x, pos.y) && this.#overlapping(p.held.rec); // only matters inside the drop zone
+      p.held.rec.bad = !inDrop(level, pos.x, pos.y) || this.#overlapping(p.held.rec); // red = cannot be dropped here (outside the drop zone, or touching something)
     }
     if (this.phase === PHASE.PLAY) this.#rules(dt);
   }

@@ -3,6 +3,7 @@
 //
 // What a block shader can use (declared in `prelude`):
 //   vP        position on the block's face, in world units, centred on the shape and rotating with it (textures stay glued to the block)
+//   vP3       position in the mesh's own 3D space (used by the bowl and the table, which are not flat blocks)
 //   uSeed     random number per block, so two wooden blocks do not have identical grain
 //   uTime     seconds
 //   finish()  call it for the final colour: it adds simple lighting (so the 3D sides are shaded), the coloured glow of a block
@@ -10,9 +11,11 @@
 
 export const vertexShader = /* glsl */ `
 varying vec2 vP;
+varying vec3 vP3;
 varying vec3 vN;
 void main() {
   vP = position.xy;
+  vP3 = position;
   vN = normalize(normalMatrix * normal);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
@@ -20,6 +23,7 @@ void main() {
 const prelude = /* glsl */ `
 precision highp float;
 varying vec2 vP;
+varying vec3 vP3;
 varying vec3 vN;
 uniform float uTime;
 uniform float uSeed;
@@ -61,15 +65,30 @@ void main() {
   gl_FragColor = finish(c, 1.0);
 }`),
 
-  // the wooden bowl: darker, with the grain running along the curve
+  // the wooden bowl: darker, turned-wood bands that follow the curve all the way round
   bowlwood: frag(/* glsl */ `
 void main() {
-  vec2 p = vP * 0.55;
-  float r = length(vec2(p.x * 0.8, p.y * 1.7));
-  float warp = fbm(p * 1.4);
-  float rings = sin((r * 9.0 + warp * 4.0) * 3.14159);
+  vec3 q = vP3;
+  float warp = fbm(q.xz * 0.3 + vec2(q.y * 0.25, 3.0));
+  float rings = sin((q.y * 1.7 + warp * 4.0) * 3.14159);
   vec3 c = mix(vec3(0.50, 0.30, 0.14), vec3(0.34, 0.19, 0.08), 0.5 + 0.4 * rings);
-  c *= 0.88 + 0.24 * fbm(p * 9.0);
+  c *= 0.88 + 0.24 * fbm(vec2(q.x + q.z, q.y * 3.0) * 1.5);
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  // the table: wide planks running left to right
+  floorwood: frag(/* glsl */ `
+void main() {
+  vec2 p = vec2(vP3.x, vP3.z + vP3.y) + uSeed * 9.0;
+  float plank = floor(p.y / 3.2);
+  vec2 q = vec2(p.x * 0.35 + hash(vec2(plank, 3.0)) * 40.0, p.y);
+  float warp = fbm(vec2(q.x * 0.5, q.y * 2.5));
+  float grain = sin((q.y * 2.0 + warp * 6.0) * 3.14159);
+  vec3 base = mix(vec3(0.60, 0.40, 0.20), vec3(0.44, 0.27, 0.12), hash(vec2(plank, 7.0)));
+  vec3 c = mix(base, base * 0.8, 0.5 + 0.3 * grain);
+  c *= 0.9 + 0.2 * fbm(q * vec2(1.0, 4.0));
+  float f = fract(p.y / 3.2);
+  c *= 1.0 - smoothstep(0.03, 0.0, min(f, 1.0 - f)) * 0.5;
   gl_FragColor = finish(c, 1.0);
 }`),
 
