@@ -177,3 +177,6 @@
 .bb-st-seq select { min-width: 0; max-width: 6.5rem; }
 .bb-st-seq .bb-dbg-btn { padding: .1rem .4rem; }
 @media (max-width: 1100px) { .bb-st-cols { grid-template-columns: 170px minmax(0, 1fr) 320px; } }
+
+.bb-st-svg.bb-st-drawing, .bb-st-svg.bb-st-drawing * { cursor: crosshair; }
+.bb-dbg-part.bb-st-focus { border-color: #f43f5e; }

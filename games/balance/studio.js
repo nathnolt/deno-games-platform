@@ -113,7 +113,7 @@ function thumb(def, color, w = 46, hgt = 34) {
  * vector-effect="non-scaling-stroke". `down(world, event)` may return { move(world, event), up(world, event) } to start a drag,
  * anything else pans the board.
  */
-function makeBoard({ down, context, wheel, resized }) {
+function makeBoard({ down, context, wheel, resized, hover }) {
   const root = svg('svg', { class: 'bb-st-svg' });
   const g = svg('g');
   root.append(g);
@@ -159,7 +159,10 @@ function makeBoard({ down, context, wheel, resized }) {
     drag = down?.(worldAt(e.clientX, e.clientY), e) ?? { pan: true, x: e.clientX, y: e.clientY, tx: v.tx, ty: v.ty };
   });
   root.addEventListener('pointermove', (e) => {
-    if (!drag) return;
+    if (!drag) {
+      hover?.(worldAt(e.clientX, e.clientY), e);
+      return;
+    }
     if (drag.pan) {
       v.tx = drag.tx + (e.clientX - drag.x);
       v.ty = drag.ty + (e.clientY - drag.y);
@@ -253,7 +256,8 @@ function drawParts(def, fill, stroke, extra = {}) {
 //  SHAPE STUDIO
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 function shapeStudio(view, api) {
-  const st = { sel: null, snap: 0.25, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
+  const st = { sel: null, part: 0, draw: null, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
+  let manual = {}; //   shapes the user moved on the board: key -> { ox, oy } (only where a shape is drawn, never its data)
   let layout = null; // { cells: { key: { ox, oy, ax, ay } }, rows: [{ y, x0, x1 }], bowlKey }
   let preview = null;
   let raf = 0;
@@ -297,6 +301,7 @@ function shapeStudio(view, api) {
       rowH = Math.max(rowH, hh);
       row.x1 = Math.max(row.x1, x);
     }
+    for (const key of Object.keys(manual)) if (cells[key]) Object.assign(cells[key], manual[key]);
     rows.push(row);
     const top = gY + Math.max(bowl.rimY - gY + 3, 12);
     layout = { cells, rows, bowlKey: bowlKey(), bounds: [-bowl.a - bowl.t - 3, y - 4, maxX + 3, top] };
@@ -313,6 +318,10 @@ function shapeStudio(view, api) {
       const role = t.dataset?.role;
       const d = D();
       const def = d.shapes[st.sel];
+      if (st.draw) {
+        drawClick(w);
+        return { move() {}, up() {} };
+      }
       if (role && def) {
         const part = def[+t.dataset.part];
         const sh = shift(st.sel);
@@ -351,10 +360,24 @@ function shapeStudio(view, api) {
       }
       const hit = t.closest?.('[data-shape]');
       if (hit) {
-        select(hit.dataset.shape);
-        return { move() {}, up() {} };
+        const key = hit.dataset.shape;
+        const body = t.closest?.('[data-pbody]');
+        const whole = key !== st.sel || e.shiftKey || e.altKey || !body; // otherwise the part under the pointer moves
+        if (key !== st.sel) select(key);
+        if (!whole) {
+          const i = +body.dataset.pbody;
+          if (i !== st.part) focusPart(i);
+          return partDrag(w, i);
+        }
+        return shapeDrag(key, w);
       }
       return null;
+    },
+    hover(w) {
+      if (!st.draw) return;
+      const sh = shift(st.sel);
+      st.draw.cur = [snapV(w.x - sh.x), snapV(w.y - sh.y)];
+      scheduleDraw();
     },
     context(w, e) {
       const t = e.target;
@@ -368,6 +391,96 @@ function shapeStudio(view, api) {
     },
     resized() { scheduleDraw(); },
   });
+
+  /** Drag a whole shape across the board: only where it is DRAWN changes (to compare it with the others), never its points. */
+  function shapeDrag(key, w) {
+    const c = layout.cells[key];
+    const o = { x: c.ox, y: c.oy };
+    return {
+      move(q) {
+        c.ox = o.x + snapV(q.x - w.x);
+        c.oy = o.y + snapV(q.y - w.y);
+        manual[key] = { ox: c.ox, oy: c.oy };
+        scheduleDraw();
+      },
+      up() {},
+    };
+  }
+  /** Drag one part of the selected shape: all its points (or the circle centre) move together. */
+  function partDrag(w, i) {
+    const part = D().shapes[st.sel][i];
+    const circle = part.type === 'circle';
+    const orig = circle ? circleOf(part) : parsePts(part.points);
+    return {
+      move(q) {
+        const dx = snapV(q.x - w.x);
+        const dy = snapV(q.y - w.y);
+        if (circle) {
+          part.x = orig.x + dx;
+          part.y = orig.y + dy;
+          part.diameter = orig.r * 2;
+        } else {
+          part.points = ptsStr(orig.map(([x, y]) => [x + dx, y + dy]));
+        }
+        edited(true);
+      },
+      up() { edited(); },
+    };
+  }
+  function focusPart(i) {
+    st.part = i;
+    renderInspector();
+    scheduleDraw();
+  }
+
+  // ── drawing a new polygon, point by point ──
+  function startDraw() {
+    if (!st.sel) return;
+    st.draw = { pts: [], cur: null };
+    st.msg = '';
+    board.el.classList.add('bb-st-drawing');
+    renderHead();
+    renderList();
+    scheduleDraw();
+  }
+  function cancelDraw() {
+    if (!st.draw) return;
+    st.draw = null;
+    board.el.classList.remove('bb-st-drawing');
+    renderHead();
+    scheduleDraw();
+  }
+  function finishDraw() {
+    const dr = st.draw;
+    if (!dr) return;
+    if (dr.pts.length < 3) return fail('A polygon needs at least 3 points: click the board to put them down.');
+    const def = D().shapes[st.sel];
+    def.push({ type: 'poly', points: ptsStr(dr.pts) });
+    st.part = def.length - 1;
+    st.msg = '';
+    cancelDraw();
+    renderList();
+    edited();
+    return undefined;
+  }
+  function drawClick(w) {
+    const dr = st.draw;
+    const sh = shift(st.sel);
+    const p = [snapV(w.x - sh.x), snapV(w.y - sh.y)];
+    if (dr.pts.length >= 3 && Math.hypot(w.x - sh.x - dr.pts[0][0], w.y - sh.y - dr.pts[0][1]) < 9 / board.v.k) return finishDraw(); // click the first point to close
+    const last = dr.pts[dr.pts.length - 1];
+    if (!last || last[0] !== p[0] || last[1] !== p[1]) dr.pts.push(p);
+    scheduleDraw();
+    return undefined;
+  }
+  const onKey = (e) => {
+    if (!st.open || !st.draw || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'Enter') finishDraw();
+    else if (e.key === 'Escape') cancelDraw();
+    else if (e.key === 'Backspace') { st.draw.pts.pop(); scheduleDraw(); } else return;
+    e.preventDefault();
+  };
+  window.addEventListener('keydown', onKey);
 
   function scheduleDraw() {
     if (raf) return;
@@ -401,7 +514,15 @@ function shapeStudio(view, api) {
       const matKey = st.mat === '(mixed)' ? mats[n++ % mats.length] : st.mat;
       const col = matColor(d, matKey);
       const grp = svg('g', { transform: `translate(${sh.x} ${sh.y})`, 'data-shape': key, class: 'bb-st-shape' });
-      grp.append(...drawParts(def, col, sel ? ACCENT : '#1f2937', { opacity: sel ? 1 : 0.92 }));
+      const kids = drawParts(def, col, sel ? ACCENT : '#1f2937', { opacity: sel ? 1 : 0.92 });
+      kids.forEach((node, i) => {
+        node.setAttribute('data-pbody', i);
+        if (sel && def.length > 1) {
+          node.setAttribute('stroke', i === st.part ? ACCENT : '#64748b');
+          if (i !== st.part) node.setAttribute('opacity', 0.6);
+        }
+      });
+      grp.append(...kids);
       for (const [pi, p] of def.entries()) { // a part that is not convex cannot be a collision shape
         if (p.type !== 'circle' && !p.visual && !isConvex(parsePts(p.points))) grp.append(svg('polygon', { points: p.points, fill: 'none', stroke: '#ef4444', 'stroke-width': 3, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
         void pi;
@@ -413,6 +534,7 @@ function shapeStudio(view, api) {
       if (sel) {
         g.append(label(`${f3(box[2] - box[0])} × ${f3(box[3] - box[1])}`, c.ox + (box[2] - box[0]) / 2, c.oy - 3.2, 10.5, '#fda4af', 'middle'));
         for (const [pi, p] of def.entries()) {
+          if (pi !== st.part) continue; // handles only for the part you are working on
           const hg = svg('g', { transform: `translate(${sh.x} ${sh.y})` });
           if (p.type === 'circle') {
             const cc = circleOf(p);
@@ -432,12 +554,25 @@ function shapeStudio(view, api) {
         }
       }
     }
+    if (st.draw && st.sel) {
+      const sh = shift(st.sel);
+      const dr = st.draw;
+      const all = dr.cur ? [...dr.pts, dr.cur] : dr.pts;
+      const dg = svg('g', { transform: `translate(${sh.x} ${sh.y})`, 'pointer-events': 'none' });
+      if (all.length > 1) dg.append(svg('polyline', { points: all.map((q) => q.join(',')).join(' '), fill: 'none', stroke: '#fde047', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'stroke-dasharray': dr.cur ? '' : '' }));
+      if (dr.pts.length >= 3 && dr.cur) dg.append(svg('line', { x1: dr.cur[0], y1: dr.cur[1], x2: dr.pts[0][0], y2: dr.pts[0][1], stroke: '#fde047', 'stroke-width': 1, 'stroke-dasharray': '3 4', 'vector-effect': 'non-scaling-stroke', opacity: 0.6 }));
+      dr.pts.forEach((q, i) => dg.append(svg('circle', { cx: q[0], cy: q[1], r: (i === 0 ? 7 : 5) * px, fill: i === 0 ? '#fde047' : '#fff', stroke: '#92400e', 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke' })));
+      if (dr.cur) dg.append(svg('text', { transform: `translate(${dr.cur[0] + 8 * px} ${dr.cur[1] + 8 * px}) scale(1 -1)`, 'font-size': 11 * px, fill: '#fde047', 'font-family': 'system-ui, sans-serif' }, `${dr.pts.length + 1}: ${f3(dr.cur[0])}, ${f3(dr.cur[1])}`));
+      top.append(dg);
+    }
     g.append(top);
   }
 
   // ── editing ──
   /** The selected shape changed. `live` = still dragging (only redraw). */
   function edited(live = false) {
+    const cur = D().shapes[st.sel];
+    if (cur) st.part = Math.max(0, Math.min(st.part, cur.length - 1));
     api.touch('shapes'); // validates + sends after a short pause, and calls changed() below
     scheduleDraw();
     if (!live) renderInspector();
@@ -454,6 +589,10 @@ function shapeStudio(view, api) {
     scheduleDraw();
   }
   function select(key) {
+    if (key !== st.sel) {
+      st.part = 0;
+      cancelDraw();
+    }
     st.sel = key;
     st.msg = '';
     renderList();
@@ -620,20 +759,20 @@ function shapeStudio(view, api) {
         ta.addEventListener('change', () => edited());
         body = h('div', {}, ta);
       }
-      return h('div', { class: 'bb-dbg-part' }, head, body);
+      head.addEventListener('click', (e) => { if (!e.target.closest('button,input,label') && i !== st.part) focusPart(i); });
+      return h('div', { class: `bb-dbg-part${i === st.part ? ' bb-st-focus' : ''}` }, head, body);
     });
     put(inspEl,
       ...rows,
       h('div', { class: 'bb-st-row' },
-        btn('+ rectangle', () => { def.push({ type: 'poly', points: '0,0 2,0 2,1 0,1' }); edited(); }),
-        btn('+ triangle', () => { def.push({ type: 'poly', points: '0,0 2,0 1,2' }); edited(); }),
+        btn('+ polygon', startDraw),
         btn('+ circle', () => { def.push({ type: 'circle', diameter: 2 }); edited(); })),
       h('div', { class: 'bb-st-row' },
         btn('Mirror ↔', () => transform(([x, y]) => [-x, y])),
         btn('Mirror ↕', () => transform(([x, y]) => [x, -y])),
         btn('Rotate 90°', () => transform(([x, y]) => [-y, x])),
         btn('To 0,0', toOrigin)),
-      h('p', { class: 'bb-dbg-note' }, 'Drag a corner · click a small dot on an edge to add a corner · right-click a corner to remove it · drag the background to pan, wheel to zoom. Every part must be convex: build an L or a plus from several parts and, if you like, add a "drawing only" outline for the looks.'));
+      h('p', { class: 'bb-dbg-note' }, '+ Polygon: click the board to put down points 1, 2, 3 … then press Enter, click the first point, or press Done (Backspace removes the last point, Esc cancels). Drag a corner to move it · click a small dot on an edge to insert a corner · right-click a corner to remove it. Click a part to work on it and drag it to move all of its points. Drag a shape that is not selected (or Shift-drag the selected one) to move it on the board only, to compare it with the others: its points do not change. Every part must be convex: build an L or a plus from several parts and, if you like, add a "drawing only" outline for the looks.'));
   }
 
   // ── 3D preview ──
@@ -673,10 +812,12 @@ function shapeStudio(view, api) {
     renderProb();
     put(head,
       h('strong', {}, 'Shape studio'),
+      st.draw ? btn('Done ⏎', finishDraw, 'bb-dbg-go') : btn('+ Polygon', startDraw, 'bb-dbg-go'),
+      st.draw ? btn('Cancel', cancelDraw) : null,
       h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
       h('label', { class: 'bb-st-mini' }, 'preview material', sel(['(mixed)', ...Object.keys(d.materials)], st.mat, (v) => { st.mat = v; renderList(); scheduleDraw(); updatePreview(); })),
       h('label', { class: 'bb-st-mini' }, 'bowl', sel(Object.keys(d.bowls), bowlKey(), (v) => { st.bowl = v; layout = null; scheduleDraw(); updatePreview(); })),
-      btn('Tidy', () => { layout = null; relayout(); board.fit(layout.bounds); scheduleDraw(); }),
+      btn('Tidy', () => { manual = {}; layout = null; relayout(); board.fit(layout.bounds); scheduleDraw(); }),
       btn('Fit all', () => { board.fit(layout.bounds); scheduleDraw(); }),
       btn('Zoom to shape', () => focus()),
       h('span', { class: 'bb-dbg-grow' }),
@@ -719,6 +860,7 @@ function shapeStudio(view, api) {
       requestAnimationFrame(() => { relayout(); board.fit(layout.bounds); scheduleDraw(); });
     },
     hide() {
+      cancelDraw();
       st.open = false;
       root.classList.remove('bb-show');
       preview?.dispose();
@@ -742,6 +884,7 @@ function shapeStudio(view, api) {
     },
     dispose() {
       this.hide();
+      window.removeEventListener('keydown', onKey);
     },
   };
 }
