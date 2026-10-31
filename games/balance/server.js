@@ -185,14 +185,13 @@ class BalanceGame {
     p.held = null;
   }
 
-  /** Let go. Inside the drop zone (and not overlapping anything) it falls into the play area; outside, it returns to the table. */
+  /** Let go. Always lets go: inside the drop zone the block falls into the play area, outside it returns to the table. */
   #drop(p) {
     const h = p.held;
     if (!h) return;
     const level = levels[this.levelIdx];
     const pos = h.rec.body.getPosition();
     if (!inDrop(level, pos.x, pos.y)) return this.#putBack(p);
-    if (h.rec.bad) return; // overlapping something: refused, the player keeps holding it (the client shows it in red)
 
     const angle = h.rec.body.getAngle();
     const item = h.item;
@@ -356,7 +355,7 @@ class BalanceGame {
     for (const p of this.players.values()) {
       if (!p.held) continue;
       const pos = p.held.rec.body.getPosition();
-      p.held.rec.bad = !inDrop(level, pos.x, pos.y) || this.#overlapping(p.held.rec); // red = cannot be dropped here (outside the drop zone, or touching something)
+      p.held.rec.bad = !inDrop(level, pos.x, pos.y); // red = outside the drop zone (letting go here sends the block back to the table)
     }
     if (this.phase === PHASE.PLAY) this.#rules(dt);
   }
@@ -394,16 +393,6 @@ class BalanceGame {
       b.setLinearDamping(0.05 + 2.2 * f); // water drag, so a raft bobs a few times and settles instead of bouncing forever
       b.setAngularDamping(0.1 + 4 * f);
     }
-  }
-
-  /** Is the (sensor) held block touching a placed block or the bowl? Other players' held blocks do not count. */
-  #overlapping(rec) {
-    for (let ce = rec.body.getContactList(); ce; ce = ce.next) {
-      if (!ce.contact.isTouching()) continue;
-      const other = this.recOf.get(ce.other);
-      if (other && !other.held) return true;
-    }
-    return false;
   }
 
   #rules(dt) {

@@ -1,7 +1,7 @@
 import * as THREE from 'three'; // resolved by the import map in client/index.html
 import { el } from '../../client/dom.js';
 import {
-  BODY, BOWL, BOWL_ZSCALE, bowlProfile, DEPTH, FRONT_Z, getShape, GROUND_Y, HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS,
+  BODY, BOWL, BOWL_SQUARE, BOWL_ZSCALE, bowlProfile, DEPTH, FRONT_Z, getShape, GROUND_Y, HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS,
   meta, PHASE, PLAY_Z, SHAPE_KEYS, SLOT_GAP, slotPos, VIEW, WATER_Y,
 } from './shared.js';
 import { outlineColor, shaders, transparentShaders, vertexShader } from './shaders.js';
@@ -40,6 +40,7 @@ const saveDone = (set) => {
 };
 
 class BalanceView {
+  ptr = null; //             pointer position in the play plane while carrying
   tableViews = new Map(); // blockId -> view of a block lying on the table
   bodyViews = new Map(); //  blockId -> view of a block in the play area (static, floating, falling, or held by somebody)
   poseMem = new Map(); //    blockId -> last drawn pose of a removed view (a block picked up / put back moves from there)
@@ -50,7 +51,7 @@ class BalanceView {
   phase = -1;
   done = loadDone();
 
-  // input state. mode: none | drag (button down, carrying) | carry (carrying after a click) | released (sent drop, waiting to see)
+  // input state. mode: none | drag (button down, carrying) | released (sent drop, waiting to see)
   mode = 'none';
   local = { x: 0, y: 12, rot: 0 }; // where WE hold the block (play-plane coordinates, instant), rot in degrees
   grab = { x: 0, y: 0 }; //          pointer-to-block-centre offset, so the block does not jump
@@ -150,8 +151,11 @@ class BalanceView {
     // reconcile our pointer state with what the server says we are holding
     if (this.mode === 'released') {
       if (mine === null) this.mode = 'none';
-      else if (now - this.modeTime > 350) this.mode = 'carry'; // the drop was refused (overlap): keep carrying it
-    } else if ((this.mode === 'drag' || this.mode === 'carry') && mine === null && now - this.modeTime > 500) {
+      else if (now - this.modeTime > 350) { // the server still says we hold it (message lost?): let go again
+        this.ctx.sendInput({ drop: true });
+        this.modeTime = now;
+      }
+    } else if (this.mode === 'drag' && mine === null && now - this.modeTime > 500) {
       this.mode = 'none';
     }
 
@@ -184,11 +188,13 @@ class BalanceView {
   // ── scene ──
   #buildScene() {
     this.scene = new THREE.Scene();
+    this.frontScene = new THREE.Scene(); // blocks somebody is holding: drawn last, on top of everything, so the table never hides them
     this.scene.background = new THREE.Color('#121833');
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 1, 800);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.autoClear = false;
     this.renderer.domElement.className = 'bb-canvas';
 
     this.scene.add(new THREE.AmbientLight('#ffffff', 0.9));
@@ -220,13 +226,13 @@ class BalanceView {
     table.position.set(0, GROUND_Y - TABLE.h / 2, TABLE.z);
     this.scene.add(table);
 
-    // the wooden bowl: a real bowl (the profile from shared.js turned around the vertical axis), squeezed a little along z.
+    // the wooden bowl: a real bowl (the profile from shared.js turned around the vertical axis), round at the bottom and a rounded square at the rim.
     // Lathe profile: outer wall from the bottom up to the rim, then the inner wall back down (this orders the normals correctly).
     const { inner, outer } = bowlProfile(BOWL_SEGS);
     const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y));
     const profile = [...half(outer), ...half(inner).reverse()];
     this.bowl = new THREE.Mesh(
-      new THREE.LatheGeometry(profile, 96).scale(1, 1, BOWL_ZSCALE),
+      this.#squareLathe(profile),
       this.#blockMaterial('bowlwood', 0.35, THREE.DoubleSide),
     );
     this.scene.add(this.bowl);
@@ -241,11 +247,50 @@ class BalanceView {
     }
     wp.push(new THREE.Vector2(0, WATER_Y));
     this.water = new THREE.Mesh(
-      new THREE.LatheGeometry(wp, 96).scale(1, 1, BOWL_ZSCALE),
+      this.#squareLathe(wp),
       new THREE.MeshBasicMaterial({ color: '#3d9bff', transparent: true, opacity: 0.4, depthWrite: false, side: THREE.DoubleSide }),
     );
     this.water.renderOrder = 5;
     this.scene.add(this.water);
+  }
+
+  /**
+   * Revolve a (radius, y) profile around the vertical axis. The plan shape goes from a circle at the bottom to a rounded square
+   * (superellipse) at the rim. The slice at z = 0 is always exactly the profile, so it still matches the physics.
+   */
+  #squareLathe(profile, segs = 128) {
+    const yBot = BOWL.rimY - BOWL.b - BOWL.t;
+    const pos = [];
+    for (const { x: r, y } of profile) {
+      const f = THREE.MathUtils.clamp((y - yBot) / (BOWL.rimY - yBot), 0, 1);
+      const n = 2 + (BOWL_SQUARE - 2) * f * f * (3 - 2 * f);
+      const e = 2 / n;
+      for (let j = 0; j < segs; j++) {
+        const th = (j / segs) * Math.PI * 2;
+        const c = Math.cos(th);
+        const s = Math.sin(th);
+        pos.push(r * Math.sign(c) * Math.abs(c) ** e, y, r * BOWL_ZSCALE * Math.sign(s) * Math.abs(s) ** e);
+      }
+    }
+    const idx = [];
+    for (let i = 0; i < profile.length - 1; i++) {
+      for (let j = 0; j < segs; j++) {
+        const a = i * segs + j;
+        const b = i * segs + ((j + 1) % segs);
+        idx.push(a, a + segs, b, b, a + segs, b + segs);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    // the outer wall (low in the profile) must face away from the axis; if the winding came out the other way round, flip it
+    if (geo.attributes.normal.getX(Math.floor(profile.length / 4) * segs) < 0) {
+      for (let t = 0; t < idx.length; t += 3) [idx[t + 1], idx[t + 2]] = [idx[t + 2], idx[t + 1]];
+      geo.setIndex(idx);
+      geo.computeVertexNormals();
+    }
+    return geo;
   }
 
   /** One ShaderMaterial per block; the time uniform is shared by all of them. */
@@ -312,7 +357,7 @@ class BalanceView {
   }
 
   #dispose(v) {
-    this.scene.remove(v.group);
+    v.group.removeFromParent();
     v.mats.forEach((m) => m.dispose());
     v.edge.dispose();
   }
@@ -439,7 +484,7 @@ class BalanceView {
     this.legend.classList.toggle('bb-hide', solo);
     this.hintEl.textContent = this.spectator
       ? 'Spectating'
-      : 'Click a block on the table and carry it above the bowl · release or click to drop it (red = cannot be dropped there) · Q / E or mouse wheel rotates · right-click or X puts it back';
+      : 'Press a block on the table, drag it above the bowl and let go to drop it (red = not here, it goes back) · Q / E or mouse wheel rotates · right-click or X puts it back';
 
     const playing = s.ph !== PHASE.MENU;
     this.hud.classList.toggle('bb-hide', !playing);
@@ -489,6 +534,16 @@ class BalanceView {
     this.lastFrame = now;
     this.uTime.value += dt;
 
+    // the block we hold slides until its centre is under the pointer, so rotating turns it around its middle
+    if (this.#carrying() && this.ptr && (Math.abs(this.grab.x) > 0.01 || Math.abs(this.grab.y) > 0.01)) {
+      const kk = 1 - Math.exp(-12 * dt);
+      this.grab.x -= this.grab.x * kk;
+      this.grab.y -= this.grab.y * kk;
+      this.local.x = this.ptr.x + this.grab.x;
+      this.local.y = this.ptr.y + this.grab.y;
+      this.#sendMove(now);
+    }
+
     // Q / E rotate the block we are holding
     if (this.#carrying() && (this.keys.q || this.keys.e)) {
       this.local.rot += ((this.keys.q ? 1 : 0) - (this.keys.e ? 1 : 0)) * ROTATE_SPEED * dt;
@@ -516,12 +571,20 @@ class BalanceView {
     }
     for (const v of this.tableViews.values()) draw(v, 14);
 
+    for (const v of this.bodyViews.values()) {
+      const want = v.st === BODY.HELD || v.st === BODY.HELD_BAD ? this.frontScene : this.scene;
+      if (v.group.parent !== want) want.add(v.group);
+    }
+
+    this.renderer.clear();
     this.renderer.render(this.scene, this.camera);
+    this.renderer.clearDepth();
+    this.renderer.render(this.frontScene, this.camera);
   };
 
   // ── input ──
   #carrying() {
-    return this.mode === 'drag' || this.mode === 'carry' || this.mode === 'released';
+    return this.mode === 'drag' || this.mode === 'released';
   }
 
   #setRay(e) {
@@ -557,15 +620,6 @@ class BalanceView {
     if (this.snap?.ph !== PHASE.PLAY || e.button !== 0) return;
     const p = this.#toWorld(e);
     if (!p) return;
-    if (this.mode === 'carry') { // second click: let go
-      this.local.x = p.x + this.grab.x;
-      this.local.y = p.y + this.grab.y;
-      this.#sendMove(performance.now(), true);
-      this.ctx.sendInput({ drop: true });
-      this.mode = 'released';
-      this.modeTime = performance.now();
-      return;
-    }
     if (this.mode !== 'none') return;
     const id = this.#tableAt();
     if (id === null) return;
@@ -575,7 +629,8 @@ class BalanceView {
     const k = cam.z / (cam.z - v.cur.z);
     const cx = cam.x + (v.cur.x - cam.x) * k;
     const cy = cam.y + (v.cur.y - cam.y) * k;
-    this.grab = { x: cx - p.x, y: cy - p.y };
+    this.grab = { x: cx - p.x, y: cy - p.y }; // fades to zero in #frame: the block ends up centred on the pointer, so it turns around its middle
+    this.ptr = p;
     this.local = { x: cx, y: cy, rot: 0 };
     this.ctx.sendInput({ pick: id, x: cx, y: cy, rot: 0 });
     this.mode = 'drag';
@@ -591,6 +646,7 @@ class BalanceView {
       return;
     }
     if (!p) return;
+    this.ptr = p;
     this.local.x = p.x + this.grab.x;
     this.local.y = p.y + this.grab.y;
     this.#sendMove();
@@ -603,14 +659,9 @@ class BalanceView {
       this.local.x = p.x + this.grab.x;
       this.local.y = p.y + this.grab.y;
     }
-    const moved = Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y);
-    if (moved > 12 || performance.now() - this.downAt.t > 300) { // dragged: letting go drops it
-      this.#sendMove(performance.now(), true);
-      this.ctx.sendInput({ drop: true });
-      this.mode = 'released';
-    } else {
-      this.mode = 'carry'; // just a click: keep carrying until the next click
-    }
+    this.#sendMove(performance.now(), true);
+    this.ctx.sendInput({ drop: true }); // letting go of the mouse always lets go of the block
+    this.mode = 'released';
     this.modeTime = performance.now();
   };
 

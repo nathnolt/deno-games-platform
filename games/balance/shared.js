@@ -43,6 +43,8 @@ export const HOVER_Z = 4.5;
 export const BOWL = { a: 18, b: 9, t: 1, rimY: 1 };
 /** The bowl is a bowl of revolution squeezed along z by this factor (the physics only sees the slice at z = 0, which is unchanged). */
 export const BOWL_ZSCALE = 0.7;
+/** Plan shape of the bowl: round at the bottom, a rounded square at the rim (exponent of the superellipse at the rim; 2 = circle). */
+export const BOWL_SQUARE = 5;
 /** Height of the table the bowl and the waiting blocks stand on. */
 export const GROUND_Y = BOWL.rimY - BOWL.b - BOWL.t;
 
@@ -53,7 +55,7 @@ export const ZONE = { x0: -30, x1: 30 };
  * The DROP ZONE: a rectangle above the bowl and a bit wider than it. Let go of a block with its centre inside and it falls
  * into the play area; let go outside and it goes back to the table. Levels can override with `drop`.
  */
-export const DROP = { x0: -23, x1: 23, y0: 1.5, y1: 32 };
+export const DROP = { x0: -23, x1: 23, y0: 1.5, y1: 100 }; // open all the way to the top of the screen
 
 /** What the camera must always show. Height follows the window aspect, but never less than h. */
 export const VIEW = { w: 84, h: 46, cy: 10 };
@@ -62,7 +64,7 @@ export const VIEW = { w: 84, h: 46, cy: 10 };
 export const SLOT_GAP = 17;
 
 /** How high above the water a held block may be carried, and how far sideways. */
-export const MAX_HOLD_Y = 34;
+export const MAX_HOLD_Y = 60;
 export const MAX_HOLD_X = 45;
 export const MIN_HOLD_Y = -25; // the waiting blocks are closer to the camera, so their pick-up point on the play plane is a bit low
 
@@ -288,7 +290,7 @@ export const levels = [
 
 // ── Wire constants (server and client agree on these) ─────────────────────────────────────────────────────
 export const PHASE = { MENU: 0, PLAY: 1, WON: 2, LOST: 3 };
-/** Per-body state in snapshots. HELD_BAD = held, inside the drop zone, but overlapping something (cannot be dropped there). */
+/** Per-body state in snapshots. HELD_BAD = held, but outside the drop zone (letting go sends it back to the table). */
 export const BODY = { NORMAL: 0, HELD: 1, HELD_BAD: 2, STATIC: 3 };
 /** Why a level was lost. */
 export const LOSE = { WATER: 1, OUT: 2, BOWL: 3 };
