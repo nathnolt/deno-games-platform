@@ -23,6 +23,7 @@ import { clone, h, svg } from './ui.js';
 const KEY = /^[A-Za-z][\w-]*$/;
 const DOCK = 470; // width of the level studio panel
 const SHADER_COLOR = { wood: '#c99a62', wood2: '#dcc294', glass: '#9fd3e6', stone1: '#8f9298', stone2: '#6d717a', float: '#86b0d6' };
+const LIGHT0 = 1000; // the viewport number of the first light (models are 0, 1, 2 ... see client.js)
 const BLUR_CHOICES = [['none', 'sharp (none)'], ['light', 'light blur'], ['heavy', 'heavy blur']];
 const SNAPS = [['0', 'free'], ['0.1', '0.1'], ['0.25', '0.25'], ['0.5', '0.5'], ['1', '1']];
 const ACCENT = '#f43f5e';
@@ -1480,7 +1481,8 @@ function backgroundStudio(view, api) {
   const BG = () => D().backgrounds[bgKey()];
   const models = () => (BG().models ??= []);
   const TABLE_I = -2; // the table model has this number in the viewport (see client.js)
-  const inst = (i) => (i === TABLE_I ? BG().table : models()[i]);
+  const lights = () => (BG().lights ??= []);
+  const inst = (i) => (i >= LIGHT0 ? lights()[i - LIGHT0] : i === TABLE_I ? BG().table : models()[i]);
   const snapV = (v) => snapTo(v, st.snap);
   const freshTable = () => ({ model: D().models.board ? 'board' : Object.keys(D().models)[0], scale: 1, rotation: [0, 0, 0], translate: [0, 0, 2] });
   const fresh = (model) => ({ model, scale: 1, rotation: [0, 0, 0], translate: [0, 0, -40] });
@@ -1624,6 +1626,24 @@ function backgroundStudio(view, api) {
     const rows = ms.map((m, i) => row(m, i, `${i + 1}. ${m.model}`, [
       btn('⧉', () => { ms.splice(i + 1, 0, clone(m)); ms[i + 1].translate[0] += 3; openRows.add(i + 1); st.sel = i + 1; structural(); view.debugSelectInstance(st.sel); }, ''),
       btn('✕', () => { removeAt(i); }, 'bb-dbg-danger')]));
+    const lightsList = lights();
+    const lightRows = lightsList.map((l, k) => {
+      const i = LIGHT0 + k;
+      const det = h('details', { class: `bb-st-inst${i === st.sel ? ' bb-on' : ''}`, 'data-i': String(i), open: openRows.has(i) },
+        h('summary', {}, h('span', { class: 'bb-st-itemname' }, `${k + 1}. light`), h('span', { class: 'bb-st-badge' }, `${f3(l.translate[0])}, ${f3(l.translate[1])}, ${f3(l.translate[2])}`)),
+        h('div', { class: 'bb-st-instbody' },
+          h('div', { class: 'bb-st-row' },
+            btn('⌖', () => { view.debugLookAt(l.translate[0], l.translate[1] + view.floorY, l.translate[2]); select(i); }, ''),
+            btn('⧉', () => { lightsList.splice(k + 1, 0, clone(l)); lightsList[k + 1].translate[0] += 4; openRows.add(i + 1); st.sel = i + 1; structural(); view.debugSelectInstance(st.sel); }, ''),
+            btn('✕', () => { removeAt(i); }, 'bb-dbg-danger')),
+          w.color('colour', l, 'color', 'backgrounds'),
+          w.slider('intensity', l, 'intensity', 'backgrounds', 0, 6, 0.1),
+          h('label', { class: 'bb-dbg-field' }, h('span', {}, 'reach'), numIn(() => l.range, (v) => { if (v > 0) { l.range = v; pushInst(i); } }, 5)),
+          row3('translate', l.translate, i, 0.5)));
+      det.addEventListener('toggle', () => { if (det.open) openRows.add(i); else openRows.delete(i); });
+      det.querySelector('summary').addEventListener('click', () => { if (st.sel !== i) { st.sel = i; view.debugSelectInstance(i); for (const e of body.querySelectorAll('.bb-st-inst')) e.classList.toggle('bb-on', e.dataset.i === String(i)); } });
+      return det;
+    });
     const tableBox = bg.table
       ? row(bg.table, TABLE_I, `Table: ${bg.table.model}`, [btn('Plain box', () => { removeAt(TABLE_I); }, 'bb-dbg-danger')])
       : h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'Plain wooden box.'), btn('Use a model', () => { bg.table = freshTable(); openRows.add(TABLE_I); st.sel = TABLE_I; structural(); view.debugSelectInstance(TABLE_I); }));
@@ -1636,7 +1656,7 @@ function backgroundStudio(view, api) {
           w.color('sand grooves', bg.ground, 'colorA', 'backgrounds'),
           w.color('sand ridges', bg.ground, 'colorB', 'backgrounds'),
           w.slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1),
-          w.select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks']], bg.ground, 'style', 'backgrounds'),
+          w.select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks'], ['none', 'no floor']], bg.ground, 'style', 'backgrounds'),
           w.slider('time of day (hour)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
           w.slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
           row3('light direction', bg.light.dir, -1, 0.1))),
@@ -1657,6 +1677,16 @@ function backgroundStudio(view, api) {
       h('div', { class: 'bb-st-sub' }, `Models (${ms.length})`, h('span', { class: 'bb-dbg-grow' }),
         btn('Collapse all', () => { openRows.clear(); renderBody(); }, '')),
       ...rows,
+      h('div', { class: 'bb-st-sub' }, `Lights (${lightsList.length})`, h('span', { class: 'bb-dbg-grow' }),
+        btn('+ Add light', () => {
+          if (lightsList.length >= 8) return;
+          lightsList.push({ color: '#ffd9a0', intensity: 1.2, range: 60, translate: [0, 12, 0] });
+          openRows.add(LIGHT0 + lightsList.length - 1);
+          st.sel = LIGHT0 + lightsList.length - 1;
+          structural();
+          view.debugSelectInstance(st.sel);
+        }, '')),
+      ...lightRows,
       h('div', { class: 'bb-st-sub' }, 'Add a model'),
       addBox);
     showPrev();
@@ -1664,6 +1694,7 @@ function backgroundStudio(view, api) {
 
   function removeAt(i) {
     if (i === TABLE_I) delete BG().table;
+    else if (i >= LIGHT0) lights().splice(i - LIGHT0, 1);
     else models().splice(i, 1);
     openRows.clear();
     st.sel = -1;
@@ -1684,10 +1715,11 @@ function backgroundStudio(view, api) {
       if (i === null || i === undefined || !inst(i)) return false;
       select(i, true);
       const m = inst(i);
+      if (i >= LIGHT0 && st.tool !== 'move') return true; // (a light has no rotation or size: only Move works on it)
       drag = { i, vertical: e.shiftKey, start: { x: e.clientX, y: e.clientY }, t0: [...m.translate], r0: [...m.rotation], s0: m.scale ?? 1, off: null };
       if (st.tool === 'move' && !drag.vertical) {
-        const g = view.debugGroundAt(e.clientX, e.clientY, m.translate[1]);
-        drag.off = g ? { x: m.translate[0] - g.x, z: m.translate[2] - g.z } : { x: 0, z: 0 };
+        drag.last = view.debugGroundAt(e.clientX, e.clientY, m.translate[1]); // (the model follows the pointer by what it moved since: Shift makes that a quarter)
+        drag.acc = { x: m.translate[0], z: m.translate[2] };
       }
       return true;
     },
@@ -1697,7 +1729,7 @@ function backgroundStudio(view, api) {
       if (!m) return;
       const dx = e.clientX - drag.start.x;
       const dy = e.clientY - drag.start.y;
-      const slow = e.shiftKey && st.tool !== 'move' ? 0.2 : 1;
+      const slow = e.shiftKey && st.tool !== 'move' ? 0.25 : 1; // (hold Shift while dragging: a quarter of the speed)
       if (st.tool === 'rotate') {
         const a = drag.r0[st.axis] + dx * 0.6 * slow;
         m.rotation[st.axis] = snapTo(((a % 360) + 360) % 360, st.rsnap);
@@ -1710,8 +1742,14 @@ function backgroundStudio(view, api) {
       } else {
         const g = view.debugGroundAt(e.clientX, e.clientY, m.translate[1]);
         if (!g) return;
-        m.translate[0] = snapV(g.x + drag.off.x);
-        m.translate[2] = snapV(g.z + drag.off.z);
+        if (drag.last) {
+          const f = e.shiftKey ? 0.25 : 1; // Shift pressed during a normal drag: a quarter of the speed (Shift at the start = lift instead)
+          drag.acc.x += (g.x - drag.last.x) * f;
+          drag.acc.z += (g.z - drag.last.z) * f;
+        }
+        drag.last = g;
+        m.translate[0] = snapV(drag.acc.x);
+        m.translate[2] = snapV(drag.acc.z);
       }
       pushInst(drag.i);
     },
@@ -1729,7 +1767,7 @@ function backgroundStudio(view, api) {
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       removeAt(st.sel);
-    } else if ((k === 'q' || k === 'e') && st.tool !== 'none') {
+    } else if ((k === 'q' || k === 'e') && st.tool !== 'none' && m.rotation) {
       const sgn = k === 'q' ? -1 : 1;
       const step = st.rsnap > 0 ? st.rsnap : 5;
       m.rotation[st.axis] = ((m.rotation[st.axis] + sgn * (e.shiftKey ? 1 : step * 3)) % 360 + 360) % 360;
@@ -1766,6 +1804,7 @@ function backgroundStudio(view, api) {
       view.onSnap = onSnap;
       lab({ on: true, paused: true, rules: false });
       view.debugFreeCam(true);
+      view.debugShowLights(true);
       view.camHook = hook;
       renderAll();
       applyLevel();
@@ -1774,6 +1813,7 @@ function backgroundStudio(view, api) {
       if (!st.open) return;
       st.open = false;
       clearTimeout(applyTimer);
+      view.debugShowLights(false);
       drag = null;
       st.prev?.dispose();
       st.prev = null;

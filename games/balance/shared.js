@@ -160,6 +160,7 @@ export const BOWL_DEFAULTS = {
   a: 18, b: 9, t: 1, rimY: 1, r: 4, zscale: 0.7, square: 5, squareBottom: 2, shader: 'bowlwood',
   water: { color: '#3d9bff', opacity: 0.4, reflect: 0.6, caustics: 0.9, causticsInset: 2 }, // caustics: the bright net of light on what is under the water (0 = none); causticsInset keeps it this far away from the walls (the bowl is narrower at the bottom). reflect: 0 = a plain pane, 1 = a mirror (the water mirrors the scenery)
 };
+export const MAX_LIGHTS = 8; // point lights per background (the shaders have room for this many)
 export const BLUR_CHOICES = ['none', 'light', 'heavy'];
 export const BACKGROUND_DEFAULTS = {
   mist: '#e7e2d6',
@@ -189,7 +190,7 @@ export function bowlOf(level) {
 /** The background of a level, with every missing field filled in. */
 export function backgroundOf(level) {
   const b = backgrounds[backgroundKeyOf(level)] ?? {};
-  return { ...BACKGROUND_DEFAULTS, ...b, ground: { ...BACKGROUND_DEFAULTS.ground, ...b.ground }, light: { ...BACKGROUND_DEFAULTS.light, ...b.light }, box: { ...BACKGROUND_DEFAULTS.box, ...b.box }, models: b.models ?? [] };
+  return { ...BACKGROUND_DEFAULTS, ...b, ground: { ...BACKGROUND_DEFAULTS.ground, ...b.ground }, light: { ...BACKGROUND_DEFAULTS.light, ...b.light }, box: { ...BACKGROUND_DEFAULTS.box, ...b.box }, models: b.models ?? [], lights: b.lights ?? [] };
 }
 
 /** Height of the table top = the outside of the bottom of the bowl. The waiting blocks lie on it. */
@@ -390,7 +391,19 @@ export function validateDefinitions(defs, extra = {}) {
       if (b.light.time !== undefined && !(isNum(b.light.time) && b.light.time >= 0 && b.light.time <= 24)) err(`background ${k}: light.time (hour of the day) must be from 0 to 24`);
       if (b.light.shadow !== undefined && !(isNum(b.light.shadow) && b.light.shadow >= 0 && b.light.shadow <= 1)) err(`background ${k}: light.shadow must be from 0 to 1`);
     }
-    if (b.ground?.style !== undefined && !['sand', 'wood'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand or wood`);
+    if (b.ground?.style !== undefined && !['sand', 'wood', 'none'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand, wood or none`);
+    if (b.lights !== undefined) {
+      if (!Array.isArray(b.lights)) err(`background ${k}: lights must be a list`);
+      else {
+        if (b.lights.length > MAX_LIGHTS) err(`background ${k}: at most ${MAX_LIGHTS} lights`);
+        b.lights.forEach((l, i) => {
+          if (typeof l.color !== 'string') err(`background ${k}, light #${i + 1}: color is missing`);
+          if (!(isNum(l.intensity) && l.intensity >= 0 && l.intensity <= 20)) err(`background ${k}, light #${i + 1}: intensity must be from 0 to 20`);
+          if (!(isNum(l.range) && l.range > 0)) err(`background ${k}, light #${i + 1}: range must be above 0`);
+          if (!isVec3(l.translate)) err(`background ${k}, light #${i + 1}: translate needs 3 numbers`);
+        });
+      }
+    }
     if (b.box !== undefined) {
       for (const f of ['w', 'd']) if (b.box[f] !== undefined && !(isNum(b.box[f]) && b.box[f] >= 10 && b.box[f] <= 1000)) err(`background ${k}: box.${f} must be a number from 10 to 1000`);
       if (b.box.z !== undefined && !isNum(b.box.z)) err(`background ${k}: box.z must be a number`);

@@ -27,6 +27,10 @@ uniform vec3 uLightDir;
 uniform vec3 uLightCol;
 uniform vec3 uAmbSky;
 uniform vec3 uAmbGround;
+uniform vec3 uLPos[8]; // point lights of the background (world position, colour times intensity, reach); 8 = MAX_LIGHTS in shared.js
+uniform vec3 uLCol[8];
+uniform float uLRange[8];
+uniform int uLN;
 float unpackShadowDepth(vec4 v) { return dot(v, vec4(255.0 / 256.0 / 16777216.0, 255.0 / 256.0 / 65536.0, 255.0 / 256.0 / 256.0, 255.0 / 256.0)); }
 float shadowNoise(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 vec2 vogel(int i, int n, float phi) {
@@ -78,7 +82,16 @@ vec3 sceneLight(vec3 wp, vec3 n) {
   sh = 1.0 - k * (1.0 - sh);
   sh = mix(1.0, sh, smoothstep(-0.05, 0.25, ndl)); // the side turned away from the light is dark anyway: no map noise there
   vec3 amb = mix(uAmbGround, uAmbSky, n.y * 0.5 + 0.5);
-  return amb + uLightCol * (wrap * sh);
+  vec3 lamps = vec3(0.0);
+  for (int i = 0; i < 8; i++) { // point lights: no shadows, they fade out smoothly at their range
+    if (i >= uLN) break;
+    vec3 d = uLPos[i] - wp;
+    float dist = length(d);
+    float att = clamp(1.0 - dist / uLRange[i], 0.0, 1.0);
+    float w = clamp((dot(n, d / max(dist, 0.001)) + 0.35) / 1.35, 0.0, 1.0);
+    lamps += uLCol[i] * (w * att * att);
+  }
+  return amb + uLightCol * (wrap * sh) + lamps;
 }
 `;
 

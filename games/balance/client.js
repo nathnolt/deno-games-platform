@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 import { flatNormals, parseObj } from './obj.js';
 import { SHADOW_GLSL, shaders, transparentShaders, vertexShader } from './shaders.js';
@@ -30,6 +30,7 @@ const TABLE = { w: 110, d: 52, h: 4, z: 2 }; // the wooden table the bowl and th
 
 /** A colour as the raw numbers of its hex code: for our own shaders, which write colours to the screen without any conversion. */
 /** What a scenery object's `blur` setting means: 'none' = sharp, 'heavy' = the strong blur, anything else = the light blur. */
+const LIGHT0 = 1000; // the viewport number of the first light of a background (models are 0, 1, 2 ...; see debugModelAt)
 const blurLevelOf = (v) => (v === 'none' ? 0 : v === 'heavy' ? 2 : 1);
 const rawColor = (hex) => {
   const n = parseInt(String(hex).replace('#', '').padEnd(6, '0').slice(0, 6), 16);
@@ -177,7 +178,14 @@ class BalanceView {
     uWaterY: { value: WATER_Y },
     uCaus: { value: 0 },
     uBowlHalf: { value: new THREE.Vector2(20, 12) },
+    // point lights of the background
+    uLPos: { value: Array.from({ length: MAX_LIGHTS }, () => new THREE.Vector3()) },
+    uLCol: { value: Array.from({ length: MAX_LIGHTS }, () => new THREE.Vector3()) },
+    uLRange: { value: new Array(MAX_LIGHTS).fill(1) },
+    uLN: { value: 0 },
   };
+  lightMarkers = null; // debug: a little ball for every light (in frontScene, so it shows through everything)
+  markersOn = false;
   fogs = []; //      the mist colours of the world: { value, base }, tinted by the time of day
   mistNow = new THREE.Color('#e7e2d6');
   waterU = { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 } };
@@ -386,6 +394,7 @@ class BalanceView {
     this.dotGeo.dispose();
     this.shardGeo.dispose();
     this.renderer.dispose();
+    this.renderer.forceContextLoss?.();
     this.root.remove();
   }
 
@@ -559,6 +568,7 @@ class BalanceView {
         canvas.removeEventListener('wheel', onWheel);
         if (group) group.traverse((o) => o.material?.dispose());
         renderer.dispose();
+        renderer.forceContextLoss(); // (a browser only allows about 16 WebGL contexts and takes the OLDEST away: a closed window must give its own back)
       },
     };
   }
@@ -586,7 +596,7 @@ class BalanceView {
   debugModelAt(clientX, clientY) {
     this.#setRay({ clientX, clientY });
     const meshes = [];
-    for (const g of this.instGroups.values()) g.traverse((o) => o.isMesh && meshes.push(o));
+    for (const g of this.instGroups.values()) if (g.parent?.visible !== false) g.traverse((o) => o.isMesh && meshes.push(o)); // (the balls of the lights only while they are shown)
     return this.ray.intersectObjects(meshes, false)[0]?.object.userData.inst ?? null;
   }
 
@@ -602,6 +612,14 @@ class BalanceView {
   debugSetInstance(index, inst) {
     const g = this.instGroups.get(index);
     if (!g) return;
+    if (index >= LIGHT0) { // a light: position, colour, strength and reach, at once
+      const k = index - LIGHT0;
+      this.lightList[k] = { ...inst, translate: [...inst.translate] };
+      g.position.set(inst.translate[0], inst.translate[1] + this.floorY, inst.translate[2]);
+      g.children[0]?.material?.color?.copy?.(rawColor(inst.color ?? '#ffd9a0'));
+      this.#applyLights();
+      return;
+    }
     const deg = Math.PI / 180;
     g.scale.setScalar(inst.scale ?? 1);
     const r = inst.rotation ?? [0, 0, 0];
@@ -721,10 +739,12 @@ class BalanceView {
         const tableW = Math.max(TABLE.w, rowW + 14, bowl.a * 2 + 16);
         const fog = { uFogColor: { value: rawColor(bg.mist) }, uFog: { value: new THREE.Vector2(1e5, 2e5) } };
 
-        const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
-        floor.rotation.x = -Math.PI / 2;
-        floor.position.y = groundY - TABLE.h;
-        content.add(floor);
+        if (bg.ground?.style !== 'none') {
+          const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
+          floor.rotation.x = -Math.PI / 2;
+          floor.position.y = groundY - TABLE.h;
+          content.add(floor);
+        }
         const table = new THREE.Mesh(new THREE.BoxGeometry(tableW, TABLE.h, TABLE.d), this.#blockMaterial('floorwood', 0.7, THREE.FrontSide, null, true));
         table.position.set(0, groundY - TABLE.h / 2, TABLE.z);
         content.add(table);
@@ -767,6 +787,7 @@ class BalanceView {
         canvas.removeEventListener('dblclick', fit);
         if (content) this.#disposeTree(content);
         renderer.dispose();
+        renderer.forceContextLoss();
       },
     };
     raf = requestAnimationFrame(loop);
@@ -827,6 +848,50 @@ class BalanceView {
       this.#buildWorld(bowlOf(level), backgroundOf(level));
     }
     this.#updateDropHelper();
+  }
+
+  // ── lights ──
+  /** The point lights of the background: their numbers go to the shaders, and (debug) every light gets a little ball you can pick and move. */
+  #buildLights() {
+    if (this.lightMarkers) {
+      this.lightMarkers.removeFromParent();
+      this.#disposeTree(this.lightMarkers);
+    }
+    const list = (this.bgFx.lights ?? []).slice(0, MAX_LIGHTS);
+    this.lightList = list.map((l) => ({ ...l, translate: [...l.translate] }));
+    const markers = (this.lightMarkers = new THREE.Group());
+    markers.visible = this.markersOn;
+    list.forEach((l, k) => {
+      const ball = new THREE.Group();
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(1.4, 12, 8), new THREE.MeshBasicMaterial({ color: rawColor(l.color ?? '#ffd9a0') }));
+      mesh.userData.inst = LIGHT0 + k;
+      ball.add(mesh);
+      ball.userData.inst = LIGHT0 + k;
+      ball.position.set(l.translate[0], l.translate[1] + this.floorY, l.translate[2]);
+      markers.add(ball);
+      this.instGroups.set(LIGHT0 + k, ball);
+    });
+    this.frontScene.add(markers);
+    this.#applyLights();
+  }
+
+  #applyLights() {
+    const u = this.shadowU;
+    const list = this.lightList ?? [];
+    list.forEach((l, k) => {
+      const c = rawColor(l.color ?? '#ffd9a0');
+      const f = Math.max(0, l.intensity ?? 1);
+      u.uLPos.value[k].set(l.translate[0], l.translate[1] + this.floorY, l.translate[2]);
+      u.uLCol.value[k].set(c.r * f, c.g * f, c.b * f);
+      u.uLRange.value[k] = Math.max(0.1, l.range ?? 40);
+    });
+    u.uLN.value = list.length;
+  }
+
+  /** Debug: show (or hide) the little balls that mark the lights. */
+  debugShowLights(on) {
+    this.markersOn = !!on;
+    if (this.lightMarkers) this.lightMarkers.visible = this.markersOn;
   }
 
   // ── time of day ──
@@ -901,12 +966,15 @@ class BalanceView {
     this.shadowU.uBowlHalf.value.set(Math.max(1, bowl.a - inset), Math.max(1, bowl.a * bowl.zscale - inset));
 
     // the ground: raked sand or wooden planks. Ripples run around the table like around a rock, and the far end fades into mist.
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = floorY;
-    floor.userData.blurLevel = blurLevelOf(bg.ground?.blur);
-    scenery.add(floor);
-    this.floorMesh = floor;
+    this.floorMesh = null;
+    if (bg.ground?.style !== 'none') { // ('no floor': just the sky colour behind the table)
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.y = floorY;
+      floor.userData.blurLevel = blurLevelOf(bg.ground?.blur);
+      scenery.add(floor);
+      this.floorMesh = floor;
+    }
 
     // the table: a 3D wooden rectangle (or a model). The bowl stands on it at the back, the waiting blocks lie on it at the front.
     if (bg.table?.model && models[bg.table.model]) {
@@ -932,6 +1000,8 @@ class BalanceView {
 
     // the scenery
     bg.models.forEach((inst, i) => this.#addModel(scenery, inst, token, floorY, fog, i));
+    this.bgFx.lights = bg.lights ?? [];
+    this.#buildLights();
     this.#applyDay();
     this.#fitCamera();
   }
@@ -1277,6 +1347,7 @@ void main() {
       uLightDir: v(new THREE.Vector3(-0.35, 0.8, 0.5).normalize()), uLightCol: v(new THREE.Vector3(0.72, 0.7, 0.64)),
       uAmbSky: v(new THREE.Vector3(0.6, 0.63, 0.68)), uAmbGround: v(new THREE.Vector3(0.45, 0.41, 0.35)),
       uWaterY: v(WATER_Y), uCaus: v(0), uBowlHalf: v(new THREE.Vector2(20, 12)),
+      uLPos: v(Array.from({ length: MAX_LIGHTS }, () => new THREE.Vector3())), uLCol: v(Array.from({ length: MAX_LIGHTS }, () => new THREE.Vector3())), uLRange: v(new Array(MAX_LIGHTS).fill(1)), uLN: v(0),
     };
   }
 
@@ -1725,6 +1796,7 @@ void main() {
     try {
       this.#renderAll();
     } catch (e) {
+      if (this.renderer.getContext?.().isContextLost?.()) return; // the browser took the WebGL context away (too many WebGL windows, or a GPU reset): three.js gets it back by itself, nothing to report
       this.#report(`drawing failed: ${e?.message ?? e}`, e);
       this.renderer.setRenderTarget(null);
       this.#showAll();
@@ -1807,6 +1879,7 @@ void main() {
     const bgSave = this.scene.background;
     this.scene.background = null;
     if (this.water) this.water.visible = false;
+    if (this.lightMarkers) this.lightMarkers.visible = false;
     if (this.floorMesh) this.floorMesh.visible = false;
     this.scene.overrideMaterial = fx.depthMat;
     this.frontScene.overrideMaterial = fx.depthMat;
@@ -1821,6 +1894,7 @@ void main() {
     this.frontScene.overrideMaterial = null;
     this.scene.background = bgSave;
     if (this.water) this.water.visible = true;
+    if (this.lightMarkers) this.lightMarkers.visible = this.markersOn;
     if (this.floorMesh) this.floorMesh.visible = true;
     u.uShadowMap.value = fx.shadowRT.texture;
     u.uShadowStr.value = L.shadow;
