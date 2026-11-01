@@ -160,6 +160,11 @@ export const BOWL_DEFAULTS = {
   a: 18, b: 9, t: 1, rimY: 1, r: 4, zscale: 0.7, square: 5, squareBottom: 2, shader: 'bowlwood',
   water: { color: '#3d9bff', opacity: 0.4, reflect: 0.6, caustics: 0.9, causticsInset: 2 }, // caustics: the bright net of light on what is under the water (0 = none); causticsInset keeps it this far away from the walls (the bowl is narrower at the bottom). reflect: 0 = a plain pane, 1 = a mirror (the water mirrors the scenery)
 };
+/** Shadow settings. Global in `tuning.shadows`, and a background may override them with `light.shadows` (any of the fields).
+ *   on          shadows at all        size   resolution of the shadow map (1024 - 8192)   range  width of the area the sun shades, world units
+ *   softness    1 = crisp (3 texels wide edge), 2 = soft, 3 = softer     bias  depth offset in world units    normalBias  push along the surface, in texels */
+export const SHADOW_DEFAULTS = { on: true, size: 4096, range: 170, softness: 1, bias: 0.12, normalBias: 1.5 };
+export const shadowSettings = (light) => ({ ...SHADOW_DEFAULTS, ...(tuning.shadows ?? {}), ...(light?.shadows ?? {}) });
 export const MAX_LIGHTS = 8; // point lights per background (the shaders have room for this many)
 export const BLUR_CHOICES = ['none', 'light', 'heavy'];
 export const BACKGROUND_DEFAULTS = {
@@ -278,6 +283,15 @@ export function applyDefinitions(next) {
   syncDefinitions();
 }
 
+function shadowErrors(s, where, err) {
+  if (typeof s !== 'object' || !s) return err(`${where} must be an object`);
+  if (s.on !== undefined && typeof s.on !== 'boolean') err(`${where}.on must be true or false`);
+  if (s.size !== undefined && ![1024, 2048, 4096, 8192].includes(s.size)) err(`${where}.size must be 1024, 2048, 4096 or 8192`);
+  if (s.range !== undefined && !(isNum(s.range) && s.range >= 20 && s.range <= 600)) err(`${where}.range must be from 20 to 600`);
+  if (s.softness !== undefined && ![1, 2, 3].includes(s.softness)) err(`${where}.softness must be 1, 2 or 3`);
+  if (s.bias !== undefined && !(isNum(s.bias) && s.bias >= 0 && s.bias <= 3)) err(`${where}.bias must be from 0 to 3`);
+  if (s.normalBias !== undefined && !(isNum(s.normalBias) && s.normalBias >= 0 && s.normalBias <= 8)) err(`${where}.normalBias must be from 0 to 8`);
+}
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const isVec3 = (v) => Array.isArray(v) && v.length === 3 && v.every(isNum);
 
@@ -322,6 +336,7 @@ export function validateDefinitions(defs, extra = {}) {
   rect(t.zone, 'tuning.zone', ['x0', 'x1']);
   rect(t.drop, 'tuning.drop', ['x0', 'x1', 'y0', 'y1']);
   rect(t.view, 'tuning.view', ['w', 'h', 'cy']);
+  if (t.shadows !== undefined) shadowErrors(t.shadows, 'tuning.shadows', err);
   rect(t.camera, 'tuning.camera', ['fov', 'pitch', 'targetY']);
   if (isNum(t.camera?.fov) && (t.camera.fov < 5 || t.camera.fov > 100)) err('tuning.camera.fov must be between 5 and 100');
   if (isNum(t.camera?.pitch) && (t.camera.pitch < 0 || t.camera.pitch > 85)) err('tuning.camera.pitch must be between 0 and 85');
@@ -392,6 +407,7 @@ export function validateDefinitions(defs, extra = {}) {
       if (b.light.shadow !== undefined && !(isNum(b.light.shadow) && b.light.shadow >= 0 && b.light.shadow <= 1)) err(`background ${k}: light.shadow must be from 0 to 1`);
     }
     if (b.ground?.style !== undefined && !['sand', 'wood', 'none'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand, wood or none`);
+    if (b.light?.shadows !== undefined) shadowErrors(b.light.shadows, `background ${k}: light.shadows`, err);
     if (b.lights !== undefined) {
       if (!Array.isArray(b.lights)) err(`background ${k}: lights must be a list`);
       else {

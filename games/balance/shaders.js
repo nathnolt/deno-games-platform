@@ -15,7 +15,7 @@
  *   sceneLight(position, normal) -> the colour a surface is multiplied with. Wrap lighting softens the edge between lit and dark side,
  *   and the shadow map only ever removes the DIRECT light.
  *   shadowAt(position, normal) -> 1 in light, 0 in shadow: normal-offset + slope bias against acne, and a contact-hardening soft edge
- *   (the further a block is above what it shades, the softer the shadow gets: blocker search, then a rotated 16-tap disc). */
+ *   (a smooth 3x3-texel filter, no noise). */
 export const SHADOW_GLSL = /* glsl */ `
 uniform sampler2D uShadowMap;
 uniform mat4 uShadowMat;
@@ -23,6 +23,11 @@ uniform float uShadowStr;
 uniform vec2 uShadowTexel;
 uniform float uShadowRange;
 uniform float uShadowDepth;
+uniform vec3 uShadowR; // the sun camera's right and up axes in the world
+uniform vec3 uShadowU;
+uniform float uShadowBias; // depth offset, world units
+uniform float uShadowNormal; // normal offset, in shadow texels
+uniform int uShadowK; // 1 = crisp, 2 = soft, 3 = softer
 uniform vec3 uLightDir;
 uniform vec3 uLightCol;
 uniform vec3 uAmbSky;
@@ -32,47 +37,38 @@ uniform vec3 uLCol[8];
 uniform float uLRange[8];
 uniform int uLN;
 float unpackShadowDepth(vec4 v) { return dot(v, vec4(255.0 / 256.0 / 16777216.0, 255.0 / 256.0 / 65536.0, 255.0 / 256.0 / 256.0, 255.0 / 256.0)); }
-float shadowNoise(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
-vec2 vogel(int i, int n, float phi) {
-  float r = sqrt((float(i) + 0.5) / float(n));
-  float th = float(i) * 2.399963 + phi;
-  return vec2(cos(th), sin(th)) * r;
-}
 float shadowAt(vec3 wp, vec3 n) {
   if (uShadowStr <= 0.0) return 1.0;
   float ndl = clamp(dot(n, uLightDir), 0.0, 1.0);
   float texW = uShadowTexel.x * uShadowRange; // world size of one shadow texel
-  vec4 sp = uShadowMat * vec4(wp + n * texW * (1.0 + 2.0 * (1.0 - ndl)), 1.0);
+  vec4 sp = uShadowMat * vec4(wp + n * (texW * uShadowNormal * (0.5 + (1.0 - ndl))), 1.0); // normal offset: the surface is moved off itself before the lookup
   vec3 p = sp.xyz / sp.w * 0.5 + 0.5;
-  // RECEIVER PLANE: how fast the depth changes across the shadow map on this very surface (from the screen-space derivatives). Every tap is
-  // compared with the depth the surface really has THERE, not at the middle of the disc: this is what kills the Moire stripes (shadow acne),
-  // which come from a sloped surface being compared against a staircase of depth texels. (Derivatives first, before any early return.)
-  vec3 ddx = dFdx(p);
-  vec3 ddy = dFdy(p);
-  float det = ddx.x * ddy.y - ddx.y * ddy.x;
-  vec2 slope = vec2(0.0);
-  if (abs(det) > 1e-14) slope = vec2(ddy.y * ddx.z - ddx.y * ddy.z, ddx.x * ddy.z - ddy.x * ddx.z) / det;
-  slope = clamp(slope, vec2(-1.2), vec2(1.2));
   if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
-  float zr = p.z - (0.0004 + 0.0004 * (1.0 - ndl));
-  float phi = 6.2831853 * shadowNoise(gl_FragCoord.xy);
-  float sum = 0.0;
-  float cnt = 0.0;
-  for (int i = 0; i < 12; i++) { // 1. who is in the way?
-    vec2 o = vogel(i, 12, phi) * uShadowTexel * 6.0;
-    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + o));
-    if (d < zr + dot(o, slope)) { sum += d; cnt += 1.0; }
-  }
-  if (cnt < 0.5) return 1.0;
-  float gap = max(zr - sum / cnt, 0.0) * uShadowDepth; // 2. how far above this surface is it (world units)
-  float rad = clamp(gap * 0.07 / texW, 1.6, 7.0); //   the further, the softer
+  // RECEIVER PLANE: how fast the depth changes across the shadow map on this very surface, worked out from its NORMAL (smooth over the whole
+  // surface, unlike screen-space derivatives which are constant per 2x2 pixels and draw lines). Every texel is compared with the depth the
+  // surface really has THERE: this is what keeps sloped surfaces free of acne stripes.
+  vec2 slope = vec2(dot(n, uShadowR), dot(n, uShadowU)) * (uShadowRange / (uShadowDepth * max(ndl, 0.12)));
+  slope = clamp(slope, vec2(-4.0), vec2(4.0));
+  float zr = p.z - (uShadowBias / uShadowDepth) * (0.5 + (1.0 - ndl));
+  // a SMOOTH box filter, (2K+1)x(2K+1) texels with the outermost ones weighted by where the point lies between texel centres ("bilinear PCF").
+  // No random rotation or noise: nothing that could beat against the texel grid.
+  vec2 t = p.xy / uShadowTexel - 0.5;
+  vec2 f = fract(t);
+  vec2 base = floor(t) + 0.5;
   float lit = 0.0;
-  for (int i = 0; i < 16; i++) { // 3. soft edge
-    vec2 o = vogel(i, 16, phi + 1.7) * uShadowTexel * rad;
-    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + o));
-    lit += (d < zr + dot(o, slope)) ? 0.0 : 1.0;
+  for (int j = -3; j <= 4; j++) {
+    if (j < -uShadowK || j > uShadowK + 1) continue;
+    float wy = (j == -uShadowK) ? 1.0 - f.y : ((j == uShadowK + 1) ? f.y : 1.0);
+    for (int i = -3; i <= 4; i++) {
+      if (i < -uShadowK || i > uShadowK + 1) continue;
+      float wx = (i == -uShadowK) ? 1.0 - f.x : ((i == uShadowK + 1) ? f.x : 1.0);
+      vec2 uv = (base + vec2(float(i), float(j))) * uShadowTexel;
+      float d = unpackShadowDepth(texture2D(uShadowMap, uv));
+      lit += wx * wy * ((d < zr + dot(uv - p.xy, slope)) ? 0.0 : 1.0);
+    }
   }
-  return lit / 16.0;
+  float k2 = float(2 * uShadowK + 1);
+  return lit / (k2 * k2);
 }
 vec3 sceneLight(vec3 wp, vec3 n) {
   float ndl = dot(n, uLightDir);
@@ -129,6 +125,7 @@ uniform vec3 uGlow;
 uniform float uBad;
 uniform float uWaterY;
 uniform float uCaus;
+uniform float uCausOn; // 0 = this block gets no caustics (it is held, or waits on the table)
 uniform float uCausInward;
 uniform vec2 uBowlHalf;
 
@@ -163,7 +160,7 @@ vec4 finish(vec3 c, float a) {
   if (!gl_FrontFacing) wn = -wn; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
   vec3 L = sceneLight(vW, wn);
   float depth = uWaterY - vW.y;
-  if (uCaus > 0.0 && depth > 0.0) { // under the water, inside the bowl
+  if (uCaus * uCausOn > 0.0 && depth > 0.0) { // under the water, inside the bowl
     vec2 m = abs(vW.xz) / uBowlHalf;
     float inside = 1.0 - smoothstep(0.9, 1.0, pow(pow(m.x, 4.0) + pow(m.y, 4.0), 0.25));
     vec2 q = vW.xz + uLightDir.xz / max(uLightDir.y, 0.3) * depth; // where the ray crossed the surface

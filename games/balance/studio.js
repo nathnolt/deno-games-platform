@@ -1626,6 +1626,33 @@ function backgroundStudio(view, api) {
     const rows = ms.map((m, i) => row(m, i, `${i + 1}. ${m.model}`, [
       btn('⧉', () => { ms.splice(i + 1, 0, clone(m)); ms[i + 1].translate[0] += 3; openRows.add(i + 1); st.sel = i + 1; structural(); view.debugSelectInstance(st.sel); }, ''),
       btn('✕', () => { removeAt(i); }, 'bb-dbg-danger')]));
+    // shadow settings: this background's own, or (when it has none) the global ones from the Settings tab
+    const shadowUi = (bgd) => {
+      const own = h('input', { type: 'checkbox', checked: !!bgd.light.shadows });
+      own.addEventListener('change', () => {
+        if (own.checked) bgd.light.shadows = { ...S.SHADOW_DEFAULTS, ...(D().tuning.shadows ?? {}) };
+        else delete bgd.light.shadows;
+        api.touch('backgrounds');
+        renderBody();
+      });
+      const g = bgd.light.shadows ?? (D().tuning.shadows ??= { ...S.SHADOW_DEFAULTS });
+      for (const [k, v] of Object.entries(S.SHADOW_DEFAULTS)) g[k] ??= v;
+      const kind = bgd.light.shadows ? 'backgrounds' : 'tuning';
+      const on = h('input', { type: 'checkbox', checked: g.on !== false });
+      on.addEventListener('change', () => { g.on = on.checked; api.touch(kind); });
+      const size = sel([['1024', '1024'], ['2048', '2048'], ['4096', '4096 (default)'], ['8192', '8192 (heavy)']], String(g.size), (v) => { g.size = +v; api.touch(kind); });
+      const soft = sel([['1', 'crisp'], ['2', 'soft'], ['3', 'softer']], String(g.softness), (v) => { g.softness = +v; api.touch(kind); });
+      return [
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'own settings for this background'), own),
+        h('div', { class: 'bb-st-hint' }, bgd.light.shadows ? 'Editing this background\'s own shadow settings.' : 'Editing the GLOBAL shadow settings (tick the box above to give this background its own).'),
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'shadows on'), on),
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'resolution'), size),
+        w.field('area shaded (width)', numIn(() => g.range, (v) => { if (v >= 20 && v <= 600) { g.range = v; api.touch(kind); } }, 10)),
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'edge softness'), soft),
+        w.slider('depth bias', g, 'bias', kind, 0, 1, 0.01),
+        w.slider('normal bias (texels)', g, 'normalBias', kind, 0, 6, 0.1),
+      ];
+    };
     const lightsList = lights();
     const lightRows = lightsList.map((l, k) => {
       const i = LIGHT0 + k;
@@ -1666,6 +1693,8 @@ function backgroundStudio(view, api) {
           w.slider('heavy blur (px)', bg, 'blurFar', 'backgrounds', 0, 40, 0.5),
           w.select('floor', BLUR_CHOICES, bg.ground, 'blur', 'backgrounds'),
           h('div', { class: 'bb-st-hint' }, 'Every model below picks none, light or heavy blur.'))),
+      h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Shadows'),
+        h('div', { class: 'bb-st-instbody' }, ...shadowUi(bg))),
       h('div', { class: 'bb-st-sub' }, 'Table and bowl'),
       h('label', { class: 'bb-dbg-field' }, h('span', {}, 'bowl height above the floor'), numIn(() => bg.bowlHeight ?? 4, (v) => { if (v >= 0) { bg.bowlHeight = v; api.touch('backgrounds'); } }, 0.5)),
       bg.table ? null : h('div', { class: 'bb-st-instbody' },

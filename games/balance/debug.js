@@ -292,6 +292,32 @@ export function createDebugMenu(view) {
     export: { label: 'Export', render: tabExport },
   };
 
+  /** The fields of a shadow settings object (the global one in `tuning.shadows`, or a background's own `light.shadows`). */
+  function shadowFields(obj, kind) {
+    for (const [k, v] of Object.entries(S.SHADOW_DEFAULTS)) obj[k] ??= v;
+    const on = h('input', { type: 'checkbox', checked: obj.on !== false });
+    on.addEventListener('change', () => { obj.on = on.checked; touch(kind); });
+    return [
+      field('shadows on', on),
+      (() => {
+        const s = h('select', {}, [[1024, '1024'], [2048, '2048'], [4096, '4096 (default)'], [8192, '8192 (heavy)']].map(([v, l]) => h('option', { value: v }, l)));
+        s.value = String(obj.size ?? 4096);
+        s.addEventListener('change', () => { obj.size = +s.value; touch(kind); });
+        return field('resolution', s);
+      })(),
+      num('area shaded (width, world units)', obj, 'range', kind, { min: 20, max: 600 }),
+      (() => {
+        const s = h('select', {}, [[1, 'crisp'], [2, 'soft'], [3, 'softer']].map(([v, l]) => h('option', { value: v }, l)));
+        s.value = String(obj.softness ?? 1);
+        s.addEventListener('change', () => { obj.softness = +s.value; touch(kind); });
+        return field('edge softness', s);
+      })(),
+      slider('depth bias (world units)', obj, 'bias', kind, 0, 1, 0.01),
+      slider('normal bias (texels)', obj, 'normalBias', kind, 0, 6, 0.1),
+      note('Stripes or lines on surfaces: raise the normal bias a little. Shadows that float away from their object: lower the biases. A bigger area with the same resolution is blurrier.'),
+    ];
+  }
+
   function tabSettings() {
     const t = draft.tuning;
     const out = [note('Everything in `tuning`. Physics numbers apply when the level restarts.')];
@@ -300,8 +326,10 @@ export function createDebugMenu(view) {
       if (typeof v === 'number') plain.append(num(k, t, k, 'tuning'), h('p', { class: 'bb-dbg-hint' }, TUNING_HELP[k] ?? ''));
     }
     out.push(section('Numbers', plain));
+    t.shadows ??= { ...S.SHADOW_DEFAULTS };
+    out.push(section('Shadows (all backgrounds, unless a background has its own)', ...shadowFields(t.shadows, 'tuning')));
     for (const [k, v] of Object.entries(t)) {
-      if (typeof v !== 'object') continue;
+      if (typeof v !== 'object' || k === 'shadows') continue;
       out.push(section(k, h('p', { class: 'bb-dbg-hint' }, TUNING_HELP[k] ?? ''), ...Object.keys(v).map((f) => num(f, v, f, 'tuning'))));
     }
     return out;
@@ -653,7 +681,18 @@ export function createDebugMenu(view) {
         slider('time of day (hour, 12 = noon, 0 = midnight)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
         note('A level can set its own time in the Levels tab; that overrides this one.'),
         slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
-        vec('light direction at noon', bg.light.dir, 'backgrounds', 0.1)),
+        vec('light direction at noon (x, y, z towards the sun)', bg.light.dir, 'backgrounds', 0.05),
+        (() => {
+          const own = h('input', { type: 'checkbox', checked: !!bg.light.shadows });
+          own.addEventListener('change', () => {
+            if (own.checked) bg.light.shadows = { ...S.SHADOW_DEFAULTS, ...(draft.tuning.shadows ?? {}) };
+            else delete bg.light.shadows;
+            touch('backgrounds');
+            render();
+          });
+          return field('own shadow settings (instead of the global ones)', own);
+        })(),
+        ...(bg.light.shadows ? shadowFields(bg.light.shadows, 'backgrounds') : [])),
       h('details', { class: 'bb-dbg-sec' }, h('summary', {}, 'Blur (light and heavy)'),
         note('Two blur strengths. Every model below (and the floor) picks: none, light or heavy.'),
         slider('light blur (px)', bg, 'blur', 'backgrounds', 0, 20, 0.5),

@@ -330,8 +330,8 @@ class BalanceGame {
     if (!h) return;
     const level = levels[this.levelIdx];
     const pos = h.rec.body.getPosition();
-    // Once a block has been lifted into the drop zone (`armed`) it may be dropped anywhere that is free; a block that never got there, or that overlaps another block, goes back to the table.
-    if (!this.lab.on && (!(h.rec.armed || inDrop(level, pos.x, pos.y)) || this.#overlaps(h.rec))) return this.#putBack(p); // (the level lab lets you drop anywhere)
+    // A block can only be dropped while it is inside the drop zone right now and does not overlap another block; otherwise it goes back to the table.
+    if (!this.lab.on && (!inDrop(level, pos.x, pos.y) || this.#overlaps(h.rec))) return this.#putBack(p); // (the level lab lets you drop anywhere)
 
     const angle = h.rec.body.getAngle();
     const item = h.item;

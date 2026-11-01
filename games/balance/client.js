@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 import { flatNormals, parseObj } from './obj.js';
 import { SHADOW_GLSL, shaders, transparentShaders, vertexShader } from './shaders.js';
@@ -20,10 +20,8 @@ function loadStyles() {
 const SEND_GAP = 33; //          ms between move messages (~30 per second)
 const ROTATE_STEP = 45; //       a held block turns in steps of this many degrees (Q / E, or the mouse wheel)
 const BOWL_SEGS = 72;
-const SHADOW_SIZE = 2048; //     resolution of the shadow map
 const SHADOW_NEAR = 60; //       the light camera looks at the table from 200 away
 const SHADOW_FAR = 340;
-const SHADOW_RANGE = 95; //      half the width of the area the light shades (world units around the table)
 const LAMP = ['#22c55e', '#f97316', '#ef4444']; // lamp on a fragile block: nothing on it, something on it, at its limit
 const TABLE_INDEX = -2; // the instance number of the table model in the background studio (the models of the background are 0, 1, 2 ...)
 const TABLE = { w: 110, d: 52, h: 4, z: 2 }; // the wooden table the bowl and the waiting blocks stand on (its top is the bottom of the bowl)
@@ -166,9 +164,14 @@ class BalanceView {
     uShadowMap: { value: null },
     uShadowMat: { value: new THREE.Matrix4() },
     uShadowStr: { value: 0 },
-    uShadowTexel: { value: new THREE.Vector2(1 / SHADOW_SIZE, 1 / SHADOW_SIZE) },
-    uShadowRange: { value: SHADOW_RANGE * 2 },
+    uShadowTexel: { value: new THREE.Vector2(1 / 4096, 1 / 4096) },
+    uShadowRange: { value: 170 },
     uShadowDepth: { value: SHADOW_FAR - SHADOW_NEAR },
+    uShadowR: { value: new THREE.Vector3(1, 0, 0) },
+    uShadowU: { value: new THREE.Vector3(0, 1, 0) },
+    uShadowBias: { value: 0.12 },
+    uShadowNormal: { value: 1.5 },
+    uShadowK: { value: 1 },
     // the light of the moment (see #applyDay): one sun / moon for shading and shadows, soft light from the sky and from the ground
     uLightDir: { value: new THREE.Vector3(-0.35, 0.8, 0.5).normalize() },
     uLightCol: { value: new THREE.Vector3(0.72, 0.7, 0.64) },
@@ -348,7 +351,7 @@ class BalanceView {
       v.static = st === BODY.STATIC;
       const held = st === BODY.HELD || st === BODY.HELD_BAD;
       if (held && owner === this.ctx.me.slot) mine = id;
-      v.mats.forEach((m) => { m.uniforms.uBad.value = st === BODY.HELD_BAD ? 1 : 0; }); // the only tint a block ever gets: red = outside the drop area
+      v.mats.forEach((m) => { m.uniforms.uBad.value = st === BODY.HELD_BAD ? 1 : 0; m.uniforms.uCausOn.value = held ? 0 : 1; }); // (a block in your hand is not in the water) // the only tint a block ever gets: red = outside the drop area
     }
 
     // reconcile our pointer state with what the server says we are holding
@@ -568,7 +571,7 @@ class BalanceView {
         canvas.removeEventListener('wheel', onWheel);
         if (group) group.traverse((o) => o.material?.dispose());
         renderer.dispose();
-        renderer.forceContextLoss(); // (a browser only allows about 16 WebGL contexts and takes the OLDEST away: a closed window must give its own back)
+        renderer.forceContextLoss?.(); // (a browser only allows about 16 WebGL contexts and takes the OLDEST away: a closed window must give its own back)
       },
     };
   }
@@ -787,7 +790,7 @@ class BalanceView {
         canvas.removeEventListener('dblclick', fit);
         if (content) this.#disposeTree(content);
         renderer.dispose();
-        renderer.forceContextLoss();
+        renderer.forceContextLoss?.();
       },
     };
     raf = requestAnimationFrame(loop);
@@ -1343,7 +1346,7 @@ void main() {
   #plainLight() {
     const v = (x) => ({ value: x });
     return {
-      uShadowMap: v(this.whiteTex), uShadowMat: v(new THREE.Matrix4()), uShadowStr: v(0), uShadowTexel: v(new THREE.Vector2(1, 1)), uShadowRange: v(190), uShadowDepth: v(280),
+      uShadowMap: v(this.whiteTex), uShadowMat: v(new THREE.Matrix4()), uShadowStr: v(0), uShadowTexel: v(new THREE.Vector2(1, 1)), uShadowRange: v(190), uShadowDepth: v(280), uShadowR: v(new THREE.Vector3(1, 0, 0)), uShadowU: v(new THREE.Vector3(0, 1, 0)), uShadowBias: v(0.12), uShadowNormal: v(1.5), uShadowK: v(1),
       uLightDir: v(new THREE.Vector3(-0.35, 0.8, 0.5).normalize()), uLightCol: v(new THREE.Vector3(0.72, 0.7, 0.64)),
       uAmbSky: v(new THREE.Vector3(0.6, 0.63, 0.68)), uAmbGround: v(new THREE.Vector3(0.45, 0.41, 0.35)),
       uWaterY: v(WATER_Y), uCaus: v(0), uBowlHalf: v(new THREE.Vector2(20, 12)),
@@ -1362,6 +1365,7 @@ void main() {
         uSeed: { value: seed },
         uGlow: { value: new THREE.Vector3() },
         uBad: { value: 0 },
+        uCausOn: { value: 1 },
         uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
         uFog: fog?.uFog ?? { value: new THREE.Vector2(1e6, 2e6) }, // blocks never fade; background models do
@@ -1390,6 +1394,7 @@ void main() {
     const shaderName = materials[MATERIAL_KEYS[mi]].shader;
     const mat = this.#blockMaterial(shaderName, (id * 0.6180339) % 1);
 
+    if (opts.table) mat.uniforms.uCausOn.value = 0; // (waiting on the table: no caustics)
     const group = new THREE.Group();
     for (const { geo } of this.#geometries(shapeKey)) {
       const mesh = new THREE.Mesh(geo, mat);
@@ -1855,16 +1860,29 @@ void main() {
   #shadowPass() {
     const L = this.bgFx.light;
     const u = this.shadowU;
-    if (!L || !(L.shadow > 0)) {
+    const cfg = shadowSettings(L); // the global settings, or this background's own (see SHADOW_DEFAULTS in shared.js)
+    if (!L || !cfg.on || !(L.shadow > 0)) {
       u.uShadowStr.value = 0;
       return false;
     }
     const fx = this.fx;
-    if (!fx.shadowRT) {
-      fx.shadowRT = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
-      fx.depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide });
-      fx.shadowCam = new THREE.OrthographicCamera(-SHADOW_RANGE, SHADOW_RANGE, SHADOW_RANGE, -SHADOW_RANGE, SHADOW_NEAR, SHADOW_FAR);
+    const size = Math.min(cfg.size, this.renderer.capabilities?.maxTextureSize ?? cfg.size); // (as big as the graphics card allows)
+    const half = cfg.range / 2;
+    if (!fx.shadowRT || fx.shadowRT.width !== size) {
+      fx.shadowRT?.dispose();
+      fx.shadowRT = new THREE.WebGLRenderTarget(size, size, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
     }
+    if (!fx.depthMat) fx.depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide });
+    if (!fx.shadowCam) fx.shadowCam = new THREE.OrthographicCamera(-half, half, half, -half, SHADOW_NEAR, SHADOW_FAR);
+    if (fx.shadowCam.right !== half) {
+      Object.assign(fx.shadowCam, { left: -half, right: half, top: half, bottom: -half });
+      fx.shadowCam.updateProjectionMatrix();
+    }
+    u.uShadowTexel.value.set(1 / size, 1 / size);
+    u.uShadowRange.value = cfg.range;
+    u.uShadowBias.value = cfg.bias;
+    u.uShadowNormal.value = cfg.normalBias;
+    u.uShadowK.value = THREE.MathUtils.clamp(Math.round(cfg.softness), 1, 3);
     const dir = this.shadowU.uLightDir.value.clone();
     const target = new THREE.Vector3(0, this.groundY + 6, 0);
     const cam = fx.shadowCam;
@@ -1872,6 +1890,8 @@ void main() {
     cam.lookAt(target);
     cam.updateMatrixWorld(true);
     u.uShadowMat.value.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    u.uShadowR.value.setFromMatrixColumn(cam.matrixWorld, 0);
+    u.uShadowU.value.setFromMatrixColumn(cam.matrixWorld, 1);
 
     const r = this.renderer;
     const oldColor = r.getClearColor(new THREE.Color());
