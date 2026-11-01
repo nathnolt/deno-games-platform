@@ -38,24 +38,35 @@ float shadowAt(vec3 wp, vec3 n) {
   if (uShadowStr <= 0.0) return 1.0;
   float ndl = clamp(dot(n, uLightDir), 0.0, 1.0);
   float texW = uShadowTexel.x * uShadowRange; // world size of one shadow texel
-  vec4 sp = uShadowMat * vec4(wp + n * texW * (1.2 + 2.8 * (1.0 - ndl)), 1.0);
+  vec4 sp = uShadowMat * vec4(wp + n * texW * (1.0 + 2.0 * (1.0 - ndl)), 1.0);
   vec3 p = sp.xyz / sp.w * 0.5 + 0.5;
+  // RECEIVER PLANE: how fast the depth changes across the shadow map on this very surface (from the screen-space derivatives). Every tap is
+  // compared with the depth the surface really has THERE, not at the middle of the disc: this is what kills the Moire stripes (shadow acne),
+  // which come from a sloped surface being compared against a staircase of depth texels. (Derivatives first, before any early return.)
+  vec3 ddx = dFdx(p);
+  vec3 ddy = dFdy(p);
+  float det = ddx.x * ddy.y - ddx.y * ddy.x;
+  vec2 slope = vec2(0.0);
+  if (abs(det) > 1e-14) slope = vec2(ddy.y * ddx.z - ddx.y * ddy.z, ddx.x * ddy.z - ddy.x * ddx.z) / det;
+  slope = clamp(slope, vec2(-1.2), vec2(1.2));
   if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
-  float zr = p.z - (0.0003 + 0.0007 * (1.0 - ndl));
+  float zr = p.z - (0.0004 + 0.0004 * (1.0 - ndl));
   float phi = 6.2831853 * shadowNoise(gl_FragCoord.xy);
   float sum = 0.0;
   float cnt = 0.0;
   for (int i = 0; i < 12; i++) { // 1. who is in the way?
-    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + vogel(i, 12, phi) * uShadowTexel * 6.0));
-    if (d < zr) { sum += d; cnt += 1.0; }
+    vec2 o = vogel(i, 12, phi) * uShadowTexel * 6.0;
+    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + o));
+    if (d < zr + dot(o, slope)) { sum += d; cnt += 1.0; }
   }
   if (cnt < 0.5) return 1.0;
-  float gap = (zr - sum / cnt) * uShadowDepth; // 2. how far above this surface is it (world units)
-  float rad = clamp(gap * 0.07 / texW, 1.2, 7.0); //   the further, the softer
+  float gap = max(zr - sum / cnt, 0.0) * uShadowDepth; // 2. how far above this surface is it (world units)
+  float rad = clamp(gap * 0.07 / texW, 1.6, 7.0); //   the further, the softer
   float lit = 0.0;
   for (int i = 0; i < 16; i++) { // 3. soft edge
-    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + vogel(i, 16, phi + 1.7) * uShadowTexel * rad));
-    lit += (d < zr) ? 0.0 : 1.0;
+    vec2 o = vogel(i, 16, phi + 1.7) * uShadowTexel * rad;
+    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + o));
+    lit += (d < zr + dot(o, slope)) ? 0.0 : 1.0;
   }
   return lit / 16.0;
 }
@@ -105,6 +116,7 @@ uniform vec3 uGlow;
 uniform float uBad;
 uniform float uWaterY;
 uniform float uCaus;
+uniform float uCausInward;
 uniform vec2 uBowlHalf;
 
 ${SHADOW_GLSL}
@@ -143,7 +155,9 @@ vec4 finish(vec3 c, float a) {
     float inside = 1.0 - smoothstep(0.9, 1.0, pow(pow(m.x, 4.0) + pow(m.y, 4.0), 0.25));
     vec2 q = vW.xz + uLightDir.xz / max(uLightDir.y, 0.3) * depth; // where the ray crossed the surface
     float k = caustic(q * 0.11, uTime * 0.55) * (0.35 + 0.65 * clamp(dot(wn, uLightDir) + 0.4, 0.0, 1.0));
-    float fade = exp(-depth * 0.06) * smoothstep(0.0, 0.5, depth) * inside;
+    vec3 gn = normalize(vWN); // (the true normal: for the bowl only the inside counts, not the outside or the underside)
+    float inward = uCausInward > 0.5 ? max(step(dot(gn.xz, vW.xz), 0.0), step(0.5, gn.y)) : 1.0;
+    float fade = exp(-depth * 0.06) * smoothstep(0.0, 0.5, depth) * inside * inward;
     L += uLightCol * (k * uCaus * fade * 2.4);
     c = mix(c, c * vec3(0.8, 0.93, 1.0), 0.55 * fade);
   }

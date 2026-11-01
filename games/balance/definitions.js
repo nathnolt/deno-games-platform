@@ -93,7 +93,7 @@ export const bowls = {
     square: 8.6,
     squareBottom: 9.1,
     shader: 'mahogany',
-    water: { color: '#0084ff', opacity: 0.45, reflect: 1 },
+    water: { color: '#004585', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
   },
   bowl2: {
     a: 22,
@@ -108,6 +108,7 @@ export const bowls = {
     water: { color: '#6cc3d5', opacity: 0.45, reflect: 0.6 },
   },
 };
+
 
 
 

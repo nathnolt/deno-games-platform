@@ -25,6 +25,7 @@ import { createStudio } from './studio.js';
 import { clone, h, NS, svg } from './ui.js';
 
 const STORE = 'balance.debug.defs';
+const BLUR_OPTIONS = [['none', 'sharp (none)'], ['light', 'light blur'], ['heavy', 'heavy blur']];
 const PHYSICS = new Set(['tuning', 'materials', 'shapes', 'bowls', 'levels', 'worlds']);
 
 const TUNING_HELP = {
@@ -502,6 +503,7 @@ export function createDebugMenu(view) {
     b.water ??= { color: '#3d9bff', opacity: 0.4 };
     b.water.reflect ??= 0.6;
     b.water.caustics ??= 0.9;
+    b.water.causticsInset ??= 2;
     const flat = Math.max(0, 2 * (b.a - b.r));
     out.push(
       btn('Use this bowl in the current level', () => {
@@ -528,7 +530,8 @@ export function createDebugMenu(view) {
         color('water colour', b.water, 'color', 'bowls'),
         slider('water opacity', b.water, 'opacity', 'bowls', 0, 1, 0.05),
         slider('water reflection', b.water, 'reflect', 'bowls', 0, 1, 0.05),
-        slider('water caustics', b.water, 'caustics', 'bowls', 0, 2, 0.05)),
+        slider('water caustics', b.water, 'caustics', 'bowls', 0, 2, 0.05),
+        slider('caustics inset (away from the walls)', b.water, 'causticsInset', 'bowls', 0, 15, 0.25)),
       section('Model instead of the generated bowl (optional)', modelPicker(b)),
     );
     return out;
@@ -611,15 +614,13 @@ export function createDebugMenu(view) {
     bg.fog ??= [150, 520];
     bg.models ??= [];
     bg.blur ??= 3;
-    bg.blurStart ??= 0;
     bg.blurFar ??= 10;
-    bg.blurFarStart ??= -45;
-    bg.blurRamp ??= 30;
     bg.light ??= { dir: [-0.45, 0.85, 0.55], shadow: 0.4 };
     bg.light.dir ??= [-0.45, 0.85, 0.55];
     bg.light.shadow ??= 0.55;
     bg.light.time ??= 12;
     bg.ground.style ??= 'sand';
+    bg.ground.blur ??= 'light';
     bg.bowlHeight ??= 4;
     bg.box ??= { w: 110, d: 52, z: 2, shader: 'floorwood' };
     out.push(
@@ -653,13 +654,11 @@ export function createDebugMenu(view) {
         note('A level can set its own time in the Levels tab; that overrides this one.'),
         slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
         vec('light direction at noon', bg.light.dir, 'backgrounds', 0.1)),
-      h('details', { class: 'bb-dbg-sec' }, h('summary', {}, 'Blur (two planes by depth)'),
-        note('Everything behind the table is blurred by depth: sharp in front of "blur starts", the light blur behind it, the heavy blur behind "heavy blur starts". z is in world units, 0 = the play plane, negative = behind the table.'),
+      h('details', { class: 'bb-dbg-sec' }, h('summary', {}, 'Blur (light and heavy)'),
+        note('Two blur strengths. Every model below (and the floor) picks: none, light or heavy.'),
         slider('light blur (px)', bg, 'blur', 'backgrounds', 0, 20, 0.5),
-        num('light blur starts at z', bg, 'blurStart', 'backgrounds'),
         slider('heavy blur (px)', bg, 'blurFar', 'backgrounds', 0, 40, 0.5),
-        num('heavy blur starts at z', bg, 'blurFarStart', 'backgrounds'),
-        num('ease in over (z units)', bg, 'blurRamp', 'backgrounds', { min: 1 })),
+        select('floor', BLUR_OPTIONS, bg.ground, 'blur', 'backgrounds')),
       section(`Models (${bg.models.length})`,
         ...bg.models.map((m, i) => h('div', { class: 'bb-dbg-part' },
           h('div', { class: 'bb-dbg-row' },
@@ -667,6 +666,7 @@ export function createDebugMenu(view) {
             btn('Copy', () => { bg.models.splice(i + 1, 0, clone(m)); touch('backgrounds'); render(); }),
             btn('✕', () => { bg.models.splice(i, 1); touch('backgrounds'); render(); }, 'bb-dbg-danger')),
           num('scale', m, 'scale', 'backgrounds'),
+          select('blur', BLUR_OPTIONS, Object.assign(m, { blur: m.blur ?? 'light' }), 'blur', 'backgrounds'),
           vec('rotation °', m.rotation, 'backgrounds', 5),
           vec('translate', m.translate, 'backgrounds', 1))),
         btn('+ Add model', () => { bg.models.push({ model: keys('models')[0], scale: 1, rotation: [0, 0, 0], translate: [0, 0, -40] }); touch('backgrounds'); render(); })),

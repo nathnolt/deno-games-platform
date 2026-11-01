@@ -23,6 +23,7 @@ import { clone, h, svg } from './ui.js';
 const KEY = /^[A-Za-z][\w-]*$/;
 const DOCK = 470; // width of the level studio panel
 const SHADER_COLOR = { wood: '#c99a62', wood2: '#dcc294', glass: '#9fd3e6', stone1: '#8f9298', stone2: '#6d717a', float: '#86b0d6' };
+const BLUR_CHOICES = [['none', 'sharp (none)'], ['light', 'light blur'], ['heavy', 'heavy blur']];
 const SNAPS = [['0', 'free'], ['0.1', '0.1'], ['0.25', '0.25'], ['0.5', '0.5'], ['1', '1']];
 const ACCENT = '#f43f5e';
 
@@ -1563,10 +1564,8 @@ function backgroundStudio(view, api) {
     bg.ground ??= { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2 };
     bg.fog ??= [150, 520];
     bg.blur ??= 3;
-    bg.blurStart ??= 0;
     bg.blurFar ??= 10;
-    bg.blurFarStart ??= -45;
-    bg.blurRamp ??= 30;
+    bg.ground.blur ??= 'light';
     bg.light ??= { dir: [-0.45, 0.85, 0.55], shadow: 0.4 };
     bg.light.time ??= 12;
     bg.light.dir ??= [-0.45, 0.85, 0.55];
@@ -1615,6 +1614,7 @@ function backgroundStudio(view, api) {
             btn('⤓', () => { m.translate[1] = 0; pushInst(i); renderBody(); }, ''),
             ...extra),
           h('label', { class: 'bb-dbg-field' }, h('span', {}, 'scale'), numIn(() => m.scale ?? 1, (v) => { if (v > 0) { m.scale = v; pushInst(i); } }, 0.1)),
+          i === TABLE_I ? null : h('label', { class: 'bb-dbg-field' }, h('span', {}, 'blur'), sel(BLUR_CHOICES, m.blur ?? 'light', (v) => { m.blur = v; structural(); })),
           row3('rotation °', m.rotation, i, 5),
           row3('translate', m.translate, i, 0.5)));
       det.addEventListener('toggle', () => { if (det.open) openRows.add(i); else openRows.delete(i); });
@@ -1640,13 +1640,12 @@ function backgroundStudio(view, api) {
           w.slider('time of day (hour)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
           w.slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
           row3('light direction', bg.light.dir, -1, 0.1))),
-      h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Blur (two planes by depth)'),
+      h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Blur (light and heavy)'),
         h('div', { class: 'bb-st-instbody' },
           w.slider('light blur (px)', bg, 'blur', 'backgrounds', 0, 20, 0.5),
-          w.field('light blur starts at z', numIn(() => bg.blurStart, (v) => { bg.blurStart = v; api.touch('backgrounds'); }, 1)),
           w.slider('heavy blur (px)', bg, 'blurFar', 'backgrounds', 0, 40, 0.5),
-          w.field('heavy blur starts at z', numIn(() => bg.blurFarStart, (v) => { bg.blurFarStart = v; api.touch('backgrounds'); }, 1)),
-          w.field('ease in over', numIn(() => bg.blurRamp, (v) => { if (v >= 1) { bg.blurRamp = v; api.touch('backgrounds'); } }, 1)))),
+          w.select('floor', BLUR_CHOICES, bg.ground, 'blur', 'backgrounds'),
+          h('div', { class: 'bb-st-hint' }, 'Every model below picks none, light or heavy blur.'))),
       h('div', { class: 'bb-st-sub' }, 'Table and bowl'),
       h('label', { class: 'bb-dbg-field' }, h('span', {}, 'bowl height above the floor'), numIn(() => bg.bowlHeight ?? 4, (v) => { if (v >= 0) { bg.bowlHeight = v; api.touch('backgrounds'); } }, 0.5)),
       bg.table ? null : h('div', { class: 'bb-st-instbody' },

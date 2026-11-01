@@ -29,6 +29,8 @@ const TABLE_INDEX = -2; // the instance number of the table model in the backgro
 const TABLE = { w: 110, d: 52, h: 4, z: 2 }; // the wooden table the bowl and the waiting blocks stand on (its top is the bottom of the bowl)
 
 /** A colour as the raw numbers of its hex code: for our own shaders, which write colours to the screen without any conversion. */
+/** What a scenery object's `blur` setting means: 'none' = sharp, 'heavy' = the strong blur, anything else = the light blur. */
+const blurLevelOf = (v) => (v === 'none' ? 0 : v === 'heavy' ? 2 : 1);
 const rawColor = (hex) => {
   const n = parseInt(String(hex).replace('#', '').padEnd(6, '0').slice(0, 6), 16);
   return new THREE.Color().setRGB(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
@@ -377,6 +379,8 @@ class BalanceView {
     for (const k of ['shadowRT', 'reflRT']) this.fx[k]?.dispose();
     for (const t of [...(this.fx.kawase?.rts ?? []), ...(this.fx.kawase?.nearUp ?? []), ...(this.fx.kawase?.farUp ?? [])]) t?.dispose();
     for (const m of ['down', 'up', 'mix']) this.fx.kawase?.[m].dispose();
+    this.fx.kawase?.maskRT?.dispose();
+    this.fx.kawase?.maskMats.forEach((m) => m.dispose());
     this.fx.depthMat?.dispose();
     this.markerGeo.dispose();
     this.dotGeo.dispose();
@@ -891,14 +895,16 @@ class BalanceView {
     const scenery = (this.scenery = new THREE.Group());
     const main = (this.mainGroup = new THREE.Group());
     world.add(scenery, main);
-    this.bgFx = { blur: bg.blur ?? 0, blurStart: bg.blurStart ?? 0, blurFar: bg.blurFar ?? 0, blurFarStart: bg.blurFarStart ?? -45, blurRamp: bg.blurRamp ?? 30, light: bg.light ?? null, mist: bg.mist };
+    this.bgFx = { blur: bg.blur ?? 0, blurFar: bg.blurFar ?? 0, light: bg.light ?? null, mist: bg.mist };
     this.shadowU.uCaus.value = bowl.water?.caustics ?? 0.9;
-    this.shadowU.uBowlHalf.value.set(bowl.a * 0.97, bowl.a * bowl.zscale * 0.97);
+    const inset = bowl.water?.causticsInset ?? 2; // caustics stay this far inside the walls
+    this.shadowU.uBowlHalf.value.set(Math.max(1, bowl.a - inset), Math.max(1, bowl.a * bowl.zscale - inset));
 
     // the ground: raked sand or wooden planks. Ripples run around the table like around a rock, and the far end fades into mist.
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = floorY;
+    floor.userData.blurLevel = blurLevelOf(bg.ground?.blur);
     scenery.add(floor);
     this.floorMesh = floor;
 
@@ -936,6 +942,7 @@ class BalanceView {
     const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y)); // from the middle of the flat bottom up to the rim
     const profile = [...half(outer), ...half(inner).reverse()]; // the normals come out facing away from the wood
     const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain));
+    wood.material.uniforms.uCausInward.value = 1;
 
     // the water: the inside of the bowl up to WATER_Y (a lathe for the sides and the bottom) and a finely meshed GRID for the surface,
     // which the vertex shader lifts into waves
@@ -1180,8 +1187,11 @@ void main() {
     const group = new THREE.Group();
     parts.forEach((p, i) => {
       const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
-      group.add(new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, fog)));
+      const mat = this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, fog);
+      if (fog === null && index === undefined) mat.uniforms.uCausInward.value = 1; // (a model bowl)
+      group.add(new THREE.Mesh(p.geo, mat));
     });
+    group.userData.blurLevel = blurLevelOf(inst.blur); // 0 sharp, 1 light blur, 2 heavy blur (see #blurPass)
     group.scale.setScalar(inst.scale ?? 1);
     const deg = Math.PI / 180;
     const r = inst.rotation ?? [0, 0, 0];
@@ -1281,6 +1291,7 @@ void main() {
         uSeed: { value: seed },
         uGlow: { value: new THREE.Vector3() },
         uBad: { value: 0 },
+        uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
         uFog: fog?.uFog ?? { value: new THREE.Vector2(1e6, 2e6) }, // blocks never fade; background models do
         ...(plain ? this.#plainLight() : this.shadowU), // (the little preview windows are other WebGL contexts: no shared textures)
@@ -1895,11 +1906,11 @@ void main() {
   }
 
   /**
-   * The scenery (floor and background models) is drawn at full size, with its depth. It is then shrunk step by step (each step averages 5 taps into a
-   * texture half the size) and grown back (8 taps): a DUAL KAWASE blur, a wide soft blur for a few tiny passes. That pyramid is built ONCE and read
-   * twice, grown back to two strengths: a light one (`blur`) and a heavy one (`blurFar`). One last pass looks at the depth of every pixel (its world z)
-   * and picks: sharp in front of `blurStart`, the light blur behind it, the heavy blur behind `blurFarStart`, eased over `blurRamp` units.
-   * (A blur that changes its radius per pixel would cost far more; two planes plus a mix costs about one extra tiny chain.)
+   * The scenery (floor and background models) is drawn at full size, then shrunk step by step (each step averages 5 taps into a texture half the
+   * size) and grown back (8 taps): a DUAL KAWASE blur. That pyramid is built ONCE and read twice, grown back to two strengths: a light one (`blur`)
+   * and a heavy one (`blurFar`). Every object says which one it gets (`blur: 'none' | 'light' | 'heavy'`, on every background model and in
+   * `ground.blur`): the scenery is drawn a second time as a flat "mask" (the red channel of every object = its choice), and one last pass picks
+   * sharp / light / heavy per pixel from that mask. (A blur with its own radius per pixel would cost far more; this costs one extra tiny chain.)
    */
   #blurPass() {
     const B = this.bgFx;
@@ -1969,31 +1980,30 @@ varying vec2 vUv;
 uniform sampler2D uTex;   // sharp
 uniform sampler2D uNear;  // light blur
 uniform sampler2D uFar;   // heavy blur
-uniform sampler2D uDepth;
-uniform mat4 uInvVP;
-uniform vec4 uPlanes;     // blurStart, blurFarStart, ramp, unused
+uniform sampler2D uMask;  // red: 0 = sharp, 0.5 = light blur, 1 = heavy blur
 void main() {
-  float d = texture2D(uDepth, vUv).r;
-  vec4 wp = uInvVP * vec4(vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
-  float z = (d >= 0.99999) ? -1e5 : wp.z / wp.w; // (empty sky is as far as it gets)
-  float t1 = smoothstep(0.0, 1.0, (uPlanes.x - z) / uPlanes.z);
-  float t2 = smoothstep(0.0, 1.0, (uPlanes.y - z) / uPlanes.z);
-  vec3 c = mix(mix(texture2D(uTex, vUv).rgb, texture2D(uNear, vUv).rgb, t1), texture2D(uFar, vUv).rgb, t2);
+  float m = floor(texture2D(uMask, vUv).r * 2.0 + 0.5);
+  vec3 c = m < 0.5 ? texture2D(uTex, vUv).rgb : (m < 1.5 ? texture2D(uNear, vUv).rgb : texture2D(uFar, vUv).rgb);
   gl_FragColor = vec4(c, 1.0);
-}`, { uNear: { value: null }, uFar: { value: null }, uDepth: { value: null }, uInvVP: { value: new THREE.Matrix4() }, uPlanes: { value: new THREE.Vector4() } });
+}`, { uNear: { value: null }, uFar: { value: null }, uMask: { value: null } });
+      const maskMats = [0, 0.5, 1].map((v) => new THREE.ShaderMaterial({
+        vertexShader: /* glsl */ `void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: /* glsl */ `precision highp float;\nvoid main() { gl_FragColor = vec4(${v.toFixed(3)}, 0.0, 0.0, 1.0); }`,
+        side: THREE.DoubleSide,
+      }));
       const scene = new THREE.Scene();
       const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), down);
       quad.frustumCulled = false;
       scene.add(quad);
-      fx.kawase = { scene, quad, down, up, mix, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), rts: [], nearUp: [], farUp: [], key: '' };
+      fx.kawase = { scene, quad, down, up, mix, maskMats, maskRT: null, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), rts: [], nearUp: [], farUp: [], key: '' };
     }
     const k = fx.kawase;
     const key = `${w0}x${h0}x${depthLevels}`;
     if (k.key !== key) { // (re)build the pyramids: `rts` shrinks (level 0 = the scene with its depth), `nearUp` and `farUp` hold the two ways back up
-      [...k.rts, ...k.nearUp, ...k.farUp].forEach((t) => t?.dispose());
+      [...k.rts, ...k.nearUp, ...k.farUp, k.maskRT].forEach((t) => t?.dispose());
+      k.maskRT = new THREE.WebGLRenderTarget(w0, h0, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
       const rt = (i, depth) => new THREE.WebGLRenderTarget(Math.max(2, w0 >> i), Math.max(2, h0 >> i), {
         minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: depth, wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
-        ...(depth ? { depthTexture: new THREE.DepthTexture(Math.max(2, w0), Math.max(2, h0)) } : {}),
       });
       k.rts = [];
       k.nearUp = [];
@@ -2015,6 +2025,20 @@ void main() {
     r.setRenderTarget(k.rts[0]);
     r.clear();
     r.render(this.scene, this.camera);
+    // 1b. the mask: the same scenery, every object in one flat colour that says how much it is blurred
+    const saved = [];
+    this.scenery.traverse((o) => {
+      if (!o.isMesh) return;
+      let n = o;
+      while (n && n.userData.blurLevel === undefined) n = n.parent;
+      saved.push([o, o.material]);
+      o.material = k.maskMats[n?.userData.blurLevel ?? 1];
+    });
+    r.setClearColor(0x808080, 1); // (empty sky = the light blur: nothing to see there anyway)
+    r.setRenderTarget(k.maskRT);
+    r.clear();
+    r.render(this.scene, this.camera);
+    for (const [o, m] of saved) o.material = m;
     this.#soloScenery(false, false);
     // 2. shrink (once), 3. grow back to each strength
     const pass = (mat, from, to, offset, half) => {
@@ -2041,14 +2065,11 @@ void main() {
     const farTex = pf ? grow(pf, k.farUp) : nearTex;
     // 4. the mix, onto the screen
     r.setClearColor(oldColor, oldAlpha);
-    this.camera.updateMatrixWorld(true);
     const m = k.mix.uniforms;
     m.uTex.value = k.rts[0].texture;
-    m.uDepth.value = k.rts[0].depthTexture;
+    m.uMask.value = k.maskRT.texture;
     m.uNear.value = nearTex;
     m.uFar.value = farTex;
-    m.uInvVP.value.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse).invert();
-    m.uPlanes.value.set(B.blurStart ?? 0, B.blurFarStart ?? -45, Math.max(1, B.blurRamp ?? 30), 0);
     k.quad.material = k.mix;
     r.setRenderTarget(null);
     r.clear();

@@ -158,19 +158,17 @@ export function getShape(key) {
 // ── Bowls and backgrounds ────────────────────────────────────────────────────────────────────────────────────
 export const BOWL_DEFAULTS = {
   a: 18, b: 9, t: 1, rimY: 1, r: 4, zscale: 0.7, square: 5, squareBottom: 2, shader: 'bowlwood',
-  water: { color: '#3d9bff', opacity: 0.4, reflect: 0.6, caustics: 0.9 }, // caustics: the bright net of light on what is under the water (0 = none). reflect: 0 = a plain pane, 1 = a mirror (the water mirrors the scenery)
+  water: { color: '#3d9bff', opacity: 0.4, reflect: 0.6, caustics: 0.9, causticsInset: 2 }, // caustics: the bright net of light on what is under the water (0 = none); causticsInset keeps it this far away from the walls (the bowl is narrower at the bottom). reflect: 0 = a plain pane, 1 = a mirror (the water mirrors the scenery)
 };
+export const BLUR_CHOICES = ['none', 'light', 'heavy'];
 export const BACKGROUND_DEFAULTS = {
   mist: '#e7e2d6',
   fog: [150, 520],
-  ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2, style: 'sand' },
-  // The scenery is blurred in two planes by depth (z in world units, negative = behind the table). Sharp in front of `blurStart`, `blur` pixels of blur
-  // behind it, `blurFar` pixels behind `blurFarStart`; each change is eased in over `blurRamp` units of z. (0 for blur and blurFar = no blur at all.)
+  ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2, style: 'sand', blur: 'light' },
+  // The scenery is blurred in two strengths: `blur` (light) and `blurFar` (heavy), both in pixels. Every background model says which one it gets
+  // (`blur: 'none' | 'light' | 'heavy'`, default light) and so does the floor (`ground.blur`). 0 for both = no blur at all.
   blur: 3,
-  blurStart: 0,
   blurFar: 10,
-  blurFarStart: -45,
-  blurRamp: 30,
   light: { dir: [-0.45, 0.85, 0.55], shadow: 0.55, time: 12 }, // where the light comes from (towards the light) and how dark its shadows are (0 = no shadows)
   bowlHeight: 4, // how high the bowl stands above the floor (= the thickness of the table)
   box: { w: 110, d: 52, z: 2, shader: 'floorwood' }, // the plain wooden table: width (x), depth (z), centre z, shader (unused when `table` is a model)
@@ -362,6 +360,7 @@ export function validateDefinitions(defs, extra = {}) {
     if (isNum(b.r) && isNum(b.a) && (b.r <= 0 || b.r > b.a - 0.05)) err(`bowl ${k}: r must be above 0 and at most a`);
     if (isNum(b.zscale) && b.zscale <= 0.1) err(`bowl ${k}: zscale must be above 0.1`);
     for (const f of ['square', 'squareBottom']) if (b[f] !== undefined && (!isNum(b[f]) || b[f] < 2)) err(`bowl ${k}: ${f} must be 2 or more`);
+    if (b.water?.causticsInset !== undefined && !(isNum(b.water.causticsInset) && b.water.causticsInset >= 0)) err(`bowl ${k}: water.causticsInset must be 0 or more`);
     if (b.water?.caustics !== undefined && !(isNum(b.water.caustics) && b.water.caustics >= 0 && b.water.caustics <= 2)) err(`bowl ${k}: water.caustics must be from 0 to 2`);
     if (b.water?.reflect !== undefined && !(isNum(b.water.reflect) && b.water.reflect >= 0 && b.water.reflect <= 1)) err(`bowl ${k}: water.reflect must be from 0 to 1`);
     shaderOk(b.shader ?? BOWL_DEFAULTS.shader, `bowl ${k}`);
@@ -385,8 +384,7 @@ export function validateDefinitions(defs, extra = {}) {
     if (typeof b.mist !== 'string') err(`background ${k}: mist must be a colour`);
     if (b.blur !== undefined && !(isNum(b.blur) && b.blur >= 0 && b.blur <= 30)) err(`background ${k}: blur must be a number from 0 to 30`);
     if (b.blurFar !== undefined && !(isNum(b.blurFar) && b.blurFar >= 0 && b.blurFar <= 40)) err(`background ${k}: blurFar must be a number from 0 to 40`);
-    for (const f of ['blurStart', 'blurFarStart']) if (b[f] !== undefined && !isNum(b[f])) err(`background ${k}: ${f} must be a number (z in world units)`);
-    if (b.blurRamp !== undefined && !(isNum(b.blurRamp) && b.blurRamp >= 1)) err(`background ${k}: blurRamp must be at least 1`);
+    if (b.ground?.blur !== undefined && !BLUR_CHOICES.includes(b.ground.blur)) err(`background ${k}: ground.blur must be none, light or heavy`);
     if (b.light !== undefined) {
       if (b.light.dir !== undefined && !isVec3(b.light.dir)) err(`background ${k}: light.dir needs 3 numbers`);
       if (b.light.time !== undefined && !(isNum(b.light.time) && b.light.time >= 0 && b.light.time <= 24)) err(`background ${k}: light.time (hour of the day) must be from 0 to 24`);
@@ -411,6 +409,7 @@ export function validateDefinitions(defs, extra = {}) {
       if (!isNum(m.scale) || m.scale <= 0) err(`background ${k}, model #${i + 1}: scale must be above 0`);
       if (!isVec3(m.rotation)) err(`background ${k}, model #${i + 1}: rotation needs 3 numbers`);
       if (!isVec3(m.translate)) err(`background ${k}, model #${i + 1}: translate needs 3 numbers`);
+      if (m.blur !== undefined && !BLUR_CHOICES.includes(m.blur)) err(`background ${k}, model #${i + 1}: blur must be none, light or heavy`);
     });
   }
 
