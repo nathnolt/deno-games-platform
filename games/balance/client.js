@@ -176,7 +176,6 @@ class BalanceView {
     uCaus: { value: 0 },
     uBowlHalf: { value: new THREE.Vector2(20, 12) },
   };
-  tod = null; //     hour of the day (0-24) the player chose with the slider; null = what the background says
   fogs = []; //      the mist colours of the world: { value, base }, tinted by the time of day
   mistNow = new THREE.Color('#e7e2d6');
   waterU = { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 } };
@@ -253,7 +252,7 @@ class BalanceView {
     this.whiteTex = white;
     this.#buildScene();
     this.#buildUi();
-    this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.cdEl, this.todBox, this.menu, this.result);
+    this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.cdEl, this.menu, this.result);
     ctx.container.append(this.root);
     this.#setScene(null);
 
@@ -817,7 +816,6 @@ class BalanceView {
 
   /** Show the world of a level (null = the menu). Only rebuilt when the bowl or the background changed, or when `force` is set. */
   #setScene(level, force = false) {
-    if (level !== this.currentLevel) this.tod = null; // a new level: back to its own time of day
     this.currentLevel = level;
     const sig = `${bowlKeyOf(level)}|${backgroundKeyOf(level)}`;
     if (force || sig !== this.sceneSig) {
@@ -828,9 +826,9 @@ class BalanceView {
   }
 
   // ── time of day ──
-  /** The hour that is shown: the slider (just for now), else the level's own `time`, else the background's `light.time`, else noon. */
+  /** The hour that is shown: the level's own `time`, else the background's `light.time`, else noon. */
   #hourNow() {
-    return this.tod ?? this.currentLevel?.time ?? this.bgFx.light?.time ?? 12;
+    return this.currentLevel?.time ?? this.bgFx.light?.time ?? 12;
   }
 
   /** Sun or moon, its colour, the sky light, the mist: all worked out from the hour. 6 = sunrise, 12 = noon, 18 = sunset, 0 = midnight. */
@@ -867,13 +865,6 @@ class BalanceView {
       this.scene.background.g *= tint[1];
       this.scene.background.b *= tint[2];
     }
-    if (this.todEl) this.todEl.value = String(h);
-    if (this.todIcon) this.todIcon.textContent = day > 0.3 ? '☀' : '☾';
-  }
-
-  #setTod(h) {
-    this.tod = h; // (only a preview: the next level goes back to its own time)
-    this.#applyDay();
   }
 
   /** Floor, table, bowl, water and the models of the background. */
@@ -946,7 +937,8 @@ class BalanceView {
     const profile = [...half(outer), ...half(inner).reverse()]; // the normals come out facing away from the wood
     const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain));
 
-    // the water: the inside of the bowl up to WATER_Y (a lathe too: the side, closed by a flat top)
+    // the water: the inside of the bowl up to WATER_Y (a lathe for the sides and the bottom) and a finely meshed GRID for the surface,
+    // which the vertex shader lifts into waves
     const wall = half(inner);
     const wp = [];
     for (let i = 0; i < wall.length; i++) {
@@ -960,23 +952,63 @@ class BalanceView {
         break;
       }
     }
-    wp.push(new THREE.Vector2(0, WATER_Y));
-    const water = new THREE.Mesh(this.#squareLathe(wp, bowl), this.#waterMaterial(bowl, plain));
-    water.renderOrder = 5;
+    const rw = wp[wp.length - 1].x; // half the width of the water surface
+    const rz = rw * bowl.zscale;
+    const yBot = bowl.rimY - bowl.b - bowl.t;
+    const f = THREE.MathUtils.clamp((WATER_Y - yBot) / (bowl.rimY - yBot), 0, 1);
+    const sq = Math.max(2, bowl.squareBottom + (bowl.square - bowl.squareBottom) * f * f * (3 - 2 * f)); // the outline is a superellipse |x/rw|^n + |z/rz|^n = 1
+    const foot = { rw, rz, n: sq };
+    const water = new THREE.Group();
+    const sides = new THREE.Mesh(this.#squareLathe(wp, bowl), this.#waterMaterial(bowl, plain, null));
+    const gridGeo = new THREE.PlaneGeometry(rw * 2.02, rz * 2.02, 150, 60);
+    gridGeo.rotateX(-Math.PI / 2);
+    const surface = new THREE.Mesh(gridGeo, this.#waterMaterial(bowl, plain, foot));
+    surface.position.y = WATER_Y;
+    sides.renderOrder = 5;
+    surface.renderOrder = 5;
+    surface.frustumCulled = false; // (the waves move it a little)
+    water.add(sides, surface);
     return [wood, water];
   }
 
-  /** Water: see-through blue with waves. Four crossing sine waves tilt the surface normal; the tilt bends the reflection (the texture of #reflectPass),
-   *  makes the sun glitter, and the surface takes the colour of the light of the day. (The waves are in the shading, not in the geometry.) */
-  #waterMaterial(bowl, plain = false) {
+  /**
+   * Water: see-through blue. The surface is a grid: the vertex shader lifts every point with a few crossing sine waves plus a slow value-noise swell
+   * (`waveH`), the fragment shader works the slope out of the same function. The slope bends the reflection (the texture of #reflectPass), makes
+   * the sun glitter, and the colour follows the light of the day. `foot` (the outline of the surface) is null for the sides of the water.
+   */
+  #waterMaterial(bowl, plain = false, foot = null) {
     const u = plain ? { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 }, ...this.#plainLight() } : { ...this.waterU, ...this.shadowU };
+    const WAVES = /* glsl */ `
+float whash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float wnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(whash(i), whash(i + vec2(1.0, 0.0)), f.x), mix(whash(i + vec2(0.0, 1.0)), whash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float waveH(vec2 p, float t) {
+  float h = 0.0;
+  h += 0.10 * sin(dot(p, vec2(0.95, 0.31)) * 0.55 + t * 1.0);
+  h += 0.05 * sin(dot(p, vec2(-0.37, 0.93)) * 0.90 + t * 1.3);
+  h += 0.02 * sin(dot(p, vec2(0.71, 0.71)) * 1.70 + t * 1.9);
+  h += (wnoise(p * 0.35 + vec2(t * 0.15, -t * 0.10)) - 0.5) * 0.20;
+  h += (wnoise(p * 0.95 - vec2(t * 0.25, t * 0.20)) - 0.5) * 0.06;
+  return h;
+}`;
     return new THREE.ShaderMaterial({
-      uniforms: { uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: bowl.water.opacity }, uTime: this.uTime, ...u },
+      uniforms: {
+        uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: bowl.water.opacity }, uTime: this.uTime, ...u,
+        uGrid: { value: foot ? 1 : 0 },
+        uFoot: { value: new THREE.Vector3(foot?.rw ?? 1, foot?.rz ?? 1, foot?.n ?? 2) },
+      },
       vertexShader: /* glsl */ `
 varying vec3 vW;
 varying vec3 vWN;
+uniform float uTime;
+uniform float uGrid;
+${WAVES}
 void main() {
   vec4 w = modelMatrix * vec4(position, 1.0);
+  if (uGrid > 0.5) w.y += waveH(w.xz, uTime);
   vW = w.xyz;
   vWN = normalize(mat3(modelMatrix) * normal);
   gl_Position = projectionMatrix * viewMatrix * w;
@@ -988,31 +1020,34 @@ varying vec3 vWN;
 uniform vec3 uColor;
 uniform float uOpacity;
 uniform float uTime;
+uniform float uGrid;
+uniform vec3 uFoot;
 uniform sampler2D uRefl;
 uniform mat4 uReflMat;
 uniform float uReflStr;
 uniform vec3 uLightDir;
 uniform vec3 uLightCol;
 uniform vec3 uAmbSky;
-vec2 waveSlope(vec2 p, float t) {
-  vec2 g = vec2(0.0);
-  g += vec2(1.0, 0.3) * (0.55 * 0.10 * cos(dot(p, vec2(1.0, 0.3)) * 0.55 + t * 1.0));
-  g += vec2(-0.4, 1.0) * (0.90 * 0.05 * cos(dot(p, vec2(-0.4, 1.0)) * 0.90 + t * 1.3));
-  g += vec2(0.7, 0.7) * (1.70 * 0.02 * cos(dot(p, vec2(0.7, 0.7)) * 1.70 + t * 1.9));
-  g += vec2(-0.9, -0.2) * (3.10 * 0.008 * cos(dot(p, vec2(-0.9, -0.2)) * 3.10 + t * 2.4));
-  return g;
-}
+${WAVES}
 void main() {
-  float top = smoothstep(0.55, 0.9, abs(normalize(vWN).y));
-  vec2 g = waveSlope(vW.xz, uTime);
-  vec3 N = normalize(mix(normalize(vWN), vec3(-g.x, 1.0, -g.y), top));
+  float top = 0.0;
+  vec3 N = normalize(vWN);
+  if (uGrid > 0.5) {
+    vec2 m = abs(vW.xz) / uFoot.xy;
+    if (pow(pow(m.x, uFoot.z) + pow(m.y, uFoot.z), 1.0 / uFoot.z) > 1.0) discard; // outside the bowl
+    float h0 = waveH(vW.xz, uTime);
+    float hx = waveH(vW.xz + vec2(0.12, 0.0), uTime);
+    float hz = waveH(vW.xz + vec2(0.0, 0.12), uTime);
+    N = normalize(vec3(-(hx - h0) / 0.12, 1.0, -(hz - h0) / 0.12));
+    top = 1.0;
+  }
   vec3 V = normalize(cameraPosition - vW);
   vec3 col = uColor * ((uAmbSky * 0.7 + uLightCol * 0.35) * 1.28); // the colour of the water follows the light of the day
   float alpha = uOpacity;
   float fres = pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 3.0);
   if (uReflStr > 0.0 && top > 0.0) {
     vec4 pr = uReflMat * vec4(vW, 1.0);
-    vec2 uv = pr.xy / pr.w + N.xz * 0.045; // the waves bend the mirror image
+    vec2 uv = pr.xy / pr.w + N.xz * 0.12; // the waves bend the mirror image
     vec3 refl = texture2D(uRefl, clamp(uv, 0.001, 0.999)).rgb;
     float k = clamp(uReflStr * (0.3 + 0.7 * fres), 0.0, 1.0) * top;
     col = mix(col, refl, k);
@@ -1020,6 +1055,7 @@ void main() {
   }
   float glint = pow(max(dot(N, normalize(uLightDir + V)), 0.0), 140.0) * top; // sun (or moon) glitter on the ripples
   col += uLightCol * (glint * 1.6);
+  col *= 0.94 + 0.12 * N.x * top; // a little shading across the waves
   alpha = clamp(alpha + glint * 0.6 + fres * 0.12 * top, 0.0, 1.0);
   gl_FragColor = vec4(col, alpha);
 }`,
@@ -1441,12 +1477,6 @@ void main() {
     this.restartBtn = el('button', { class: 'bb-btn', onclick: () => send({ restart: true }) }, 'Restart');
     this.levelsBtn = el('button', { class: 'bb-btn', onclick: () => send({ menu: true }) }, 'Levels');
     this.camBtn = el('button', { class: 'bb-btn', title: 'Back to the normal view (C)', onclick: () => this.#resetCamera() }, 'Reset camera');
-    // time of day: a small slider in the corner (double-click it to go back to the level's own time)
-    this.todIcon = el('span', { class: 'bb-tod-icon' }, '☀');
-    this.todEl = el('input', { type: 'range', min: '0', max: '24', step: '0.05', class: 'bb-tod-range', title: 'Look at another time of day (double-click: back to the time of the level)' });
-    this.todEl.addEventListener('input', () => this.#setTod(parseFloat(this.todEl.value)));
-    this.todEl.addEventListener('dblclick', () => this.#setTod(null));
-    this.todBox = el('div', { class: 'bb-tod' }, this.todIcon, this.todEl);
     this.#applyDay();
     this.hintEl = el('div', { class: 'bb-hint' });
     this.hud = el(

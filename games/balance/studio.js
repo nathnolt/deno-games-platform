@@ -1455,7 +1455,7 @@ function levelStudio(view, api) {
  * Every model is a collapsed row; "Camera to game view" puts the camera back where the game has it.
  */
 function backgroundStudio(view, api) {
-  const st = { lvl: 0, bg: '', sel: -1, snap: 0.5, rsnap: 5, tool: 'move', axis: 1, open: false, add: '', prev: null };
+  const st = { lvl: 0, bg: '', sel: -1, snap: 0.5, rsnap: 5, tool: 'none', axis: 1, open: false, add: '', prev: null };
   let applyTimer = 0;
   let drag = null;
   let askedAt = 0;
@@ -1546,9 +1546,11 @@ function backgroundStudio(view, api) {
         sel([['0', 'free'], ['1', '1°'], ['5', '5°'], ['15', '15°'], ['45', '45°']], String(st.rsnap), (v) => { st.rsnap = +v; }),
       ),
       h('div', { class: 'bb-st-row' },
-        h('div', { class: 'bb-st-seg' }, ...[['move', '✥ Move (W)'], ['rotate', '⟳ Rotate (R)'], ['scale', '⤢ Scale (S)']].map(([k, l]) => h('button', { type: 'button', class: st.tool === k ? 'bb-on' : '', onclick: () => setTool(k) }, l))),
+        h('div', { class: 'bb-st-seg' }, ...[['none', '∅ None (N)'], ['move', '✥ Move (W)'], ['rotate', '⟳ Rotate (R)'], ['scale', '⤢ Scale (S)']].map(([k, l]) => h('button', { type: 'button', class: st.tool === k ? 'bb-on' : '', onclick: () => setTool(k) }, l))),
         st.tool === 'rotate' ? h('div', { class: 'bb-st-seg', title: 'The axis the drag turns around' }, ...['x', 'y', 'z'].map((a, k) => h('button', { type: 'button', class: st.axis === k ? 'bb-on' : '', onclick: () => { st.axis = k; renderBar(); } }, a.toUpperCase()))) : null),
-      h('div', { class: 'bb-st-hint' }, st.tool === 'move'
+      h('div', { class: 'bb-st-hint' }, st.tool === 'none'
+        ? 'None: clicking in the view never touches a model, so you can tweak the settings without moving anything by accident. Camera: drag to turn, right-drag to move, wheel to zoom. Pick Move (W), Rotate (R) or Scale (S) to edit models in the view.'
+        : st.tool === 'move'
         ? 'Move: click a model in the view and drag it over the floor; Shift-drag lifts it (fast). Camera: drag the empty space to turn, right-drag to move, wheel to zoom. Delete removes the model.'
         : st.tool === 'rotate'
           ? 'Rotate: click a model and drag left / right to turn it around the chosen axis (Shift = slower). Q / E also turn it. Camera: drag the empty space.'
@@ -1678,6 +1680,7 @@ function backgroundStudio(view, api) {
   // ── the viewport: the pointer hook of the free camera ──
   const hook = {
     down(e) {
+      if (st.tool === 'none') return false;
       const i = view.debugModelAt(e.clientX, e.clientY);
       if (i === null || i === undefined || !inst(i)) return false;
       select(i, true);
@@ -1721,13 +1724,13 @@ function backgroundStudio(view, api) {
   const onKey = (e) => {
     if (!st.open || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
-    if (k === 'w' || k === 'r' || k === 's') { setTool({ w: 'move', r: 'rotate', s: 'scale' }[k]); return; }
+    if (k === 'n' || k === 'w' || k === 'r' || k === 's') { setTool({ n: 'none', w: 'move', r: 'rotate', s: 'scale' }[k]); return; }
     const m = st.sel === -1 ? null : inst(st.sel);
     if (!m) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       removeAt(st.sel);
-    } else if (k === 'q' || k === 'e') {
+    } else if ((k === 'q' || k === 'e') && st.tool !== 'none') {
       const sgn = k === 'q' ? -1 : 1;
       const step = st.rsnap > 0 ? st.rsnap : 5;
       m.rotation[st.axis] = ((m.rotation[st.axis] + sgn * (e.shiftKey ? 1 : step * 3)) % 360 + 360) % 360;

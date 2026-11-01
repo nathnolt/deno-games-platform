@@ -120,7 +120,8 @@ float fbm(vec2 p) {
   return s;
 }
 // caustics: the bright net the ripples of the water throw on whatever is under it (a tiling pattern of folded sines)
-float caustic(vec2 p, float t) {
+float caustic(vec2 uv, float t) {
+  vec2 p = mod(uv * 6.28318, 6.28318) - 250.0; // (the big offset matters: close to 0 the folding below blows up)
   vec2 i = p;
   float c = 1.0;
   for (int n = 0; n < 4; n++) {
@@ -130,7 +131,7 @@ float caustic(vec2 p, float t) {
   }
   c /= 4.0;
   c = 1.17 - pow(c, 1.4);
-  return pow(abs(c), 8.0);
+  return min(pow(abs(c), 8.0), 1.5);
 }
 vec4 finish(vec3 c, float a) {
   vec3 wn = normalize(vWN);
@@ -141,7 +142,7 @@ vec4 finish(vec3 c, float a) {
     vec2 m = abs(vW.xz) / uBowlHalf;
     float inside = 1.0 - smoothstep(0.9, 1.0, pow(pow(m.x, 4.0) + pow(m.y, 4.0), 0.25));
     vec2 q = vW.xz + uLightDir.xz / max(uLightDir.y, 0.3) * depth; // where the ray crossed the surface
-    float k = caustic(q * 0.3, uTime * 0.55) * (0.35 + 0.65 * clamp(dot(wn, uLightDir) + 0.4, 0.0, 1.0));
+    float k = caustic(q * 0.11, uTime * 0.55) * (0.35 + 0.65 * clamp(dot(wn, uLightDir) + 0.4, 0.0, 1.0));
     float fade = exp(-depth * 0.06) * smoothstep(0.0, 0.5, depth) * inside;
     L += uLightCol * (k * uCaus * fade * 2.4);
     c = mix(c, c * vec3(0.8, 0.93, 1.0), 0.55 * fade);
