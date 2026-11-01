@@ -13,11 +13,12 @@ const { Vec2 } = planck;
 
 const STEP = 1 / 120; //          fixed physics step (the platform ticks at 30 Hz, so ~4 physics steps per snapshot)
 const MAX_STEPS = 12; //          never do more than this per tick (protects the server if it falls behind)
+const WIN_SHOW = 2.6; //          seconds "level cleared" is shown before the game goes back to the level menu
 const FREEZE_AFTER = 5; //        stop simulating this long after the level has ended
 const FLOAT_SIDES = 24; //        circles are approximated by a polygon when computing buoyancy
 const BOWL_SEGMENTS = 36;
 const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along in every snapshot after a change
-// settleTime, settleSpeed and follow come from `tuning` (definitions.js)
+// countdown and follow come from `tuning` (definitions.js)
 const LAB_ID_START = 100000; //   ids of blocks spawned in the level lab (they never clash with the ids of a level's own blocks)
 const LAB_MAX_BLOCKS = 300;
 const FRAGILE_REST = 0.2; //      seconds a block must rest on a fragile one before it counts
@@ -148,7 +149,7 @@ class BalanceGame {
       left: this.#remaining(),
       total: this.total,
       why: this.why,
-      still: round2(clamp(this.settle / tuning.settleTime, 0, 1)),
+      still: round2(clamp(this.settle / (tuning.countdown ?? 3), 0, 1)), // progress of the countdown after the last block (0 = not running)
       ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, dfrom: this.defsFrom, derr: this.defsError, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
   }
@@ -484,6 +485,7 @@ class BalanceGame {
     const over = this.phase === PHASE.WON || this.phase === PHASE.LOST;
     if (over) {
       this.endedFor += dt;
+      if (this.phase === PHASE.WON && !this.lab.on && this.endedFor > WIN_SHOW) return this.#toMenu(); // "level cleared" has been shown: back to the levels
       if (this.endedFor > FREEZE_AFTER) return; // nothing left to see: stop spending CPU
     }
 
@@ -595,7 +597,6 @@ class BalanceGame {
 
   #rules(dt) {
     const zone = zoneOf(levels[this.levelIdx]);
-    let still = true;
     for (const rec of this.recs.values()) {
       if (rec.static || rec.held) continue;
       const body = rec.body;
@@ -607,14 +608,12 @@ class BalanceGame {
           if (ce.contact.isTouching() && this.recOf.get(ce.other)?.kind === 'bowl') return this.#lose(LOSE.BOWL);
         }
       }
-      const v = body.getLinearVelocity();
-      if (Math.hypot(v.x, v.y) > tuning.settleSpeed || Math.abs(body.getAngularVelocity()) > tuning.settleSpeed) still = false;
     }
 
-    // won: every block is placed and the whole structure has stayed still for a moment
-    if (this.#remaining() === 0 && still) {
+    // won: every block is placed and a countdown has run out (no check for stability: only losing blocks into the water or the bowl matters)
+    if (this.#remaining() === 0) {
       this.settle += dt;
-      if (this.settle >= tuning.settleTime) {
+      if (this.settle >= (tuning.countdown ?? 3)) {
         this.phase = PHASE.WON;
         this.endedFor = 0;
       }

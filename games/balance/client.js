@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y,
+  HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 import { flatNormals, parseObj } from './obj.js';
 import { SHADOW_GLSL, shaders, transparentShaders, vertexShader } from './shaders.js';
@@ -182,6 +182,12 @@ class BalanceView {
   groundY = -9; //           top of the table (set from the bowl of the level)
   bowlDef = null;
   currentLevel = null;
+  userCam = { yaw: 0, pitch: 0, zoom: 1, pan: new THREE.Vector3() }; // the player's own view change on top of the fitted camera
+  fit = null; //            { pos, target } of the fitted camera (what 'reset camera' goes back to)
+  world = null; //          the three.js group of the table, bowl and water
+  worldKey = null; //       key of the world whose levels the menu shows
+  worldBtns = [];
+  userDrag = null; //       { x, y, pan } while the player drags the camera
   freeCam = null; //         debug: orbit camera state, null = the normal fitted camera
   camDrag = null;
   dropHelper = null; //      debug: wireframe of the drop zone
@@ -231,7 +237,7 @@ class BalanceView {
     this.whiteTex = white;
     this.#buildScene();
     this.#buildUi();
-    this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.menu, this.result);
+    this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.cdEl, this.menu, this.result);
     ctx.container.append(this.root);
     this.#setScene(null);
 
@@ -1320,18 +1326,20 @@ void main() {
     // level menu
     this.cardsEl = el('div', { class: 'bb-cards' });
     this.menuSub = el('p', { class: 'bb-menu-sub' });
-    this.menu = el('div', { class: 'bb-menu' }, el('div', { class: 'bb-menu-inner' }, el('h1', { class: 'bb-menu-title' }, meta.name), this.menuSub, this.cardsEl));
+    this.worldsEl = el('div', { class: 'bb-worlds' }); // navigation at the top of the level menu: one button per world
+    this.menu = el('div', { class: 'bb-menu' }, el('div', { class: 'bb-menu-inner' }, el('h1', { class: 'bb-menu-title' }, meta.name), this.menuSub, this.worldsEl, this.cardsEl));
     this.#buildCards();
 
     // in-game HUD
     this.titleEl = el('div', { class: 'bb-title' });
     this.legend = el('div', { class: 'bb-legend' });
     this.leftEl = el('div', { class: 'bb-left' });
-    this.barFill = el('div', { class: 'bb-bar-fill' });
-    this.barEl = el('div', { class: 'bb-bar' }, this.barFill);
-    this.barLabel = el('div', { class: 'bb-bar-label' }, 'Hold steady…');
+    // the countdown after the last block: a white pill in the middle of the screen, a green dot appears at every third of it
+    this.dots = [0, 1, 2].map(() => el('span', { class: 'bb-dot3' }));
+    this.cdEl = el('div', { class: 'bb-count' }, el('div', { class: 'bb-pill' }, ...this.dots));
     this.restartBtn = el('button', { class: 'bb-btn', onclick: () => send({ restart: true }) }, 'Restart');
     this.levelsBtn = el('button', { class: 'bb-btn', onclick: () => send({ menu: true }) }, 'Levels');
+    this.camBtn = el('button', { class: 'bb-btn', title: 'Back to the normal view (C)', onclick: () => this.#resetCamera() }, 'Reset camera');
     this.hintEl = el('div', { class: 'bb-hint' });
     this.hud = el(
       'div',
@@ -1340,8 +1348,8 @@ void main() {
         'div',
         { class: 'bb-hud-top' },
         el('div', { class: 'bb-hud-left' }, this.titleEl, this.legend),
-        el('div', { class: 'bb-hud-mid' }, this.leftEl, this.barEl, this.barLabel),
-        el('div', { class: 'bb-hud-btns' }, ...(this.spectator ? [] : [this.restartBtn, this.levelsBtn])),
+        el('div', { class: 'bb-hud-mid' }, this.leftEl),
+        el('div', { class: 'bb-hud-btns' }, this.camBtn, ...(this.spectator ? [] : [this.restartBtn, this.levelsBtn])),
       ),
       this.hintEl,
     );
@@ -1353,33 +1361,46 @@ void main() {
     this.result = el('div', { class: 'bb-result' }, el('div', { class: 'bb-result-box' }, this.resultTitle, this.resultText, this.resultBtns));
   }
 
-  /** One card per level. Built again when the levels change (debug menu). */
+  /** The world navigation and one card per level of the chosen world. Built again when the levels change (debug menu). */
   #buildCards() {
-    this.cards = levels.map((lv, i) =>
+    const keys = Object.keys(worlds);
+    if (!keys.includes(this.worldKey)) this.worldKey = keys[0];
+    const inWorld = (k) => levels.map((lv, i) => [lv, i]).filter(([lv]) => worldKeyOf(lv) === k);
+    this.worldBtns = keys.map((k) => el('button', {
+      class: `bb-world${k === this.worldKey ? ' bb-on' : ''}${inWorld(k).length && inWorld(k).every(([, i]) => this.done.has(i)) ? ' bb-complete' : ''}`,
+      onclick: () => { this.worldKey = k; this.#buildCards(); },
+    }, worlds[k].name));
+    this.worldsEl.replaceChildren(...this.worldBtns);
+    this.worldsEl.classList.toggle('bb-hide', keys.length < 2);
+    const own = inWorld(this.worldKey);
+    this.cards = own.map(([lv, i], n) =>
       el(
         'button',
-        { class: `bb-card bb-d-${lv.difficulty}`, disabled: this.spectator, onclick: () => !this.spectator && this.ctx.sendInput({ start: i }) },
-        el('span', { class: 'bb-num' }, String(i + 1)),
+        { class: `bb-card bb-d-${lv.difficulty}`, 'data-lv': String(i), disabled: this.spectator, onclick: () => !this.spectator && this.ctx.sendInput({ start: i }) },
+        el('span', { class: 'bb-num' }, String(n + 1)),
         el('span', { class: 'bb-card-name' }, lv.name),
         el('span', { class: 'bb-card-meta' }, `${lv.difficulty} · ${lv.shapes.length} blocks`),
         el('span', { class: 'bb-done', title: 'Completed' }, '✓'),
       ));
-    this.cardsEl.replaceChildren(...this.cards);
+    this.cardsEl.replaceChildren(...(this.cards.length ? this.cards : [el('p', { class: 'bb-empty' }, 'No levels in this world yet.')]));
     this.#markDone();
   }
 
   #markDone() {
-    this.cards.forEach((c, i) => c.classList.toggle('bb-complete', this.done.has(i)));
+    this.cards.forEach((c) => c.classList.toggle('bb-complete', this.done.has(+c.dataset.lv)));
+    Object.keys(worlds).forEach((k, n) => {
+      const own = levels.map((lv, i) => [lv, i]).filter(([lv]) => worldKeyOf(lv) === k);
+      this.worldBtns[n]?.classList.toggle('bb-complete', own.length > 0 && own.every(([, i]) => this.done.has(i)));
+    });
   }
 
   /** Built once when the level ends (never on every snapshot: replacing a button under the pointer swallows the click). */
   #fillResult(ph, s) {
     const btn = (label, d, primary) => el('button', { class: `bb-btn${primary ? ' bb-primary' : ''}`, disabled: this.spectator, onclick: () => this.ctx.sendInput(d) }, label);
     if (ph === PHASE.WON) {
-      this.resultTitle.textContent = 'Level complete!';
-      this.resultText.textContent = `All ${s.total} blocks are standing.`;
-      const next = s.lv + 1 < levels.length;
-      this.resultBtns.replaceChildren(...(next ? [btn('Next level', { start: s.lv + 1 }, true)] : []), btn('Replay', { restart: true }, !next), btn('Levels', { menu: true }));
+      this.resultTitle.textContent = 'Level cleared';
+      this.resultText.textContent = '';
+      this.resultBtns.replaceChildren(); // the server takes everybody back to the levels by itself
     } else {
       this.resultTitle.textContent = 'Level lost';
       this.resultText.textContent = LOSE_TEXT[s.why] ?? '';
@@ -1394,19 +1415,24 @@ void main() {
     this.legend.classList.toggle('bb-hide', solo);
     this.hintEl.textContent = this.spectator
       ? 'Spectating'
-      : 'Press a block on the table, drag it above the bowl and let go to drop it (red = not here, it goes back) · Q / E or mouse wheel turns it by 45° · right-click or X puts it back';
+      : 'Press a block on the table, drag it above the bowl and let go to drop it (red = not here, it goes back) · Q / E or mouse wheel turns it by 45° · right-click or X puts it back · drag the background to turn the camera, wheel zooms, right-drag moves (C resets)';
 
     const playing = s.ph !== PHASE.MENU;
     this.hud.classList.toggle('bb-hide', !playing);
     if (!playing) return;
     const lv = levels[s.lv];
-    this.titleEl.textContent = lv ? `${s.lv + 1}. ${lv.name}` : '';
+    const inWorld = levels.filter((l) => worldKeyOf(l) === worldKeyOf(lv));
+    this.titleEl.textContent = lv ? `${worlds[worldKeyOf(lv)]?.name ?? ''} · ${inWorld.indexOf(lv) + 1}. ${lv.name}` : '';
     this.titleEl.dataset.diff = lv?.difficulty ?? '';
     this.leftEl.textContent = `Blocks left: ${s.left} / ${s.total}`;
-    const settling = s.ph === PHASE.PLAY && s.left === 0 && s.still > 0;
-    this.barEl.classList.toggle('bb-show', settling);
-    this.barLabel.classList.toggle('bb-show', settling);
-    this.barFill.style.width = `${Math.round(s.still * 100)}%`;
+    const counting = s.ph === PHASE.PLAY && s.left === 0 && s.still > 0;
+    this.cdEl.classList.toggle('bb-show', counting);
+    this.dots.forEach((d, i) => d.classList.toggle('bb-on', counting && s.still >= (i + 1) / 3 - 0.01));
+    const wk = worldKeyOf(lv);
+    if (wk !== this.worldKey) { // the menu we come back to shows the world of this level
+      this.worldKey = wk;
+      this.#buildCards();
+    }
   }
 
   // ── layout ──
@@ -1443,6 +1469,34 @@ void main() {
       this.camera.updateMatrixWorld(true);
       if (key.every((k) => { p.copy(k).project(this.camera); return Math.abs(p.x) <= 0.94 && Math.abs(p.y) <= 0.94 && p.z < 1; })) break;
     }
+    this.fit = { pos: this.camera.position.clone(), target };
+    this.#applyUserCam();
+  }
+
+  /** The fitted camera, turned / moved / zoomed by what the player did with the mouse. */
+  #applyUserCam() {
+    const u = this.userCam;
+    if (this.freeCam || !this.fit) return;
+    if (!u.yaw && !u.pitch && u.zoom === 1 && u.pan.lengthSq() === 0) return; // untouched: the fitted camera as it is
+    const off = this.fit.pos.clone().sub(this.fit.target);
+    const len = off.length() * u.zoom;
+    const yaw = Math.atan2(off.x, off.z) + u.yaw;
+    const pitch = THREE.MathUtils.clamp(Math.asin(off.y / off.length()) + u.pitch, 0.05, 1.45);
+    const target = this.fit.target.clone().add(u.pan);
+    const cp = Math.cos(pitch);
+    this.camera.position.set(target.x + len * cp * Math.sin(yaw), target.y + len * Math.sin(pitch), target.z + len * cp * Math.cos(yaw));
+    this.camera.lookAt(target);
+    this.camera.updateMatrixWorld(true);
+  }
+
+  /** Back to the camera the game fits to the table. */
+  #resetCamera() {
+    const u = this.userCam;
+    u.yaw = 0;
+    u.pitch = 0;
+    u.zoom = 1;
+    u.pan.set(0, 0, 0);
+    this.#fitCamera();
   }
 
   #frame = () => {
@@ -1815,12 +1869,21 @@ void main() {
       this.renderer.domElement.setPointerCapture(e.pointerId);
       return;
     }
-    if (this.snap?.ph !== PHASE.PLAY || e.button !== 0) return;
+    // the camera: drag empty space to turn it, right / middle button (or Shift) to move it
+    const startCam = () => {
+      this.userDrag = { x: e.clientX, y: e.clientY, pan: e.button !== 0 || e.shiftKey };
+      this.renderer.domElement.setPointerCapture(e.pointerId);
+    };
+    if (e.button !== 0) {
+      if (!this.#carrying()) startCam();
+      return;
+    }
+    if (this.snap?.ph !== PHASE.PLAY) return startCam();
     const p = this.#toWorld(e);
-    if (!p) return;
+    if (!p) return startCam();
     if (this.mode !== 'none') return;
     const id = this.#tableAt();
-    if (id === null) return;
+    if (id === null) return startCam();
     const v = this.tableViews.get(id);
     // the block's centre, seen along the line of sight, lands at this point of the play plane: start there, no jump
     const cam = this.camera.position;
@@ -1840,6 +1903,27 @@ void main() {
   #onMove = (e) => {
     if (this.hookDrag) {
       this.camHook?.move(e);
+      return;
+    }
+    if (this.userDrag) {
+      const d = this.userDrag;
+      const dx = e.clientX - d.x;
+      const dy = e.clientY - d.y;
+      d.x = e.clientX;
+      d.y = e.clientY;
+      const u = this.userCam;
+      if (d.pan) {
+        const k = this.camera.position.distanceTo(this.fit?.target ?? new THREE.Vector3()) * 0.0016;
+        u.pan.addScaledVector(new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 0), -dx * k);
+        u.pan.addScaledVector(new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 1), dy * k);
+        u.pan.x = THREE.MathUtils.clamp(u.pan.x, -80, 80);
+        u.pan.y = THREE.MathUtils.clamp(u.pan.y, -40, 60);
+        u.pan.z = THREE.MathUtils.clamp(u.pan.z, -80, 80);
+      } else {
+        u.yaw = THREE.MathUtils.clamp(u.yaw - dx * 0.005, -1.05, 1.05);
+        u.pitch = THREE.MathUtils.clamp(u.pitch + dy * 0.005, -0.4, 1.0);
+      }
+      this.#applyUserCam();
       return;
     }
     if (this.freeCam) {
@@ -1878,6 +1962,10 @@ void main() {
       this.camHook?.up(e);
       return;
     }
+    if (this.userDrag) {
+      this.userDrag = null;
+      return;
+    }
     if (this.freeCam) {
       this.camDrag = null;
       return;
@@ -1900,7 +1988,12 @@ void main() {
       this.freeCam.dist = THREE.MathUtils.clamp(this.freeCam.dist * Math.exp(e.deltaY * 0.001), 5, 900);
       return;
     }
-    if (!this.#carrying()) return;
+    if (!this.#carrying()) { // nothing in your hand: the wheel zooms the camera
+      e.preventDefault();
+      this.userCam.zoom = THREE.MathUtils.clamp(this.userCam.zoom * Math.exp(e.deltaY * 0.001), 0.4, 2.2);
+      this.#applyUserCam();
+      return;
+    }
     e.preventDefault();
     if (performance.now() - (this.lastWheel ?? 0) < 140) return; // one notch = one step (a wheel sends several events per notch)
     this.lastWheel = performance.now();
@@ -1924,6 +2017,7 @@ void main() {
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     if ((k === 'q' || k === 'e') && this.#carrying()) this.#turn(k === 'q' ? 1 : -1);
     else if (k === 'x') this.#putBack();
+    else if (k === 'c') this.#resetCamera();
   };
 
   /** Turn the block we hold one step (45°) to the left (+1) or right (-1). */

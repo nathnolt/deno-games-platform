@@ -25,13 +25,12 @@ import { createStudio } from './studio.js';
 import { clone, h, NS, svg } from './ui.js';
 
 const STORE = 'balance.debug.defs';
-const PHYSICS = new Set(['tuning', 'materials', 'shapes', 'bowls', 'levels']);
+const PHYSICS = new Set(['tuning', 'materials', 'shapes', 'bowls', 'levels', 'worlds']);
 
 const TUNING_HELP = {
   gravity: 'units / s². Applies at restart.',
   waterDensity: 'How hard the water pushes floating blocks up. Applies at restart.',
-  settleTime: 'Seconds the tower must stand still after the last block to win.',
-  settleSpeed: '"Still" = every block slower than this.',
+  countdown: 'Seconds from the last placed block until the level is cleared (no stability check). The three green dots appear at every third.',
   follow: 'How fast a held block chases the pointer.',
   depth: 'Thickness of every block (z).',
   chamfer: 'Size of the 45° bevel on every block edge.',
@@ -221,6 +220,7 @@ export function createDebugMenu(view) {
     materials: (k) => draft.levels.filter((l) => l.initialBlocks.some((b) => b.material === k) || l.shapes.some((b) => b.material === k)).map((l) => `level "${l.name}"`),
     bowls: (k) => draft.levels.filter((l) => l.bowl === k).map((l) => `level "${l.name}"`),
     backgrounds: (k) => draft.levels.filter((l) => l.background === k).map((l) => `level "${l.name}"`),
+    worlds: (k) => draft.levels.filter((l) => l.world === k).map((l) => `level "${l.name}"`),
     models: (k) => [
       ...Object.entries(draft.backgrounds).filter(([, b]) => (b.models ?? []).some((m) => m.model === k)).map(([n]) => `background "${n}"`),
       ...Object.entries(draft.bowls).filter(([, b]) => b.model?.model === k).map(([n]) => `bowl "${n}"`),
@@ -231,6 +231,7 @@ export function createDebugMenu(view) {
     materials: (a, b) => draft.levels.forEach((l) => [...l.initialBlocks, ...l.shapes].forEach((x) => { if (x.material === a) x.material = b; })),
     bowls: (a, b) => draft.levels.forEach((l) => { if (l.bowl === a) l.bowl = b; }),
     backgrounds: (a, b) => draft.levels.forEach((l) => { if (l.background === a) l.background = b; }),
+    worlds: (a, b) => draft.levels.forEach((l) => { if (l.world === a) l.world = b; }),
     models: (a, b) => {
       Object.values(draft.backgrounds).forEach((bg) => (bg.models ?? []).forEach((m) => { if (m.model === a) m.model = b; }));
       Object.values(draft.bowls).forEach((bw) => { if (bw.model?.model === a) bw.model.model = b; });
@@ -280,6 +281,7 @@ export function createDebugMenu(view) {
   // ── tabs ─────────────────────────────────────────────────────────────────────────────────────────────────
   const TABS = {
     settings: { label: 'Settings', render: tabSettings },
+    worlds: { label: 'Worlds', render: tabWorlds },
     levels: { label: 'Levels', render: tabLevels },
     shapes: { label: 'Shapes', render: tabShapes },
     materials: { label: 'Materials', render: tabMaterials },
@@ -327,7 +329,7 @@ export function createDebugMenu(view) {
     const out = [
       h('div', { class: 'bb-dbg-row' }, s,
         btn('New', () => {
-          L.push({ name: `Level ${L.length + 1}`, difficulty: 'easy', bowl: keys('bowls')[0], background: keys('backgrounds')[0], initialBlocks: [], chooseShapes: 3, shapes: [{ shape: shapeOpts[0], material: matOpts[0] }] });
+          L.push({ name: `Level ${L.length + 1}`, difficulty: 'easy', world: lv.world ?? keys('worlds')[0], bowl: keys('bowls')[0], background: keys('backgrounds')[0], initialBlocks: [], chooseShapes: 3, shapes: [{ shape: shapeOpts[0], material: matOpts[0] }] });
           state.sel.level = L.length - 1;
           touch('levels');
           render();
@@ -345,6 +347,7 @@ export function createDebugMenu(view) {
       section('Level',
         text('name', lv, 'name', 'levels'),
         select('difficulty', ['easy', 'medium', 'hard'], lv, 'difficulty', 'levels'),
+        select('world', keys('worlds'), lv, 'world', 'levels'),
         select('bowl', keys('bowls'), lv, 'bowl', 'levels'),
         select('background', keys('backgrounds'), lv, 'background', 'levels'),
         num('blocks on the table', lv, 'chooseShapes', 'levels', { int: true, min: 1 }),
@@ -480,6 +483,14 @@ export function createDebugMenu(view) {
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),
       note('Block shaders (wood, glass, stone1, stone2, float) use the face of the block; 3D shaders (wood2, ceramic, bark ...) work everywhere.'),
     );
+    return out;
+  }
+
+  function tabWorlds() {
+    draft.worlds ??= {};
+    const out = [tableBar('worlds', 'world', 'world', () => ({ name: 'New world' })), note('A level belongs to one world (set it in the Levels tab). The level menu shows a button per world.')];
+    const w = draft.worlds[state.sel.world];
+    if (w) out.push(section('World', text('name', w, 'name', 'worlds')));
     return out;
   }
 
@@ -782,6 +793,7 @@ export function createDebugMenu(view) {
         btn('Restore them', () => {
           draft = state.pending;
           state.pending = null;
+          draft.worlds ??= S.cloneDefinitions().worlds;
           PHYSICS.forEach((k) => touch(k));
           touch('backgrounds');
           render();

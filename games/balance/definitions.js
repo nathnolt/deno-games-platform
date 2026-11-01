@@ -6,20 +6,20 @@
 //   bowls         the bowls the tower is built in (a generated bowl, optionally drawn with a model instead)
 //   models        .obj files in ./models and which shader draws each part of them (models are only used for backgrounds / bowls)
 //   backgrounds   the scenery around the table: ground, mist and placed models
+//   worlds        the groups the levels are shown in
 //   levels        what to build, with which blocks, in which bowl and in front of which background
 //
 // With `DEBUG = true` in shared.js the in-game debug menu edits all of this live and exports a new copy of this file
 // (Export tab: "Download definitions.js"). You can also edit this file by hand.
 
 // ── Tuning ───────────────────────────────────────────────────────────────────────────────────────────────────
-// Server (physics): gravity, waterDensity, settleTime, settleSpeed, follow. These apply when a level (re)starts.
+// Server (physics): gravity, waterDensity, countdown, follow. These apply when a level (re)starts.
 // Look: depth, chamfer, camera.
 // World units: x = right, y = up (y = 0 is the surface of the water), z = towards the camera.
 export const tuning = {
   gravity: 30, //          units / s²  (a bit heavy, so blocks feel chunky rather than floaty)
   waterDensity: 1, //      material density = weight / 10, so weight 10 == as dense as water
-  settleTime: 2, //        seconds everything must be (almost) still after the last block to win
-  settleSpeed: 0.25, //    "still" = linear and angular speed below this
+  countdown: 3, //         seconds of the countdown after the last block is placed (three green dots appear, one per third); then the level is cleared
   follow: 30, //           how quickly a held block chases its player's pointer
 
   depth: 2.4, //           thickness of every block along z
@@ -199,8 +199,17 @@ export const backgrounds = {
   },
 };
 
+// ── Worlds ───────────────────────────────────────────────────────────────────────────────────────────────────
+// Levels are grouped in worlds: the menu shows a row of worlds at the top and the levels of the chosen one below it.
+// A level names its world with `world: 'key'` (the first world when it names none).
+export const worlds = {
+  world1: { name: 'World 1' },
+  world2: { name: 'World 2' },
+};
+
 // ── Levels ───────────────────────────────────────────────────────────────────────────────────────────────────
 // name, difficulty     shown in the menu (easy | medium | hard)
+// world                key of `worlds`: the world this level is part of
 // bowl, background     keys of `bowls` / `backgrounds` (the first one of each when left out)
 // initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)
 //                      'static' material = fixed to the world. Anything else is a normal physics body.
@@ -212,6 +221,7 @@ export const backgrounds = {
 export const levels = [
   {
     name: 'Level 1',
+    world: 'world1',
     difficulty: 'easy',
     bowl: 'bowl1',
     background: 'zen1',

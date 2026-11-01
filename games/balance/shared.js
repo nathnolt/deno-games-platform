@@ -4,13 +4,16 @@
 // This file is the logic around it: helpers, wire constants, validation, and the code the debug menu uses to edit and export it.
 
 import { backgrounds, bowls, levels, materials, models, shapes, tuning } from './definitions.js';
-export { backgrounds, bowls, levels, materials, models, shapes, tuning };
+import * as DEFS from './definitions.js';
+/** The worlds the levels are grouped in (a definitions.js without any gets one world holding everything). */
+const worlds = DEFS.worlds ?? { main: { name: 'Levels' } };
+export { backgrounds, bowls, levels, materials, models, shapes, tuning, worlds };
 
 /**
  * Debug menu switch. true = the in-game debug menu is available (the ` key or the button at the bottom left) and the server
  * accepts definition changes from the players. Leave it false for a real game: anybody in the room could change the rules.
  */
-export const DEBUG = true;
+export const DEBUG = false;
 
 /** @type {import('../../shared/settings.js').GameMeta} */
 export const meta = {
@@ -169,6 +172,8 @@ export const BACKGROUND_DEFAULTS = {
 };
 
 export const bowlKeyOf = (level) => (level?.bowl && bowls[level.bowl] ? level.bowl : Object.keys(bowls)[0]);
+/** The world a level belongs to (the first world when it names none or an unknown one). */
+export const worldKeyOf = (level) => (level?.world && worlds[level.world] ? level.world : Object.keys(worlds)[0]);
 export const backgroundKeyOf = (level) => (level?.background && backgrounds[level.background] ? level.background : Object.keys(backgrounds)[0]);
 
 /** The bowl of a level, with every missing field filled in. */
@@ -242,9 +247,9 @@ export const LOSE_TEXT = {
 };
 
 // ── Definitions: copy, replace, check, export ────────────────────────────────────────────────────────────────
-const TABLES = ['tuning', 'materials', 'shapes', 'bowls', 'models', 'backgrounds', 'levels'];
+const TABLES = ['tuning', 'materials', 'shapes', 'bowls', 'models', 'backgrounds', 'worlds', 'levels'];
 export const DEFINITION_TABLES = TABLES;
-const live = { tuning, materials, shapes, bowls, models, backgrounds, levels };
+const live = { tuning, materials, shapes, bowls, models, backgrounds, worlds, levels };
 
 /** A deep copy of all definitions (plain JSON data). */
 export function cloneDefinitions() {
@@ -302,9 +307,10 @@ export function validateDefinitions(defs, extra = {}) {
 
   // tuning
   const t = d.tuning ?? {};
-  for (const k of ['gravity', 'waterDensity', 'settleTime', 'settleSpeed', 'follow', 'depth', 'chamfer', 'frontZ', 'hoverZ', 'slotGap', 'maxHoldX', 'maxHoldY', 'minHoldY']) {
+  for (const k of ['gravity', 'waterDensity', 'follow', 'depth', 'chamfer', 'frontZ', 'hoverZ', 'slotGap', 'maxHoldX', 'maxHoldY', 'minHoldY']) {
     if (!isNum(t[k])) err(`tuning.${k}: not a number`);
   }
+  if (t.countdown !== undefined && !(isNum(t.countdown) && t.countdown >= 0.5 && t.countdown <= 60)) err('tuning.countdown must be from 0.5 to 60 seconds');
   if (isNum(t.gravity) && t.gravity <= 0) err('tuning.gravity must be above 0');
   if (isNum(t.depth) && t.depth < 0.3) err('tuning.depth must be at least 0.3');
   if (isNum(t.chamfer) && isNum(t.depth) && (t.chamfer < 0 || t.chamfer > t.depth / 2 - 0.02)) err('tuning.chamfer must be between 0 and half the depth');
@@ -397,6 +403,11 @@ export function validateDefinitions(defs, extra = {}) {
     });
   }
 
+  // worlds
+  const wds = d.worlds ?? {};
+  if (Object.keys(wds).length === 0) err('there must be at least one world');
+  for (const [k, w] of Object.entries(wds)) if (typeof w?.name !== 'string' || !w.name) err(`world ${k}: needs a name`);
+
   // levels
   const lvs = d.levels ?? [];
   if (lvs.length === 0) err('there must be at least one level');
@@ -404,6 +415,7 @@ export function validateDefinitions(defs, extra = {}) {
     const w = `level ${i + 1} (${l.name})`;
     if (typeof l.name !== 'string' || !l.name) err(`${w}: needs a name`);
     if (!['easy', 'medium', 'hard'].includes(l.difficulty)) err(`${w}: difficulty must be easy, medium or hard`);
+    if (l.world !== undefined && !wds[l.world]) err(`${w}: unknown world "${l.world}"`);
     if (l.bowl !== undefined && !bw[l.bowl]) err(`${w}: unknown bowl "${l.bowl}"`);
     if (l.background !== undefined && !bgs[l.background]) err(`${w}: unknown background "${l.background}"`);
     if (!Number.isInteger(l.chooseShapes) || l.chooseShapes < 1) err(`${w}: chooseShapes must be a whole number of at least 1`);
@@ -459,6 +471,7 @@ export function serializeDefinitions(defs) {
     '//   bowls         the bowls the tower is built in',
     '//   models        .obj files in ./models and the shader of each part',
     '//   backgrounds   the scenery around the table',
+    '//   worlds        the groups the levels are shown in (a level names its world)',
     '//   levels        what to build, in which bowl, in front of which background',
     '',
   ];
