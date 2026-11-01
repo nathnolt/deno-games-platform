@@ -46,13 +46,13 @@ export let DEPTH = 2.4;
 export let FRONT_Z = 17;
 export let HOVER_Z = 4.5;
 export let SLOT_GAP = 17;
-export let MAX_HOLD_X = 45;
+export let MAX_HOLD_X = 120;
 export let MAX_HOLD_Y = 60;
 export let MIN_HOLD_Y = -25;
 /** Default sideways limit. A block whose centre leaves it loses the level. Levels can override with `zone`. */
 export const ZONE = { x0: -30, x1: 30 };
 /** The DROP ZONE: let go of a block with its centre inside and it falls into the play area; let go outside and it goes back to the table. */
-export const DROP = { x0: -23, x1: 23, y0: 1.5, y1: 100 };
+export const DROP = { x0: -120, x1: 120, y0: 1.5, y1: 100 };
 /** What the camera must always show. Height follows the window aspect, but never less than h. */
 export const VIEW = { w: 84, h: 46, cy: 10 };
 
@@ -72,11 +72,11 @@ export function syncDefinitions() {
   FRONT_Z = num(t.frontZ, 17);
   HOVER_Z = num(t.hoverZ, 4.5);
   SLOT_GAP = num(t.slotGap, 17);
-  MAX_HOLD_X = num(t.maxHoldX, 45);
+  MAX_HOLD_X = num(t.maxHoldX, 120);
   MAX_HOLD_Y = num(t.maxHoldY, 60);
   MIN_HOLD_Y = num(t.minHoldY, -25);
   Object.assign(ZONE, { x0: -30, x1: 30 }, t.zone);
-  Object.assign(DROP, { x0: -23, x1: 23, y0: 1.5, y1: 100 }, t.drop);
+  Object.assign(DROP, { x0: -120, x1: 120, y0: 1.5, y1: 100 }, t.drop);
   Object.assign(VIEW, { w: 84, h: 46, cy: 10 }, t.view);
   SHAPE_KEYS = Object.keys(shapes);
   MATERIAL_KEYS = Object.keys(materials);
@@ -155,12 +155,16 @@ export function getShape(key) {
 // ── Bowls and backgrounds ────────────────────────────────────────────────────────────────────────────────────
 export const BOWL_DEFAULTS = {
   a: 18, b: 9, t: 1, rimY: 1, r: 4, zscale: 0.7, square: 5, squareBottom: 2, shader: 'bowlwood',
-  water: { color: '#3d9bff', opacity: 0.4 },
+  water: { color: '#3d9bff', opacity: 0.4, reflect: 0.6 }, // reflect: 0 = a plain pane, 1 = a mirror (the water mirrors the scenery)
 };
 export const BACKGROUND_DEFAULTS = {
   mist: '#e7e2d6',
   fog: [150, 520],
-  ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2 },
+  ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2, style: 'sand' },
+  blur: 3, //          how much the scenery behind the table is blurred (pixels, 0 = sharp)
+  light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4 }, // where the light comes from (towards the light) and how dark its shadows are (0 = no shadows)
+  bowlHeight: 4, // how high the bowl stands above the floor (= the thickness of the table)
+  box: { w: 110, d: 52, z: 2, shader: 'floorwood' }, // the plain wooden table: width (x), depth (z), centre z, shader (unused when `table` is a model)
   models: [],
 };
 
@@ -176,7 +180,7 @@ export function bowlOf(level) {
 /** The background of a level, with every missing field filled in. */
 export function backgroundOf(level) {
   const b = backgrounds[backgroundKeyOf(level)] ?? {};
-  return { ...BACKGROUND_DEFAULTS, ...b, ground: { ...BACKGROUND_DEFAULTS.ground, ...b.ground }, models: b.models ?? [] };
+  return { ...BACKGROUND_DEFAULTS, ...b, ground: { ...BACKGROUND_DEFAULTS.ground, ...b.ground }, light: { ...BACKGROUND_DEFAULTS.light, ...b.light }, box: { ...BACKGROUND_DEFAULTS.box, ...b.box }, models: b.models ?? [] };
 }
 
 /** Height of the table top = the outside of the bottom of the bowl. The waiting blocks lie on it. */
@@ -317,6 +321,7 @@ export function validateDefinitions(defs, extra = {}) {
   for (const [k, m] of Object.entries(mats)) {
     if (!isNum(m.friction ?? 10)) err(`material ${k}: friction is not a number`);
     if (!isNum(m.weight ?? 10)) err(`material ${k}: weight is not a number`);
+    if (m.floatLevel !== undefined && !(m.floatLevel > 0 && m.floatLevel <= 1)) err(`material ${k}: floatLevel must be above 0 and at most 1`);
     if (m.stackLimit !== undefined && !(Number.isInteger(m.stackLimit) && m.stackLimit >= 0 && m.stackLimit <= 20)) err(`material ${k}: stackLimit must be a whole number from 0 to 20`);
     shaderOk(m.shader, `material ${k}`);
   }
@@ -345,6 +350,7 @@ export function validateDefinitions(defs, extra = {}) {
     if (isNum(b.r) && isNum(b.a) && (b.r <= 0 || b.r > b.a - 0.05)) err(`bowl ${k}: r must be above 0 and at most a`);
     if (isNum(b.zscale) && b.zscale <= 0.1) err(`bowl ${k}: zscale must be above 0.1`);
     for (const f of ['square', 'squareBottom']) if (b[f] !== undefined && (!isNum(b[f]) || b[f] < 2)) err(`bowl ${k}: ${f} must be 2 or more`);
+    if (b.water?.reflect !== undefined && !(isNum(b.water.reflect) && b.water.reflect >= 0 && b.water.reflect <= 1)) err(`bowl ${k}: water.reflect must be from 0 to 1`);
     shaderOk(b.shader ?? BOWL_DEFAULTS.shader, `bowl ${k}`);
     if (b.model) {
       if (!d.models?.[b.model.model]) err(`bowl ${k}: unknown model "${b.model.model}"`);
@@ -364,6 +370,25 @@ export function validateDefinitions(defs, extra = {}) {
   if (Object.keys(bgs).length === 0) err('there must be at least one background');
   for (const [k, b] of Object.entries(bgs)) {
     if (typeof b.mist !== 'string') err(`background ${k}: mist must be a colour`);
+    if (b.blur !== undefined && !(isNum(b.blur) && b.blur >= 0 && b.blur <= 30)) err(`background ${k}: blur must be a number from 0 to 30`);
+    if (b.light !== undefined) {
+      if (b.light.dir !== undefined && !isVec3(b.light.dir)) err(`background ${k}: light.dir needs 3 numbers`);
+      if (b.light.shadow !== undefined && !(isNum(b.light.shadow) && b.light.shadow >= 0 && b.light.shadow <= 1)) err(`background ${k}: light.shadow must be from 0 to 1`);
+    }
+    if (b.ground?.style !== undefined && !['sand', 'wood'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand or wood`);
+    if (b.box !== undefined) {
+      for (const f of ['w', 'd']) if (b.box[f] !== undefined && !(isNum(b.box[f]) && b.box[f] >= 10 && b.box[f] <= 1000)) err(`background ${k}: box.${f} must be a number from 10 to 1000`);
+      if (b.box.z !== undefined && !isNum(b.box.z)) err(`background ${k}: box.z must be a number`);
+      if (b.box.shader !== undefined) shaderOk(b.box.shader, `background ${k}, table box`);
+    }
+    if (b.bowlHeight !== undefined && !(isNum(b.bowlHeight) && b.bowlHeight >= 0 && b.bowlHeight <= 100)) err(`background ${k}: bowlHeight must be a number from 0 to 100`);
+    if (b.table) {
+      const m = b.table;
+      if (!d.models?.[m.model]) err(`background ${k}, table: unknown model "${m.model}"`);
+      if (!isNum(m.scale) || m.scale <= 0) err(`background ${k}, table: scale must be above 0`);
+      if (!isVec3(m.rotation)) err(`background ${k}, table: rotation needs 3 numbers`);
+      if (!isVec3(m.translate)) err(`background ${k}, table: translate needs 3 numbers`);
+    }
     (b.models ?? []).forEach((m, i) => {
       if (!d.models?.[m.model]) err(`background ${k}, model #${i + 1}: unknown model "${m.model}"`);
       if (!isNum(m.scale) || m.scale <= 0) err(`background ${k}, model #${i + 1}: scale must be above 0`);

@@ -29,12 +29,12 @@ export const tuning = {
   hoverZ: 4.5, //          z of a block you hold: it floats in front of everything
   slotGap: 17, //          the waiting blocks lie in a row this far apart (centre to centre)
 
-  maxHoldX: 45, //         how far sideways a held block may be carried
+  maxHoldX: 120, //         how far sideways a held block may be carried
   maxHoldY: 60, //         how high above the water
   minHoldY: -25, //        and how low (the waiting blocks are closer to the camera, so their pick-up point is a bit low)
 
   zone: { x0: -30, x1: 30 }, //                       default sideways limit: a block whose centre leaves it loses the level
-  drop: { x0: -23, x1: 23, y0: 1.5, y1: 100 }, //     default DROP ZONE (invisible): let go of a block inside it and it falls into the bowl
+  drop: { x0: -120, x1: 120, y0: 1.5, y1: 100 }, //     default DROP ZONE (invisible): let go of a block inside it and it falls into the bowl
   view: { w: 84, h: 46, cy: 10 }, //                  what the camera must always show (width, height, centre height)
   camera: { fov: 28, pitch: 20, targetY: 8 }, //      vertical field of view, degrees the camera looks down, height it looks at
 };
@@ -42,6 +42,7 @@ export const tuning = {
 // ── Materials ────────────────────────────────────────────────────────────────────────────────────────────────
 // friction: 0..20 (mu = friction / 20)         weight: density, 10 = same density as water (mass = area * weight / 10)
 // static:   never moves                        float: dynamic, pushed up by the water, never counts as "fallen in the water"
+// floatLevel: (float blocks) how deep it sits in the water when it floats alone: 0.5 = half under, 1 = just under. It never sinks, but it tilts.
 // stackLimit: how many blocks may rest on top of this block (directly or through other blocks). One more and it breaks.
 //           The block wears a coloured dot: green = nothing on it, orange = 1, red = 2 (= the limit), and it shatters at limit + 1.
 // shader:   name of a GLSL shader in client/shaders.js
@@ -51,7 +52,7 @@ export const materials = {
   glass: { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
   stone: { friction: 14, weight: 20, shader: 'stone1' },
   static: { static: true, friction: 12, shader: 'stone2' },
-  floatBlock: { float: true, friction: 8, weight: 3, shader: 'float' },
+  floatBlock: { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
 };
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ export const bowls = {
     square: 6.4,
     squareBottom: 5.9,
     shader: 'bowlwood',
-    water: { color: '#71b5fe', opacity: 0.45 },
+    water: { color: '#71b5fe', opacity: 0.45, reflect: 0.6 },
   },
   bowl2: {
     a: 22,
@@ -101,7 +102,7 @@ export const bowls = {
     square: 3,
     squareBottom: 2,
     shader: 'ceramic',
-    water: { color: '#6cc3d5', opacity: 0.45 },
+    water: { color: '#6cc3d5', opacity: 0.45, reflect: 0.6 },
   },
 };
 
@@ -121,6 +122,11 @@ export const models = {
   lantern: { file: 'lantern.obj', shader: 'stone1', shaders: { light: 'paper' } },
   bamboo: { file: 'bamboo.obj', shaders: { stalk: 'bamboo', leaves: 'leaves' } },
   mountain: { file: 'mountain.obj', shader: 'mountain' },
+  board: { file: 'board.obj', shader: 'floorwood' },
+  window: { file: 'window.obj', shader: 'mahogany' },                       // 24 x 30, origin at the middle of the bottom edge
+  wall: { file: 'wall.obj', shaders: { plaster: 'plaster', trim: 'mahogany' } }, // 200 x 90 with a hole for the window (x -12..12, y 4..34)
+  plant: { file: 'plant.obj', shaders: { pot: 'ceramic', soil: 'bark', leaves: 'leaves' } },
+  stones: { file: 'stones.obj', shader: 'blackstone' },                      // three small black stones stacked up
 };
 
 // ── Backgrounds ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -129,6 +135,11 @@ export const models = {
 //   mist    colour of the sky and of the far distance (everything fades into it)
 //   fog     [near, far] distance from the camera where models start / finish fading into the mist
 //   ground  raked sand around the table: colorA / colorB are the two sand tones the rake lines alternate between, ripple = how tight the rake lines are
+//   blur    how much the scenery is blurred (pixels; 0 = sharp), light  { dir: [x, y, z] towards the light, shadow: 0..1 how dark the shadows are }
+//   ground.style  'sand' (rake lines) or 'wood' (planks)
+//   bowlHeight  how high the bowl stands above the floor (the thickness of the table), default 4
+//   box     the plain wooden table: { w, d, z, shader } = width (x), depth (z), z of its centre, shader (default 110, 52, 2, floorwood)
+//   table   optional: a model for the table top instead of the plain wooden box { model, scale, rotation, translate } (translate y = 0 is the floor)
 //   models  [{ model, scale, rotation: [x, y, z] in degrees, translate: [x, y, z] }]
 export const backgrounds = {
   zen1: {
@@ -159,6 +170,24 @@ export const backgrounds = {
       { model: 'lantern', scale: 2, rotation: [0, 200, 0], translate: [66, 0, 30] },
       { model: 'mountain', scale: 6, rotation: [0, 30, 0], translate: [60, 0, -320] },
       { model: 'mountain', scale: 4.5, rotation: [0, 0, 0], translate: [-140, 0, -280] },
+    ],
+  },
+
+  // indoors: a plaster wall with a mahogany window behind the bowl, wooden floor, plants, three stacked black stones
+  room1: {
+    mist: '#f3ecdd',
+    fog: [220, 700],
+    ground: { colorA: '#7e4f2c', colorB: '#a46c3c', ripple: 2.2, style: 'wood' },
+    blur: 3,
+    light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4 },
+    models: [
+      { model: 'wall', scale: 1.6, rotation: [0, 0, 0], translate: [0, 0, -62] },
+      { model: 'window', scale: 1.6, rotation: [0, 0, 0], translate: [0, 6.4, -61.4] },
+      { model: 'plant', scale: 1.7, rotation: [0, 20, 0], translate: [-50, 0, -46] },
+      { model: 'plant', scale: 2.1, rotation: [0, 140, 0], translate: [56, 0, -44] },
+      { model: 'plant', scale: 1.3, rotation: [0, 70, 0], translate: [-72, 0, 12] },
+      { model: 'stones', scale: 1.4, rotation: [0, 30, 0], translate: [74, 0, 14] },
+      { model: 'mountain', scale: 4, rotation: [0, 0, 0], translate: [0, 0, -330] }, // seen through the window
     ],
   },
 };

@@ -27,6 +27,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const round2 = (v) => Math.round(v * 100) / 100;
 const round3 = (v) => Math.round(v * 1000) / 1000;
 const rad = (deg) => (deg * Math.PI) / 180;
+const snapDeg = (deg) => Math.round(deg / 45) * 45; // held blocks only turn in steps of 45°
 
 /**
  * Clip a polygon (array of {x,y}) to the half-plane y <= y0 and return the area and centroid of what is left.
@@ -178,7 +179,7 @@ class BalanceGame {
     } else if (p.held) {
       if (Number.isFinite(d.x)) p.held.tx = clamp(d.x, -MAX_HOLD_X, MAX_HOLD_X);
       if (Number.isFinite(d.y)) p.held.ty = clamp(d.y, MIN_HOLD_Y, MAX_HOLD_Y);
-      if (Number.isFinite(d.rot)) p.held.trot = rad(clamp(d.rot, -1e5, 1e5));
+      if (Number.isFinite(d.rot)) p.held.trot = rad(snapDeg(clamp(d.rot, -1e5, 1e5)));
     }
   }
 
@@ -295,7 +296,7 @@ class BalanceGame {
     if (!item) return; // somebody else was faster, or it is not on the table
     const x = clamp(Number.isFinite(d.x) ? d.x : 0, -MAX_HOLD_X, MAX_HOLD_X);
     const y = clamp(Number.isFinite(d.y) ? d.y : 0, MIN_HOLD_Y, MAX_HOLD_Y);
-    const rot = Number.isFinite(d.rot) ? rad(d.rot) : 0;
+    const rot = Number.isFinite(d.rot) ? rad(snapDeg(d.rot)) : 0;
     item.heldBy = id;
     const rec = this.#makeBlock(item, x, y, rot, true, p.slot);
     p.held = { item, rec, tx: x, ty: y, trot: rot };
@@ -310,13 +311,22 @@ class BalanceGame {
     p.held = null;
   }
 
+  /** Does the held block overlap a block that is already on the board? (It is a sensor, so its contacts tell us.) Such a block cannot be placed. */
+  #overlaps(rec) {
+    for (let ce = rec.body.getContactList(); ce; ce = ce.next) {
+      const other = this.recOf.get(ce.other);
+      if (other && other.kind === 'block' && !other.held && ce.contact.isTouching()) return true;
+    }
+    return false;
+  }
+
   /** Let go. Always lets go: inside the drop zone the block falls into the play area, outside it returns to the table. */
   #drop(p) {
     const h = p.held;
     if (!h) return;
     const level = levels[this.levelIdx];
     const pos = h.rec.body.getPosition();
-    if (!this.lab.on && !inDrop(level, pos.x, pos.y)) return this.#putBack(p); // (the level lab lets you drop anywhere)
+    if (!this.lab.on && (!inDrop(level, pos.x, pos.y) || this.#overlaps(h.rec))) return this.#putBack(p); // (the level lab lets you drop anywhere)
 
     const angle = h.rec.body.getAngle();
     const item = h.item;
@@ -437,6 +447,8 @@ class BalanceGame {
       mi: MATERIAL_KEYS.indexOf(item.material),
       static: isStatic,
       float: !!mat.float,
+      floatLevel: mat.floatLevel ?? 0,
+      buoy: null,
       held,
       owner,
       bad: false,
@@ -490,7 +502,7 @@ class BalanceGame {
       const pos = p.held.rec.body.getPosition();
       const inside = inDrop(level, pos.x, pos.y);
       if (inside) p.held.rec.armed = true;
-      p.held.rec.bad = !this.lab.on && p.held.rec.armed && !inside; // red = you have taken it out of the drop zone again (letting go sends it back to the table)
+      p.held.rec.bad = !this.lab.on && ((p.held.rec.armed && !inside) || this.#overlaps(p.held.rec)); // red = you have taken it out of the drop zone again (letting go sends it back to the table)
     }
     if (this.phase === PHASE.PLAY && !this.lab.paused) this.#fragile(dt);
     if (this.phase === PHASE.PLAY && (!this.lab.on || this.lab.rules)) this.#rules(dt); // (the level lab can switch the rules back on to test failing)
@@ -560,12 +572,15 @@ class BalanceGame {
     for (const rec of this.floaters) {
       const b = rec.body;
       let wet = 0;
+      // floatLevel: how much of the block is under water when it floats alone (0.5 = half). The push is scaled so that it never sinks
+      // below that for long (a full push of 1 / floatLevel times its weight), but it still tilts: the push acts at the middle of the wet part.
+      rec.buoy ??= rec.floatLevel > 0 && rec.area > 0 ? b.getMass() / (rec.floatLevel * rec.area * WATER_DENSITY) : 1;
       for (const poly of rec.floatPolys) {
         const world = poly.map((q) => b.getWorldPoint(new Vec2(q.x, q.y)));
         const { area, cx, cy } = clipBelow(world, WATER_Y);
         if (area > 1e-6) {
           wet += area;
-          b.applyForce(new Vec2(0, WATER_DENSITY * GRAVITY * area), new Vec2(cx, cy), true);
+          b.applyForce(new Vec2(0, WATER_DENSITY * rec.buoy * GRAVITY * area), new Vec2(cx, cy), true);
         }
       }
       const f = rec.area > 0 ? Math.min(1, wet / rec.area) : 0;

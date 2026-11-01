@@ -5,7 +5,7 @@ import {
   HOVER_Z, levels, LOSE_TEXT, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y,
 } from './shared.js';
 import { flatNormals, parseObj } from './obj.js';
-import { shaders, transparentShaders, vertexShader } from './shaders.js';
+import { SHADOW_GLSL, shaders, transparentShaders, vertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
 function loadStyles() {
@@ -18,10 +18,12 @@ function loadStyles() {
 }
 
 const SEND_GAP = 33; //          ms between move messages (~30 per second)
-const ROTATE_SPEED = 150; //     degrees per second while Q / E is held
-const WHEEL_STEP = 15; //        degrees per mouse-wheel notch
+const ROTATE_STEP = 45; //       a held block turns in steps of this many degrees (Q / E, or the mouse wheel)
 const BOWL_SEGS = 72;
+const SHADOW_SIZE = 2048; //     resolution of the shadow map
+const SHADOW_RANGE = 95; //      half the width of the area the light shades (world units around the table)
 const LAMP = ['#22c55e', '#f97316', '#ef4444']; // lamp on a fragile block: nothing on it, something on it, at its limit
+const TABLE_INDEX = -2; // the instance number of the table model in the background studio (the models of the background are 0, 1, 2 ...)
 const TABLE = { w: 110, d: 52, h: 4, z: 2 }; // the wooden table the bowl and the waiting blocks stand on (its top is the bottom of the bowl)
 
 /** A colour as the raw numbers of its hex code: for our own shaders, which write colours to the screen without any conversion. */
@@ -153,6 +155,20 @@ class BalanceView {
   dotGeo = Object.assign(new THREE.CircleGeometry(1, 32), { userData: { shared: true } }); // the stack-limit lamp on glass
   shardGeo = Object.assign(new THREE.BoxGeometry(1, 1, 1), { userData: { shared: true } });
   shards = []; //            pieces of a block that just broke: { mesh, vx, vy, vz, spin, life }
+  // visual effects (see #renderAll): shadows from a light, a blurred background, a reflective water surface. A pass that throws is switched off.
+  fx = { off: new Set(), shadowRT: null, shadowCam: null, depthMat: null, reflRT: null, reflCam: null, blurA: null, blurB: null, quad: null };
+  shadowU = {
+    uShadowMap: { value: null },
+    uShadowMat: { value: new THREE.Matrix4() },
+    uShadowStr: { value: 0 },
+    uShadowTexel: { value: new THREE.Vector2(1 / SHADOW_SIZE, 1 / SHADOW_SIZE) },
+  };
+  waterU = { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 } };
+  bgFx = { blur: 0, light: null };
+  scenery = null; //  the part of the world that is blurred: the floor and the models of the background
+  mainGroup = null; // the table, the bowl and the water
+  floorMesh = null;
+  water = null;
   instGroups = new Map(); // debug: background model instance index -> its 3D group (the background studio picks and moves them)
   selIndex = null; //       debug: selected instance
   selBox = null; //         debug: box drawn around it
@@ -191,7 +207,6 @@ class BalanceView {
   grab = { x: 0, y: 0 }; //          pointer-to-block-centre offset, so the block does not jump
   modeTime = 0;
   downAt = { x: 0, y: 0, t: 0 };
-  keys = { q: false, e: false };
   lastSent = 0;
   raf = 0;
   lastFrame = performance.now();
@@ -205,6 +220,11 @@ class BalanceView {
     this.ctx = ctx; // ctx.me.slot is -1 for spectators: they watch the same physics, no input
     this.spectator = ctx.me.slot < 0;
     loadStyles();
+    const white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); // stands in until a pass has made a real texture
+    white.needsUpdate = true;
+    this.shadowU.uShadowMap.value = white;
+    this.waterU.uRefl.value = white;
+    this.whiteTex = white;
     this.#buildScene();
     this.#buildUi();
     this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.menu, this.result);
@@ -224,7 +244,6 @@ class BalanceView {
       c.addEventListener('wheel', this.#onWheel, { passive: false });
       c.addEventListener('contextmenu', this.#onContext);
       window.addEventListener('keydown', this.#onKeyDown);
-      window.addEventListener('keyup', this.#onKeyUp);
     }
     this.onRoom(ctx.room);
     this.raf = requestAnimationFrame(this.#frame);
@@ -323,7 +342,6 @@ class BalanceView {
     c.removeEventListener('wheel', this.#onWheel);
     c.removeEventListener('contextmenu', this.#onContext);
     window.removeEventListener('keydown', this.#onKeyDown);
-    window.removeEventListener('keyup', this.#onKeyUp);
     this.disposed = true;
     this.debug?.dispose();
     this.#clearViews();
@@ -331,6 +349,9 @@ class BalanceView {
     this.#clearModelGeo();
     this.#disposeTree(this.scene);
     this.#disposeTree(this.frontScene);
+    for (const k of ['shadowRT', 'reflRT', 'blurA', 'blurB']) this.fx[k]?.dispose();
+    this.fx.depthMat?.dispose();
+    this.fx.quad?.mat.dispose();
     this.markerGeo.dispose();
     this.dotGeo.dispose();
     this.shardGeo.dispose();
@@ -470,7 +491,7 @@ class BalanceView {
         group = new THREE.Group();
         parts.forEach((p, i) => {
           const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
-          group.add(new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide)));
+          group.add(new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, null, true)));
         });
         scene.add(group);
         const box = new THREE.Box3().setFromObject(group);
@@ -490,6 +511,14 @@ class BalanceView {
         renderer.dispose();
       },
     };
+  }
+
+  /** Debug: switch one visual effect ('shadows', 'reflection', 'blur') off or on (it also comes back on after it had failed). */
+  debugFx(name, on) {
+    if (on) this.fx.off.delete(name);
+    else this.fx.off.add(name);
+    if (!on && name === 'shadows') this.shadowU.uShadowStr.value = 0;
+    if (!on && name === 'reflection') this.waterU.uReflStr.value = 0;
   }
 
   /** The free camera back at the place the game puts it. */
@@ -646,17 +675,17 @@ class BalanceView {
         floor.rotation.x = -Math.PI / 2;
         floor.position.y = groundY - TABLE.h;
         content.add(floor);
-        const table = new THREE.Mesh(new THREE.BoxGeometry(tableW, TABLE.h, TABLE.d), this.#blockMaterial('floorwood', 0.7));
+        const table = new THREE.Mesh(new THREE.BoxGeometry(tableW, TABLE.h, TABLE.d), this.#blockMaterial('floorwood', 0.7, THREE.FrontSide, null, true));
         table.position.set(0, groundY - TABLE.h / 2, TABLE.z);
         content.add(table);
-        const [wood, water] = this.#bowlMeshes(bowl);
+        const [wood, water] = this.#bowlMeshes(bowl, true);
         content.add(wood, water);
 
         let x = -rowW / 2;
         let top = bowl.rimY;
         for (const it of built) {
           const group = new THREE.Group();
-          const mat = this.#blockMaterial(it.shader, (x * 0.13 + 1) % 1);
+          const mat = this.#blockMaterial(it.shader, (x * 0.13 + 1) % 1, THREE.FrontSide, null, true);
           const outlines = it.shape.visual ? it.shape.visual.map((v) => v.pts) : it.shape.parts.map((q) => (q.type === 'circle' ? circleOutline(q) : q.pts));
           for (const pts of outlines) group.add(new THREE.Mesh(chamferedPrism(pts, depth, chamfer), mat));
           group.position.set(x + it.shape.w / 2, groundY + it.shape.h / 2, FRONT_Z);
@@ -762,44 +791,58 @@ class BalanceView {
     this.scene.add(world);
     this.bowlDef = bowl;
     this.groundY = groundYOf(bowl);
-    const floorY = this.groundY - TABLE.h;
+    const bowlH = bg.bowlHeight ?? TABLE.h; // how high the bowl (= the top of the table) stands above the floor
+    const floorY = this.groundY - bowlH;
     this.floorY = floorY;
     this.scene.background = new THREE.Color(bg.mist);
     const fog = { uFogColor: { value: rawColor(bg.mist) }, uFog: { value: new THREE.Vector2(bg.fog?.[0] ?? 150, bg.fog?.[1] ?? 520) } };
 
-    // the ground: raked sand. Ripples run around the table like around a rock, and the far end fades into mist.
+    // the world is two groups: the SCENERY (floor, models of the background: this is what the blur pass blurs) and the MAIN part (table, bowl, water)
+    const scenery = (this.scenery = new THREE.Group());
+    const main = (this.mainGroup = new THREE.Group());
+    world.add(scenery, main);
+    this.bgFx = { blur: bg.blur ?? 0, light: bg.light ?? null, mist: bg.mist };
+
+    // the ground: raked sand or wooden planks. Ripples run around the table like around a rock, and the far end fades into mist.
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = floorY;
-    world.add(floor);
+    scenery.add(floor);
+    this.floorMesh = floor;
 
-    // the table: a 3D wooden rectangle. The bowl stands on it at the back, the waiting blocks lie on it at the front.
-    const table = new THREE.Mesh(new THREE.BoxGeometry(TABLE.w, TABLE.h, TABLE.d), this.#blockMaterial('floorwood', 0.7));
-    table.position.set(0, this.groundY - TABLE.h / 2, TABLE.z);
-    world.add(table);
+    // the table: a 3D wooden rectangle (or a model). The bowl stands on it at the back, the waiting blocks lie on it at the front.
+    if (bg.table?.model && models[bg.table.model]) {
+      this.#addModel(main, bg.table, token, floorY, fog, TABLE_INDEX); // a model instead of the plain box
+    } else {
+      const th = Math.max(bowlH, 0.05);
+      const table = new THREE.Mesh(new THREE.BoxGeometry(bg.box.w, th, bg.box.d), this.#blockMaterial(bg.box.shader, 0.7));
+      table.position.set(0, this.groundY - th / 2, bg.box.z);
+      main.add(table);
+    }
 
     // the bowl: the profile turned around the vertical axis (flat bottom, rounded corners), or a model if the bowl has one
     const [wood, water] = this.#bowlMeshes(bowl);
     if (bowl.model) {
       wood.geometry.dispose();
       wood.material.dispose();
-      this.#addModel(world, bowl.model, token, 0, null);
+      this.#addModel(main, bowl.model, token, 0, null);
     } else {
-      world.add(wood);
+      main.add(wood);
     }
-    world.add(water);
+    main.add(water);
+    this.water = water;
 
     // the scenery
-    bg.models.forEach((inst, i) => this.#addModel(world, inst, token, floorY, fog, i));
+    bg.models.forEach((inst, i) => this.#addModel(scenery, inst, token, floorY, fog, i));
     this.#fitCamera();
   }
 
   /** The two meshes of a generated bowl: the wood (turned profile, outer wall up and inner wall down) and the water inside it. */
-  #bowlMeshes(bowl) {
+  #bowlMeshes(bowl, plain = false) {
     const { inner, outer } = bowlProfile(BOWL_SEGS, bowl);
     const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y)); // from the middle of the flat bottom up to the rim
     const profile = [...half(outer), ...half(inner).reverse()]; // the normals come out facing away from the wood
-    const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide));
+    const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain));
 
     // the water: the inside of the bowl up to WATER_Y (a lathe too: the side, closed by a flat top)
     const wall = half(inner);
@@ -816,12 +859,54 @@ class BalanceView {
       }
     }
     wp.push(new THREE.Vector2(0, WATER_Y));
-    const water = new THREE.Mesh(
-      this.#squareLathe(wp, bowl),
-      new THREE.MeshBasicMaterial({ color: bowl.water.color, transparent: true, opacity: bowl.water.opacity, depthWrite: false, side: THREE.DoubleSide }),
-    );
+    const water = new THREE.Mesh(this.#squareLathe(wp, bowl), this.#waterMaterial(bowl, plain));
     water.renderOrder = 5;
     return [wood, water];
+  }
+
+  /** Water: see-through blue, and its top mirrors what is behind and above it (the reflection texture of #reflectPass), more at a low viewing angle. */
+  #waterMaterial(bowl, plain = false) {
+    return new THREE.ShaderMaterial({
+      uniforms: { uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: bowl.water.opacity }, uTime: this.uTime, ...(plain ? { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 } } : this.waterU) },
+      vertexShader: /* glsl */ `
+varying vec3 vW;
+varying vec3 vWN;
+void main() {
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vW = w.xyz;
+  vWN = normalize(mat3(modelMatrix) * normal);
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`,
+      fragmentShader: /* glsl */ `
+precision highp float;
+varying vec3 vW;
+varying vec3 vWN;
+uniform vec3 uColor;
+uniform float uOpacity;
+uniform float uTime;
+uniform sampler2D uRefl;
+uniform mat4 uReflMat;
+uniform float uReflStr;
+void main() {
+  float top = smoothstep(0.55, 0.9, abs(normalize(vWN).y));
+  vec3 col = uColor;
+  float alpha = uOpacity;
+  if (uReflStr > 0.0 && top > 0.0) {
+    vec4 pr = uReflMat * vec4(vW, 1.0);
+    vec2 ripple = vec2(sin(vW.x * 1.9 + uTime * 1.3) + sin(vW.z * 2.7 - uTime * 0.9), cos(vW.x * 2.3 - uTime * 1.1) + sin(vW.z * 1.7 + uTime * 1.2)) * 0.0025;
+    vec2 uv = pr.xy / pr.w + ripple;
+    vec3 refl = texture2D(uRefl, clamp(uv, 0.001, 0.999)).rgb;
+    float fres = pow(1.0 - clamp(dot(normalize(cameraPosition - vW), vec3(0.0, 1.0, 0.0)), 0.0, 1.0), 2.5);
+    float k = clamp(uReflStr * (0.35 + 0.65 * fres), 0.0, 1.0) * top;
+    col = mix(col, refl, k);
+    alpha = mix(alpha, 1.0, k * 0.85);
+  }
+  gl_FragColor = vec4(col, alpha);
+}`,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
   }
 
   #floorMaterial(bg, fog) {
@@ -832,8 +917,10 @@ class BalanceView {
         uA: { value: rawColor(bg.ground.colorA) },
         uB: { value: rawColor(bg.ground.colorB) },
         uRipple: { value: bg.ground.ripple },
-        uHalf: { value: new THREE.Vector2(TABLE.w / 2, TABLE.d / 2) },
-        uC: { value: new THREE.Vector2(0, TABLE.z) },
+        uHalf: { value: new THREE.Vector2((bg.box?.w ?? TABLE.w) / 2, (bg.box?.d ?? TABLE.d) / 2) },
+        uC: { value: new THREE.Vector2(0, bg.box?.z ?? TABLE.z) },
+        uStyle: { value: bg.ground.style === 'wood' ? 1 : 0 },
+        ...this.shadowU,
       },
       vertexShader: /* glsl */ `
 varying vec3 vW;
@@ -852,6 +939,8 @@ uniform vec3 uB;
 uniform float uRipple;
 uniform vec2 uHalf;
 uniform vec2 uC;
+uniform float uStyle;
+${SHADOW_GLSL}
 float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
@@ -867,7 +956,19 @@ void main() {
   rake = mix(0.5, rake, 1.0 - smoothstep(70.0, 220.0, dc)); // far away the lines would shimmer: let them melt into plain sand
   vec3 sand = mix(uA, uB, rake);
   sand *= 0.97 + 0.06 * noise(vW.xz * 2.5);
+  if (uStyle > 0.5) { // wooden planks: rows 6 units wide, boards 36 long, every row shifted
+    float row = floor(vW.z / 6.0);
+    float off = hash(vec2(row, 1.0)) * 40.0;
+    float col = floor((vW.x + off) / 36.0);
+    vec3 base = mix(uA, uB, hash(vec2(row, col)));
+    base *= 0.88 + 0.22 * noise(vec2((vW.x + off) * 0.25, vW.z * 3.0));
+    float fy = fract(vW.z / 6.0);
+    float fx = fract((vW.x + off) / 36.0);
+    float seam = min(min(fy, 1.0 - fy) * 6.0, min(fx, 1.0 - fx) * 36.0);
+    sand = base * (0.6 + 0.4 * smoothstep(0.0, 0.25, seam));
+  }
   sand *= 0.7 + 0.3 * smoothstep(0.0, 10.0, dist); // the table's soft shadow
+  sand *= shadowAt(vW, vec3(0.0, 1.0, 0.0));
   gl_FragColor = vec4(mix(sand, uMist, smoothstep(uFogRange.x * 0.9, uFogRange.y, dc)), 1.0);
 }`,
     });
@@ -1003,7 +1104,7 @@ void main() {
   }
 
   /** One ShaderMaterial per block; the time uniform is shared by all of them. */
-  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null) {
+  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false) {
     const transparent = transparentShaders.has(shaderName);
     return new THREE.ShaderMaterial({
       vertexShader,
@@ -1015,6 +1116,7 @@ void main() {
         uBad: { value: 0 },
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
         uFog: fog?.uFog ?? { value: new THREE.Vector2(1e6, 2e6) }, // blocks never fade; background models do
+        ...(plain ? { uShadowMap: { value: this.whiteTex }, uShadowMat: { value: new THREE.Matrix4() }, uShadowStr: { value: 0 }, uShadowTexel: { value: new THREE.Vector2(1, 1) } } : this.shadowU), // (the little preview windows are other WebGL contexts: no shared textures)
       },
       transparent,
       depthWrite: !transparent,
@@ -1156,16 +1258,34 @@ void main() {
     return { x: c.x + (x - c.x) * t, y: c.y + (y - c.y) * t, z: HOVER_Z, s: t, a };
   }
 
+  /**
+   * Blocks wait lying flat on the table (tilt 0 = face up). While you carry one it stands up the higher you lift it:
+   * upright (tilt 1) once its centre is as high as the drop zone starts.
+   */
+  #tiltAt(v, y) {
+    const camY = this.camera.position;
+    const kk = camY.z / (camY.z - FRONT_Z);
+    const base = camY.y + (this.groundY + DEPTH / 2 - camY.y) * kk; // where a block lying on the table is seen in the play plane
+    const full = (this.currentLevel ? dropOf(this.currentLevel) : DROP).y0;
+    const t = THREE.MathUtils.clamp((y - base) / Math.max(1, full - base), 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
   #target(v) {
     if (v.table) {
       const p = slotPos(v.slot, v.n, v.shapeKey, this.groundY);
-      return { x: p.x, y: p.y, z: FRONT_Z, s: 1, a: 0 };
+      return { x: p.x, y: this.groundY + DEPTH / 2, z: FRONT_Z, s: 1, a: 0, tl: 0 };
     }
     if (v.st === BODY.HELD || v.st === BODY.HELD_BAD) {
-      if (v.owner === this.ctx.me.slot && this.#carrying()) return this.#hoverPose(this.local.x, this.local.y, (this.local.rot * Math.PI) / 180);
-      return this.#hoverPose(v.tx, v.ty, v.ta);
+      const mine = v.owner === this.ctx.me.slot && this.#carrying();
+      const [x, y, a] = mine ? [this.local.x, this.local.y, (this.local.rot * Math.PI) / 180] : [v.tx, v.ty, v.ta];
+      const pose = this.#hoverPose(x, y, a);
+      pose.tl = this.#tiltAt(v, y);
+      // a lying block is only DEPTH thick: lower its centre so it rests on the table instead of floating half its height above it
+      pose.y -= (1 - pose.tl) * (v.size.h / 2 - DEPTH / 2);
+      return pose;
     }
-    return { x: v.tx, y: v.ty, z: PLAY_Z, s: 1, a: v.ta };
+    return { x: v.tx, y: v.ty, z: PLAY_Z, s: 1, a: v.ta, tl: 1 };
   }
 
   // ── UI (DOM) ──  (nobody is in charge: every player may press every button)
@@ -1249,7 +1369,7 @@ void main() {
     this.legend.classList.toggle('bb-hide', solo);
     this.hintEl.textContent = this.spectator
       ? 'Spectating'
-      : 'Press a block on the table, drag it above the bowl and let go to drop it (red = not here, it goes back) · Q / E or mouse wheel rotates · right-click or X puts it back';
+      : 'Press a block on the table, drag it above the bowl and let go to drop it (red = not here, it goes back) · Q / E or mouse wheel turns it by 45° · right-click or X puts it back';
 
     const playing = s.ph !== PHASE.MENU;
     this.hud.classList.toggle('bb-hide', !playing);
@@ -1318,12 +1438,6 @@ void main() {
       this.#sendMove(now);
     }
 
-    // Q / E rotate the block we are holding
-    if (this.#carrying() && (this.keys.q || this.keys.e)) {
-      this.local.rot += ((this.keys.q ? 1 : 0) - (this.keys.e ? 1 : 0)) * ROTATE_SPEED * dt;
-      this.#sendMove(now);
-    }
-
     const TAU = Math.PI * 2;
     const draw = (v, rate) => {
       const t = this.#target(v);
@@ -1333,9 +1447,11 @@ void main() {
       c.y += (t.y - c.y) * k;
       c.z += (t.z - c.z) * k;
       c.s += (t.s - c.s) * k;
+      c.tl = (c.tl ?? 1) + (t.tl - (c.tl ?? 1)) * k;
       c.a += (((((t.a - c.a + Math.PI) % TAU) + TAU) % TAU) - Math.PI) * k;
       v.group.position.set(c.x, c.y, c.z);
       v.group.rotation.z = c.a;
+      v.group.rotation.x = -(1 - c.tl) * Math.PI / 2; // lying on the table → standing
       v.group.scale.setScalar(c.s);
     };
 
@@ -1378,11 +1494,239 @@ void main() {
       }
     }
 
-    this.renderer.clear();
-    this.renderer.render(this.scene, this.camera);
-    this.renderer.clearDepth();
-    this.renderer.render(this.frontScene, this.camera);
+    this.#renderAll();
   };
+
+  // ── drawing: shadow map → reflection → (blurred background) → everything else → the blocks you hold ──
+  #renderAll() {
+    const r = this.renderer;
+    const guard = (name, fn) => {
+      if (this.fx.off.has(name)) return false;
+      try {
+        return fn();
+      } catch (e) { // a pass that cannot run on this machine is switched off for good; the game itself keeps working
+        console.warn(`balance: the ${name} effect failed and was switched off`, e);
+        this.fx.off.add(name);
+        r.setRenderTarget(null);
+        this.#showAll();
+        return false;
+      }
+    };
+    guard('shadows', () => this.#shadowPass());
+    guard('reflection', () => this.#reflectPass());
+    const blurred = guard('blur', () => this.#blurPass());
+    if (this.fx.off.has('shadows')) this.shadowU.uShadowStr.value = 0; // (a pass that is off or failed must not leave its last result behind)
+    if (this.fx.off.has('reflection')) this.waterU.uReflStr.value = 0;
+    if (blurred) {
+      r.clearDepth();
+      const bgSave = this.scene.background;
+      this.scene.background = null; // (a colour background would wipe the blurred picture)
+      this.scenery.visible = false;
+      r.render(this.scene, this.camera);
+      this.scenery.visible = true;
+      this.scene.background = bgSave;
+    } else {
+      r.clear();
+      r.render(this.scene, this.camera);
+    }
+    r.clearDepth();
+    r.render(this.frontScene, this.camera);
+  }
+
+  #showAll() {
+    for (const c of this.scene.children) c.visible = true;
+    if (this.world) this.world.visible = true;
+    if (this.scenery) this.scenery.visible = true;
+    if (this.mainGroup) this.mainGroup.visible = true;
+    if (this.floorMesh) this.floorMesh.visible = true;
+    if (this.water) this.water.visible = true;
+    this.scene.overrideMaterial = null;
+    this.frontScene.overrideMaterial = null;
+  }
+
+  /** Light that casts shadows: the world is drawn as depth from the light's side; every material looks the depth up (see SHADOW_GLSL). */
+  #shadowPass() {
+    const L = this.bgFx.light;
+    const u = this.shadowU;
+    if (!L || !(L.shadow > 0)) {
+      u.uShadowStr.value = 0;
+      return false;
+    }
+    const fx = this.fx;
+    if (!fx.shadowRT) {
+      fx.shadowRT = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+      fx.depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide });
+      fx.shadowCam = new THREE.OrthographicCamera(-SHADOW_RANGE, SHADOW_RANGE, SHADOW_RANGE, -SHADOW_RANGE, 1, 420);
+    }
+    const dir = new THREE.Vector3(...(L.dir ?? [-0.45, 0.85, 0.55])).normalize();
+    const target = new THREE.Vector3(0, this.groundY + 6, 0);
+    const cam = fx.shadowCam;
+    cam.position.copy(target).addScaledVector(dir, 200);
+    cam.lookAt(target);
+    cam.updateMatrixWorld(true);
+    u.uShadowMat.value.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+
+    const r = this.renderer;
+    const oldColor = r.getClearColor(new THREE.Color());
+    const oldAlpha = r.getClearAlpha();
+    const bgSave = this.scene.background;
+    this.scene.background = null;
+    if (this.water) this.water.visible = false;
+    if (this.floorMesh) this.floorMesh.visible = false;
+    this.scene.overrideMaterial = fx.depthMat;
+    this.frontScene.overrideMaterial = fx.depthMat;
+    r.setClearColor(0xffffff, 1); // white = infinitely far = nothing in the way
+    r.setRenderTarget(fx.shadowRT);
+    r.clear();
+    r.render(this.scene, cam);
+    r.render(this.frontScene, cam);
+    r.setRenderTarget(null);
+    r.setClearColor(oldColor, oldAlpha);
+    this.scene.overrideMaterial = null;
+    this.frontScene.overrideMaterial = null;
+    this.scene.background = bgSave;
+    if (this.water) this.water.visible = true;
+    if (this.floorMesh) this.floorMesh.visible = true;
+    u.uShadowMap.value = fx.shadowRT.texture;
+    u.uShadowStr.value = L.shadow;
+    return true;
+  }
+
+  /** Hide everything that is not part of the scenery (blocks, table, bowl, water); optionally the floor too. */
+  #soloScenery(on, hideFloor) {
+    for (const c of this.scene.children) if (c !== this.world) c.visible = !on;
+    if (this.mainGroup) this.mainGroup.visible = !on;
+    if (hideFloor && this.floorMesh) this.floorMesh.visible = !on;
+  }
+
+  /** Planar reflection: the scenery seen from a camera mirrored in the water surface, drawn into a texture the water shader looks up. */
+  #reflectPass() {
+    const strength = this.bowlDef?.water?.reflect ?? 0;
+    const u = this.waterU;
+    if (!this.water || !(strength > 0)) {
+      u.uReflStr.value = 0;
+      return false;
+    }
+    const fx = this.fx;
+    const r = this.renderer;
+    const size = r.getDrawingBufferSize(new THREE.Vector2());
+    const w = Math.max(16, Math.round(size.x / 2));
+    const h = Math.max(16, Math.round(size.y / 2));
+    if (!fx.reflRT) {
+      fx.reflRT = new THREE.WebGLRenderTarget(w, h);
+      fx.reflCam = new THREE.PerspectiveCamera();
+    } else if (fx.reflRT.width !== w || fx.reflRT.height !== h) {
+      fx.reflRT.setSize(w, h);
+    }
+    const cam = this.camera;
+    cam.updateMatrixWorld(true);
+    const plane = new THREE.Vector3(0, WATER_Y, 0);
+    const normal = new THREE.Vector3(0, 1, 0);
+    const camPos = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+    const view = new THREE.Vector3().subVectors(plane, camPos);
+    if (view.dot(normal) > 0) { // the camera is under the water: nothing to reflect
+      u.uReflStr.value = 0;
+      return false;
+    }
+    view.reflect(normal).negate().add(plane);
+    const rot = new THREE.Matrix4().extractRotation(cam.matrixWorld);
+    const look = new THREE.Vector3(0, 0, -1).applyMatrix4(rot).add(camPos);
+    const target = new THREE.Vector3().subVectors(plane, look).reflect(normal).negate().add(plane);
+    const vc = fx.reflCam;
+    vc.position.copy(view);
+    vc.up.set(0, 1, 0).applyMatrix4(rot).reflect(normal);
+    vc.lookAt(target);
+    vc.near = cam.near;
+    vc.far = cam.far;
+    vc.updateMatrixWorld(true);
+    vc.projectionMatrix.copy(cam.projectionMatrix);
+    u.uReflMat.value.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1).multiply(vc.projectionMatrix).multiply(vc.matrixWorldInverse);
+
+    const oldColor = r.getClearColor(new THREE.Color());
+    const oldAlpha = r.getClearAlpha();
+    const bgSave = this.scene.background;
+    this.scene.background = null;
+    this.#soloScenery(true, true);
+    r.setClearColor(rawColor(this.bgFx.mist ?? '#e7e2d6'), 1);
+    r.setRenderTarget(fx.reflRT);
+    r.clear();
+    r.render(this.scene, vc);
+    r.setRenderTarget(null);
+    this.#soloScenery(false, true);
+    r.setClearColor(oldColor, oldAlpha);
+    this.scene.background = bgSave;
+    u.uRefl.value = fx.reflRT.texture;
+    u.uReflStr.value = strength;
+    return true;
+  }
+
+  /** The scenery (floor and background models) is drawn into a texture, blurred in two passes and put on the screen as the backdrop. */
+  #blurPass() {
+    const radius = this.bgFx.blur;
+    if (!(radius > 0) || !this.scenery) return false;
+    const fx = this.fx;
+    const r = this.renderer;
+    const size = r.getDrawingBufferSize(new THREE.Vector2());
+    const w = Math.max(16, Math.round(size.x));
+    const h = Math.max(16, Math.round(size.y));
+    if (!fx.blurA) {
+      fx.blurA = new THREE.WebGLRenderTarget(w, h);
+      fx.blurB = new THREE.WebGLRenderTarget(w, h);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: { uTex: { value: null }, uStep: { value: new THREE.Vector2() } },
+        vertexShader: /* glsl */ `
+varying vec2 vUv;
+void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+        fragmentShader: /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform vec2 uStep;
+void main() {
+  vec4 c = texture2D(uTex, vUv) * 0.2270270270;
+  c += (texture2D(uTex, vUv + uStep * 1.3846153846) + texture2D(uTex, vUv - uStep * 1.3846153846)) * 0.3162162162;
+  c += (texture2D(uTex, vUv + uStep * 3.2307692308) + texture2D(uTex, vUv - uStep * 3.2307692308)) * 0.0702702703;
+  gl_FragColor = vec4(c.rgb, 1.0);
+}`,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const scene = new THREE.Scene();
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+      quad.frustumCulled = false;
+      scene.add(quad);
+      fx.quad = { scene, mat, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1) };
+    } else if (fx.blurA.width !== w || fx.blurA.height !== h) {
+      fx.blurA.setSize(w, h);
+      fx.blurB.setSize(w, h);
+    }
+    // 1. the scenery alone, on the sky colour
+    const oldColor = r.getClearColor(new THREE.Color());
+    const oldAlpha = r.getClearAlpha();
+    const bgSave = this.scene.background;
+    this.scene.background = null;
+    this.#soloScenery(true, false);
+    r.setClearColor(rawColor(this.bgFx.mist ?? '#e7e2d6'), 1);
+    r.setRenderTarget(fx.blurA);
+    r.clear();
+    r.render(this.scene, this.camera);
+    this.#soloScenery(false, false);
+    // 2. blur sideways into B, then up / down onto the screen. `radius` is in screen pixels (a 9-tap gaussian stretched to that size)
+    const q = fx.quad;
+    const k = radius / 3.2;
+    q.mat.uniforms.uTex.value = fx.blurA.texture;
+    q.mat.uniforms.uStep.value.set((k / w) * 1, 0);
+    r.setRenderTarget(fx.blurB);
+    r.render(q.scene, q.cam);
+    q.mat.uniforms.uTex.value = fx.blurB.texture;
+    q.mat.uniforms.uStep.value.set(0, (k / h) * 1);
+    r.setRenderTarget(null);
+    r.setClearColor(oldColor, oldAlpha);
+    r.clear();
+    r.render(q.scene, q.cam);
+    this.scene.background = bgSave;
+    return true;
+  }
 
   // ── input ──
   #carrying() {
@@ -1516,8 +1860,9 @@ void main() {
     }
     if (!this.#carrying()) return;
     e.preventDefault();
-    this.local.rot += (e.deltaY < 0 ? 1 : -1) * WHEEL_STEP;
-    this.#sendMove(performance.now(), true);
+    if (performance.now() - (this.lastWheel ?? 0) < 140) return; // one notch = one step (a wheel sends several events per notch)
+    this.lastWheel = performance.now();
+    this.#turn(e.deltaY < 0 ? 1 : -1);
   };
 
   #onContext = (e) => {
@@ -1535,14 +1880,15 @@ void main() {
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? '')) return; // typing in the debug menu is not playing
     const k = e.key.toLowerCase();
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (k === 'q' || k === 'e') this.keys[k] = true;
+    if ((k === 'q' || k === 'e') && this.#carrying()) this.#turn(k === 'q' ? 1 : -1);
     else if (k === 'x') this.#putBack();
   };
 
-  #onKeyUp = (e) => {
-    const k = e.key.toLowerCase();
-    if (k === 'q' || k === 'e') this.keys[k] = false;
-  };
+  /** Turn the block we hold one step (45°) to the left (+1) or right (-1). */
+  #turn(dir) {
+    this.local.rot = Math.round(this.local.rot / ROTATE_STEP) * ROTATE_STEP + dir * ROTATE_STEP;
+    this.#sendMove(performance.now(), true);
+  }
 }
 
 /** @type {import('../../shared/contracts.js').ClientGame} */

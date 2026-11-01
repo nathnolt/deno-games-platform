@@ -259,7 +259,7 @@ function drawParts(def, fill, stroke, extra = {}) {
 //  SHAPE STUDIO
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 function shapeStudio(view, api) {
-  const st = { sel: null, part: 0, editing: false, draw: null, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
+  const st = { sel: null, part: 0, editing: false, draw: null, closeOnFirst: true, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
   let manual = {}; //   shapes the user moved on the board: key -> { ox, oy } (only where a shape is drawn, never its data)
   let layout = null; // { cells: { key: { ox, oy, ax, ay } }, rows: [{ y, x0, x1 }], bowlKey }
   let preview = null;
@@ -472,7 +472,7 @@ function shapeStudio(view, api) {
     const dr = st.draw;
     const sh = shift(st.sel);
     const p = [snapV(w.x - sh.x), snapV(w.y - sh.y)];
-    if (dr.pts.length >= 3 && Math.hypot(w.x - sh.x - dr.pts[0][0], w.y - sh.y - dr.pts[0][1]) < 9 / board.v.k) return finishDraw(); // click the first point to close
+    if (st.closeOnFirst && dr.pts.length >= 3 && Math.hypot(w.x - sh.x - dr.pts[0][0], w.y - sh.y - dr.pts[0][1]) < 9 / board.v.k) return finishDraw(); // click the first point to close
     const last = dr.pts[dr.pts.length - 1];
     if (!last || last[0] !== p[0] || last[1] !== p[1]) dr.pts.push(p);
     scheduleDraw();
@@ -591,7 +591,7 @@ function shapeStudio(view, api) {
       const dg = svg('g', { transform: `translate(${sh.x} ${sh.y})`, 'pointer-events': 'none' });
       if (all.length > 1) dg.append(svg('polyline', { points: all.map((q) => q.join(',')).join(' '), fill: 'none', stroke: '#fde047', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'stroke-dasharray': dr.cur ? '' : '' }));
       if (dr.pts.length >= 3 && dr.cur) dg.append(svg('line', { x1: dr.cur[0], y1: dr.cur[1], x2: dr.pts[0][0], y2: dr.pts[0][1], stroke: '#fde047', 'stroke-width': 1, 'stroke-dasharray': '3 4', 'vector-effect': 'non-scaling-stroke', opacity: 0.6 }));
-      dr.pts.forEach((q, i) => dg.append(svg('circle', { cx: q[0], cy: q[1], r: (i === 0 ? 7 : 5) * px, fill: i === 0 ? '#fde047' : '#fff', stroke: '#92400e', 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke' })));
+      dr.pts.forEach((q, i) => dg.append(svg('circle', { cx: q[0], cy: q[1], r: (i === 0 ? 7 : 5) * px, fill: i === 0 && st.closeOnFirst ? '#fde047' : '#fff', stroke: '#92400e', 'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke' })));
       if (dr.cur) dg.append(svg('text', { transform: `translate(${dr.cur[0] + 8 * px} ${dr.cur[1] + 8 * px}) scale(1 -1)`, 'font-size': 11 * px, fill: '#fde047', 'font-family': 'system-ui, sans-serif' }, `${dr.pts.length + 1}: ${f3(dr.cur[0])}, ${f3(dr.cur[1])}`));
       top.append(dg);
     }
@@ -856,6 +856,7 @@ function shapeStudio(view, api) {
       h('strong', {}, 'Shape studio'),
       st.draw ? btn('Done ⏎', finishDraw, 'bb-dbg-go') : btn('+ Polygon', startDraw, 'bb-dbg-go'),
       st.draw ? btn('Cancel', cancelDraw) : null,
+      h('label', { class: 'bb-st-mini', title: 'Clicking the first point again closes the polygon and finishes it' }, h('input', { type: 'checkbox', checked: st.closeOnFirst, onchange: (e) => { st.closeOnFirst = e.target.checked; scheduleDraw(); } }), 'click first point to finish'),
       h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
       h('label', { class: 'bb-st-mini' }, 'preview material', sel(['(mixed)', ...Object.keys(d.materials)], st.mat, (v) => { st.mat = v; renderList(); scheduleDraw(); updatePreview(); })),
       h('label', { class: 'bb-st-mini' }, 'bowl', sel(Object.keys(d.bowls), bowlKey(), (v) => { st.bowl = v; layout = null; scheduleDraw(); updatePreview(); })),
@@ -1454,7 +1455,7 @@ function levelStudio(view, api) {
  * Every model is a collapsed row; "Camera to game view" puts the camera back where the game has it.
  */
 function backgroundStudio(view, api) {
-  const st = { lvl: 0, bg: '', sel: -1, snap: 0.5, open: false, add: '', prev: null };
+  const st = { lvl: 0, bg: '', sel: -1, snap: 0.5, rsnap: 5, tool: 'move', axis: 1, open: false, add: '', prev: null };
   let applyTimer = 0;
   let drag = null;
   let askedAt = 0;
@@ -1477,7 +1478,10 @@ function backgroundStudio(view, api) {
   };
   const BG = () => D().backgrounds[bgKey()];
   const models = () => (BG().models ??= []);
+  const TABLE_I = -2; // the table model has this number in the viewport (see client.js)
+  const inst = (i) => (i === TABLE_I ? BG().table : models()[i]);
   const snapV = (v) => snapTo(v, st.snap);
+  const freshTable = () => ({ model: D().models.board ? 'board' : Object.keys(D().models)[0], scale: 1, rotation: [0, 0, 0], translate: [0, 0, 2] });
   const fresh = (model) => ({ model, scale: 1, rotation: [0, 0, 0], translate: [0, 0, -40] });
 
   const probEl = h('span', { class: 'bb-st-prob' });
@@ -1498,15 +1502,15 @@ function backgroundStudio(view, api) {
 
   /** the numbers of one model changed: show it at once, tell the draft */
   function pushInst(i) {
-    view.debugSetInstance(i, models()[i]);
+    view.debugSetInstance(i, inst(i));
     api.touch('backgrounds');
   }
   function select(i, scroll = false) {
     st.sel = i;
-    if (i >= 0) openRows.add(i);
-    view.debugSelectInstance(i >= 0 ? i : null);
+    if (i !== -1) openRows.add(i);
+    view.debugSelectInstance(i !== -1 ? i : null);
     renderBody();
-    if (scroll && i >= 0) body.querySelector(`[data-i="${i}"]`)?.scrollIntoView({ block: 'nearest' });
+    if (scroll && i !== -1) body.querySelector(`[data-i="${i}"]`)?.scrollIntoView({ block: 'nearest' });
   }
   function structural() { // models added / removed / reordered / switched: the game rebuilds them when the draft comes back
     api.touch('backgrounds');
@@ -1519,8 +1523,12 @@ function backgroundStudio(view, api) {
     return n;
   };
   const row3 = (label, arr, i, step) => h('label', { class: 'bb-dbg-field' }, h('span', {}, label),
-    ...['x', 'y', 'z'].map((a, k) => h('span', { class: 'bb-st-axis' }, a, numIn(() => arr[k], (v) => { arr[k] = v; pushInst(i); }, step))));
+    ...['x', 'y', 'z'].map((a, k) => h('span', { class: 'bb-st-axis' }, a, numIn(() => arr[k], (v) => { arr[k] = v; if (i === -1) api.touch('backgrounds'); else pushInst(i); }, step))));
 
+  function setTool(k) {
+    st.tool = k;
+    renderBar();
+  }
   function renderBar() {
     const d = D();
     put(bar,
@@ -1534,8 +1542,17 @@ function backgroundStudio(view, api) {
         btn('⌖ Camera to game view', () => view.debugCameraHome(), 'bb-dbg-go'),
         h('span', { class: 'bb-st-mini' }, 'snap'),
         sel(SNAPS, String(st.snap), (v) => { st.snap = +v; }),
+        h('span', { class: 'bb-st-mini' }, 'angle'),
+        sel([['0', 'free'], ['1', '1°'], ['5', '5°'], ['15', '15°'], ['45', '45°']], String(st.rsnap), (v) => { st.rsnap = +v; }),
       ),
-      h('div', { class: 'bb-st-hint' }, 'Drag the camera: turn · right-drag: move · wheel: zoom. Click a model in the view to pick it, drag to move it over the floor, Shift-drag to lift it, Q / E turn it, Delete removes it.'));
+      h('div', { class: 'bb-st-row' },
+        h('div', { class: 'bb-st-seg' }, ...[['move', '✥ Move (W)'], ['rotate', '⟳ Rotate (R)'], ['scale', '⤢ Scale (S)']].map(([k, l]) => h('button', { type: 'button', class: st.tool === k ? 'bb-on' : '', onclick: () => setTool(k) }, l))),
+        st.tool === 'rotate' ? h('div', { class: 'bb-st-seg', title: 'The axis the drag turns around' }, ...['x', 'y', 'z'].map((a, k) => h('button', { type: 'button', class: st.axis === k ? 'bb-on' : '', onclick: () => { st.axis = k; renderBar(); } }, a.toUpperCase()))) : null),
+      h('div', { class: 'bb-st-hint' }, st.tool === 'move'
+        ? 'Move: click a model in the view and drag it over the floor; Shift-drag lifts it (fast). Camera: drag the empty space to turn, right-drag to move, wheel to zoom. Delete removes the model.'
+        : st.tool === 'rotate'
+          ? 'Rotate: click a model and drag left / right to turn it around the chosen axis (Shift = slower). Q / E also turn it. Camera: drag the empty space.'
+          : 'Scale: click a model and drag up / down to make it bigger or smaller (Shift = slower).'));
   }
 
   function renderBody() {
@@ -1543,6 +1560,13 @@ function backgroundStudio(view, api) {
     const bg = BG();
     bg.ground ??= { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2 };
     bg.fog ??= [150, 520];
+    bg.blur ??= 3;
+    bg.light ??= { dir: [-0.45, 0.85, 0.55], shadow: 0.4 };
+    bg.light.dir ??= [-0.45, 0.85, 0.55];
+    bg.light.shadow ??= 0.4;
+    bg.ground.style ??= 'sand';
+    bg.bowlHeight ??= 4;
+    bg.box ??= { w: 110, d: 52, z: 2, shader: 'floorwood' };
     const w = api.w;
     const ms = models();
     if (st.prev) { st.prev.dispose(); st.prev = null; }
@@ -1574,23 +1598,28 @@ function backgroundStudio(view, api) {
       } catch (e) { addBox.append(h('div', { class: 'bb-dbg-err' }, String(e.message ?? e))); }
     };
 
-    const rows = ms.map((m, i) => {
+    const row = (m, i, title, extra = []) => {
       const det = h('details', { class: `bb-st-inst${i === st.sel ? ' bb-on' : ''}`, 'data-i': String(i), open: openRows.has(i) },
-        h('summary', {}, h('span', { class: 'bb-st-itemname' }, `${i + 1}. ${m.model}`), h('span', { class: 'bb-st-badge' }, `${f3(m.translate[0])}, ${f3(m.translate[1])}, ${f3(m.translate[2])}`)),
+        h('summary', {}, h('span', { class: 'bb-st-itemname' }, title), h('span', { class: 'bb-st-badge' }, `${f3(m.translate[0])}, ${f3(m.translate[1])}, ${f3(m.translate[2])}`)),
         h('div', { class: 'bb-st-instbody' },
           h('div', { class: 'bb-st-row' },
             sel(Object.keys(d.models), m.model, (v) => { m.model = v; structural(); }, 'bb-dbg-grow'),
             btn('⌖', () => { view.debugLookAt(m.translate[0], m.translate[1] + view.floorY, m.translate[2]); select(i); }, ''),
             btn('⤓', () => { m.translate[1] = 0; pushInst(i); renderBody(); }, ''),
-            btn('⧉', () => { ms.splice(i + 1, 0, clone(m)); ms[i + 1].translate[0] += 3; openRows.add(i + 1); st.sel = i + 1; structural(); view.debugSelectInstance(st.sel); }, ''),
-            btn('✕', () => { removeAt(i); }, 'bb-dbg-danger')),
-          h('label', { class: 'bb-dbg-field' }, h('span', {}, 'scale'), numIn(() => m.scale ?? 1, (v) => { m.scale = v; pushInst(i); }, 0.1)),
+            ...extra),
+          h('label', { class: 'bb-dbg-field' }, h('span', {}, 'scale'), numIn(() => m.scale ?? 1, (v) => { if (v > 0) { m.scale = v; pushInst(i); } }, 0.1)),
           row3('rotation °', m.rotation, i, 5),
           row3('translate', m.translate, i, 0.5)));
-      det.addEventListener('toggle', () => { det.open ? openRows.add(i) : openRows.delete(i); });
+      det.addEventListener('toggle', () => { if (det.open) openRows.add(i); else openRows.delete(i); });
       det.querySelector('summary').addEventListener('click', () => { if (st.sel !== i) { st.sel = i; view.debugSelectInstance(i); for (const e of body.querySelectorAll('.bb-st-inst')) e.classList.toggle('bb-on', e.dataset.i === String(i)); } });
       return det;
-    });
+    };
+    const rows = ms.map((m, i) => row(m, i, `${i + 1}. ${m.model}`, [
+      btn('⧉', () => { ms.splice(i + 1, 0, clone(m)); ms[i + 1].translate[0] += 3; openRows.add(i + 1); st.sel = i + 1; structural(); view.debugSelectInstance(st.sel); }, ''),
+      btn('✕', () => { removeAt(i); }, 'bb-dbg-danger')]));
+    const tableBox = bg.table
+      ? row(bg.table, TABLE_I, `Table: ${bg.table.model}`, [btn('Plain box', () => { removeAt(TABLE_I); }, 'bb-dbg-danger')])
+      : h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'Plain wooden box.'), btn('Use a model', () => { bg.table = freshTable(); openRows.add(TABLE_I); st.sel = TABLE_I; structural(); view.debugSelectInstance(TABLE_I); }));
 
     put(body,
       h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Sky and ground'),
@@ -1599,7 +1628,19 @@ function backgroundStudio(view, api) {
           w.field('fog near / far', ...[0, 1].map((k) => numIn(() => bg.fog[k], (v) => { bg.fog[k] = v; api.touch('backgrounds'); }, 10))),
           w.color('sand grooves', bg.ground, 'colorA', 'backgrounds'),
           w.color('sand ridges', bg.ground, 'colorB', 'backgrounds'),
-          w.slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1))),
+          w.slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1),
+          w.select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks']], bg.ground, 'style', 'backgrounds'),
+          w.slider('background blur (px)', bg, 'blur', 'backgrounds', 0, 12, 0.5),
+          w.slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
+          row3('light direction', bg.light.dir, -1, 0.1))),
+      h('div', { class: 'bb-st-sub' }, 'Table and bowl'),
+      h('label', { class: 'bb-dbg-field' }, h('span', {}, 'bowl height above the floor'), numIn(() => bg.bowlHeight ?? 4, (v) => { if (v >= 0) { bg.bowlHeight = v; api.touch('backgrounds'); } }, 0.5)),
+      bg.table ? null : h('div', { class: 'bb-st-instbody' },
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table width (x)'), numIn(() => bg.box.w, (v) => { if (v >= 10) { bg.box.w = v; api.touch('backgrounds'); } }, 1)),
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table depth (z)'), numIn(() => bg.box.d, (v) => { if (v >= 10) { bg.box.d = v; api.touch('backgrounds'); } }, 1)),
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table centre z'), numIn(() => bg.box.z, (v) => { bg.box.z = v; api.touch('backgrounds'); }, 1)),
+        w.select('table shader', view.shaderNames, bg.box, 'shader', 'backgrounds')),
+      tableBox,
       h('div', { class: 'bb-st-sub' }, `Models (${ms.length})`, h('span', { class: 'bb-dbg-grow' }),
         btn('Collapse all', () => { openRows.clear(); renderBody(); }, '')),
       ...rows,
@@ -1609,7 +1650,8 @@ function backgroundStudio(view, api) {
   }
 
   function removeAt(i) {
-    models().splice(i, 1);
+    if (i === TABLE_I) delete BG().table;
+    else models().splice(i, 1);
     openRows.clear();
     st.sel = -1;
     view.debugSelectInstance(null);
@@ -1625,11 +1667,11 @@ function backgroundStudio(view, api) {
   const hook = {
     down(e) {
       const i = view.debugModelAt(e.clientX, e.clientY);
-      if (i === null || i === undefined || !models()[i]) { return false; }
+      if (i === null || i === undefined || !inst(i)) return false;
       select(i, true);
-      const m = models()[i];
-      drag = { i, vertical: e.shiftKey, start: { x: e.clientX, y: e.clientY }, t0: [...m.translate], off: null };
-      if (!drag.vertical) {
+      const m = inst(i);
+      drag = { i, vertical: e.shiftKey, start: { x: e.clientX, y: e.clientY }, t0: [...m.translate], r0: [...m.rotation], s0: m.scale ?? 1, off: null };
+      if (st.tool === 'move' && !drag.vertical) {
         const g = view.debugGroundAt(e.clientX, e.clientY, m.translate[1]);
         drag.off = g ? { x: m.translate[0] - g.x, z: m.translate[2] - g.z } : { x: 0, z: 0 };
       }
@@ -1637,11 +1679,20 @@ function backgroundStudio(view, api) {
     },
     move(e) {
       if (!drag) return;
-      const m = models()[drag.i];
+      const m = inst(drag.i);
       if (!m) return;
-      if (drag.vertical) {
-        const k = 0.06 * Math.max(0.2, Math.min(5, view.freeCam?.dist ?? 50) / 50);
-        m.translate[1] = snapV(drag.t0[1] - (e.clientY - drag.start.y) * k);
+      const dx = e.clientX - drag.start.x;
+      const dy = e.clientY - drag.start.y;
+      const slow = e.shiftKey && st.tool !== 'move' ? 0.2 : 1;
+      if (st.tool === 'rotate') {
+        const a = drag.r0[st.axis] + dx * 0.6 * slow;
+        m.rotation[st.axis] = snapTo(((a % 360) + 360) % 360, st.rsnap);
+      } else if (st.tool === 'scale') {
+        m.scale = Math.max(0.01, Math.round(drag.s0 * Math.exp(-dy * 0.008 * slow) * 1000) / 1000);
+      } else if (drag.vertical) {
+        // about a quarter of the camera distance per 100 pixels, so it keeps up at any zoom
+        const k = 0.012 * Math.max(8, Math.min(400, view.freeCam?.dist ?? 80));
+        m.translate[1] = snapV(drag.t0[1] - dy * k);
       } else {
         const g = view.debugGroundAt(e.clientX, e.clientY, m.translate[1]);
         if (!g) return;
@@ -1656,14 +1707,18 @@ function backgroundStudio(view, api) {
   };
 
   const onKey = (e) => {
-    if (!st.open || typing(e) || st.sel < 0 || !models()[st.sel]) return;
-    const m = models()[st.sel];
+    if (!st.open || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 'w' || k === 'r' || k === 's') { setTool({ w: 'move', r: 'rotate', s: 'scale' }[k]); return; }
+    const m = st.sel === -1 ? null : inst(st.sel);
+    if (!m) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       removeAt(st.sel);
-    } else if (e.key === 'q' || e.key === 'Q' || e.key === 'e' || e.key === 'E') {
-      const s = /q/i.test(e.key) ? -1 : 1;
-      m.rotation[1] = ((m.rotation[1] + s * (e.shiftKey ? 1 : 15)) % 360 + 360) % 360;
+    } else if (k === 'q' || k === 'e') {
+      const sgn = k === 'q' ? -1 : 1;
+      const step = st.rsnap > 0 ? st.rsnap : 5;
+      m.rotation[st.axis] = ((m.rotation[st.axis] + sgn * (e.shiftKey ? 1 : step * 3)) % 360 + 360) % 360;
       pushInst(st.sel);
       renderBody();
     }

@@ -53,7 +53,8 @@ export function createDebugMenu(view) {
   let draft = S.cloneDefinitions();
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
-    needsRestart: false, problems: [], restored: false,
+    needsRestart: false, problems: [], restored: false, base: null, staleDropped: false,
+    fxShadows: true, fxReflection: true, fxBlur: true,
   };
   let timer = 0;
   let infoToken = 0;
@@ -97,8 +98,10 @@ export function createDebugMenu(view) {
     if (!validate()) return;
     sendDefs(draft);
     try {
-      localStorage.setItem(STORE, JSON.stringify(draft));
-      state.restored = true;
+      if (state.base !== null) { // (kept together with a fingerprint of the definitions.js it was made from: see the restore at the bottom)
+        localStorage.setItem(STORE, JSON.stringify({ base: state.base, draft }));
+        state.restored = true;
+      }
     } catch { /* private mode */ }
     if (state.autoRestart && !studio.current && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.ctx.sendInput({ restart: true });
     renderStatus();
@@ -462,12 +465,14 @@ export function createDebugMenu(view) {
   function tabMaterials() {
     const out = [tableBar('materials', 'material', 'material', () => ({ friction: 10, weight: 10, shader: 'wood' }))];
     const m = draft.materials[state.sel.material];
+    if (m.float) m.floatLevel ??= 0.5;
     out.push(
       section(null,
         slider('friction', m, 'friction', 'materials', 0, 20, 0.5),
         slider('weight', m, 'weight', 'materials', 0, 40, 0.5),
         check('static (never moves)', m, 'static', 'materials'),
-        check('float (buoyant)', m, 'float', 'materials'),
+        check('float (buoyant)', m, 'float', 'materials', () => render()),
+        m.float ? slider('float level (part under water)', m, 'floatLevel', 'materials', 0.1, 1, 0.05) : null,
         num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),
         select('shader', shaderNames(), m, 'shader', 'materials'),
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),
@@ -481,6 +486,7 @@ export function createDebugMenu(view) {
     const key = state.sel.bowl;
     const b = draft.bowls[key];
     b.water ??= { color: '#3d9bff', opacity: 0.4 };
+    b.water.reflect ??= 0.6;
     const flat = Math.max(0, 2 * (b.a - b.r));
     out.push(
       btn('Use this bowl in the current level', () => {
@@ -505,7 +511,8 @@ export function createDebugMenu(view) {
       section('Look',
         select('shader', shaderNames(), b, 'shader', 'bowls'),
         color('water colour', b.water, 'color', 'bowls'),
-        slider('water opacity', b.water, 'opacity', 'bowls', 0, 1, 0.05)),
+        slider('water opacity', b.water, 'opacity', 'bowls', 0, 1, 0.05),
+        slider('water reflection', b.water, 'reflect', 'bowls', 0, 1, 0.05)),
       section('Model instead of the generated bowl (optional)', modelPicker(b)),
     );
     return out;
@@ -587,6 +594,13 @@ export function createDebugMenu(view) {
     bg.ground ??= { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2 };
     bg.fog ??= [150, 520];
     bg.models ??= [];
+    bg.blur ??= 3;
+    bg.light ??= { dir: [-0.45, 0.85, 0.55], shadow: 0.4 };
+    bg.light.dir ??= [-0.45, 0.85, 0.55];
+    bg.light.shadow ??= 0.4;
+    bg.ground.style ??= 'sand';
+    bg.bowlHeight ??= 4;
+    bg.box ??= { w: 110, d: 52, z: 2, shader: 'floorwood' };
     out.push(
       btn('Use this background in the current level', () => {
         const lv = draft.levels[view.snap?.lv ?? -1];
@@ -605,7 +619,16 @@ export function createDebugMenu(view) {
         })),
         color('sand grooves', bg.ground, 'colorA', 'backgrounds'),
         color('sand ridges', bg.ground, 'colorB', 'backgrounds'),
-        slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1)),
+        slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1),
+        select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks']], bg.ground, 'style', 'backgrounds'),
+        num('bowl height above the floor', bg, 'bowlHeight', 'backgrounds', { min: 0, max: 100 }),
+        num('table width (x)', bg.box, 'w', 'backgrounds', { min: 10, max: 1000 }),
+        num('table depth (z)', bg.box, 'd', 'backgrounds', { min: 10, max: 1000 }),
+        num('table centre z', bg.box, 'z', 'backgrounds'),
+        select('table shader', shaderNames(), bg.box, 'shader', 'backgrounds'),
+        slider('background blur (px)', bg, 'blur', 'backgrounds', 0, 12, 0.5),
+        slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
+        vec('light direction', bg.light.dir, 'backgrounds', 0.1)),
       section(`Models (${bg.models.length})`,
         ...bg.models.map((m, i) => h('div', { class: 'bb-dbg-part' },
           h('div', { class: 'bb-dbg-row' },
@@ -694,10 +717,18 @@ export function createDebugMenu(view) {
     helper('Free camera', 'freeCam', (on) => view.debugFreeCam(on)),
     helper('Show drop zone', 'showDrop', (on) => view.debugShowDrop(on)),
     helper('Auto-restart', 'autoRestart'),
+    helper('Shadows', 'fxShadows', (on) => view.debugFx('shadows', on)),
+    helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
+    helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
     h('span', { class: 'bb-dbg-grow' }),
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
     btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
+    btn('Clear saved data', () => {
+      if (!window.confirm('Clear everything this game keeps in this browser (your saved debug edits and which levels you completed) and reload?')) return;
+      try { localStorage.removeItem(STORE); localStorage.removeItem('balance.done'); } catch { /* ignore */ }
+      window.location.reload();
+    }, 'bb-dbg-danger'),
     btn('Restart', () => { flush(); view.ctx.sendInput({ restart: true }); }),
     btn('Menu', () => view.ctx.sendInput({ menu: true })),
     btn('✕', () => setOpen(false)));
@@ -731,6 +762,7 @@ export function createDebugMenu(view) {
     flush();
     studio.close();
     root.classList.remove('bb-st-open');
+    setOpen(true); // back to the debug menu
   }
 
   function setOpen(on) {
@@ -743,6 +775,7 @@ export function createDebugMenu(view) {
 
   function renderStatus() {
     const kids = [];
+    if (state.staleDropped) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Edits saved by an earlier visit were thrown away because definitions.js has changed since. '));
     if (state.problems.length) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, `${state.problems.length} problem${state.problems.length > 1 ? 's' : ''}, nothing is sent until fixed:`), '\n', state.problems.slice(0, 6).join('\n')));
     if (state.needsRestart && !state.problems.length) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Physics changes apply when the level restarts. ', btn('Restart now', () => { flush(); view.ctx.sendInput({ restart: true }); })));
     statusEl.replaceChildren(...kids);
@@ -775,15 +808,34 @@ export function createDebugMenu(view) {
     renderStatus();
   };
 
-  // edits from a previous visit
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORE) ?? 'null');
-    if (saved && S.validateDefinitions(saved, { shaderNames: shaderNames() }).length === 0) {
-      draft = saved;
-      state.restored = true;
-      sendDefs(draft); // the server (and everybody else) gets them too
-    }
-  } catch { /* ignore a broken save */ }
+  // Edits from a previous visit. They are only used when they were made from THIS definitions.js: a new file (you changed it, or got a new
+  // version) starts clean, otherwise old saved edits would silently override everything in it (new backgrounds, new tuning ...).
+  const fingerprint = (text) => {
+    let x = 5381;
+    for (let i = 0; i < text.length; i++) x = ((x * 33) ^ text.charCodeAt(i)) >>> 0;
+    return `${text.length}:${x}`;
+  };
+  fetch(new URL('./definitions.js', import.meta.url), { cache: 'no-cache' })
+    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
+    .then((text) => {
+      state.base = fingerprint(text);
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(STORE) ?? 'null'); } catch { /* broken save */ }
+      if (!saved) return;
+      if (saved.base === state.base && saved.draft && S.validateDefinitions(saved.draft, { shaderNames: shaderNames() }).length === 0) {
+        draft = saved.draft;
+        state.restored = true;
+        sendDefs(draft); // the server (and everybody else) gets them too
+        validate();
+        render();
+        studio.refresh();
+      } else {
+        try { localStorage.removeItem(STORE); } catch { /* ignore */ }
+        state.staleDropped = true;
+        render();
+      }
+    })
+    .catch(() => { /* no definitions.js to compare with: nothing is restored or saved */ });
   validate();
 
   return {

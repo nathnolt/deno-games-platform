@@ -9,14 +9,41 @@
 //   finish()  call it for the final colour: it adds simple lighting (so the 3D sides are shaded), the coloured glow of a block
 //             somebody is holding, and the red tint of a block that cannot be dropped where it is
 
+/** The shadow lookup shared by every lit material (and the floor): `shadowAt(worldPosition, worldNormal)` is 1 in light, less in shadow. */
+export const SHADOW_GLSL = /* glsl */ `
+uniform sampler2D uShadowMap;
+uniform mat4 uShadowMat;
+uniform float uShadowStr;
+uniform vec2 uShadowTexel;
+float unpackShadowDepth(vec4 v) { return dot(v, vec4(255.0 / 256.0 / 16777216.0, 255.0 / 256.0 / 65536.0, 255.0 / 256.0 / 256.0, 255.0 / 256.0)); }
+float shadowAt(vec3 wp, vec3 n) {
+  if (uShadowStr <= 0.0) return 1.0;
+  vec4 sp = uShadowMat * vec4(wp + n * 0.15, 1.0);
+  vec3 p = sp.xyz / sp.w * 0.5 + 0.5;
+  if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+  float lit = 0.0;
+  for (int i = -1; i <= 1; i++) {
+    for (int j = -1; j <= 1; j++) {
+      float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + vec2(float(i), float(j)) * uShadowTexel));
+      lit += (p.z - 0.0012 > d) ? 0.0 : 1.0;
+    }
+  }
+  return 1.0 - uShadowStr * (1.0 - lit / 9.0);
+}
+`;
+
 export const vertexShader = /* glsl */ `
 varying vec2 vP;
 varying vec3 vP3;
 varying vec3 vN;
+varying vec3 vW;
+varying vec3 vWN;
 varying float vDist;
 void main() {
   vP = uv; //   texture coordinates made by the client: the front face is (x, y), the sides run along the outline and up the depth
   vP3 = position;
+  vW = (modelMatrix * vec4(position, 1.0)).xyz;
+  vWN = normalize(mat3(modelMatrix) * normal);
   vN = normalize(normalMatrix * normal);
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   vDist = length(mv.xyz);
@@ -28,6 +55,8 @@ precision highp float;
 varying vec2 vP;
 varying vec3 vP3;
 varying vec3 vN;
+varying vec3 vW;
+varying vec3 vWN;
 varying float vDist;
 uniform vec3 uFogColor;
 uniform vec2 uFog;
@@ -36,6 +65,7 @@ uniform float uSeed;
 uniform vec3 uGlow;
 uniform float uBad;
 
+${SHADOW_GLSL}
 float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
@@ -51,7 +81,9 @@ vec4 finish(vec3 c, float a) {
   vec3 n = normalize(vN);
   if (!gl_FrontFacing) n = -n; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
   float light = 0.52 + 0.55 * max(dot(n, normalize(vec3(-0.35, 0.6, 0.72))), 0.0) + 0.12 * max(n.y, 0.0);
-  c *= light;
+  vec3 wn = normalize(vWN);
+  if (!gl_FrontFacing) wn = -wn;
+  c *= light * shadowAt(vW, wn);
   c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
   c += uGlow * 0.28;
   c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, vDist)); // distant background models melt into the mist
@@ -97,6 +129,38 @@ void main() {
   c *= 0.9 + 0.2 * fbm(q * vec2(1.0, 4.0));
   float f = fract(p.y / 3.2);
   c *= 1.0 - smoothstep(0.03, 0.0, min(f, 1.0 - f)) * 0.5;
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  // dark red-brown mahogany: long straight grain with darker streaks (3D: works on any mesh)
+  mahogany: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  float warp = fbm(vec2(q.x * 0.15 + q.z * 0.1, q.y * 0.9));
+  float grain = sin((q.y * 2.6 + q.z * 1.3 + warp * 7.0) * 3.14159);
+  float streak = fbm(vec2(q.x * 0.5 + q.z * 0.5, q.y * 6.0));
+  vec3 c = mix(vec3(0.36, 0.12, 0.07), vec3(0.20, 0.06, 0.04), 0.5 + 0.35 * grain);
+  c = mix(c, vec3(0.50, 0.19, 0.10), smoothstep(0.55, 0.9, streak) * 0.6);
+  c *= 0.9 + 0.18 * fbm(vec2(q.x + q.z, q.y * 14.0));
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  // small black pebbles: dark, smooth, with a few pale flecks
+  blackstone: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3 * 2.0;
+  float n = fbm(q.xy + q.z * 0.7);
+  vec3 c = mix(vec3(0.05, 0.05, 0.06), vec3(0.17, 0.17, 0.19), n);
+  c += step(0.965, hash(floor(q.xy * 9.0 + q.z * 5.0))) * 0.25;
+  gl_FragColor = finish(c, 1.0);
+}`),
+
+  // plain warm plaster for indoor walls
+  plaster: frag(/* glsl */ `
+void main() {
+  vec3 q = vP3;
+  vec3 c = vec3(0.80, 0.72, 0.60) * (0.95 + 0.07 * fbm(q.xy * 0.6 + q.z));
+  c *= 0.97 + 0.03 * hash(floor(q.xy * 6.0));
   gl_FragColor = finish(c, 1.0);
 }`),
 
