@@ -63,7 +63,7 @@ float shadowAt(vec3 wp, vec3 n) {
       if (i < -uShadowK || i > uShadowK + 1) continue;
       float wx = (i == -uShadowK) ? 1.0 - f.x : ((i == uShadowK + 1) ? f.x : 1.0);
       vec2 uv = (base + vec2(float(i), float(j))) * uShadowTexel;
-      float d = unpackShadowDepth(texture2D(uShadowMap, uv));
+      float d = texture2D(uShadowMap, uv).r; // (a real depth texture: 24 bits, no packing)
       lit += wx * wy * ((d < zr + dot(uv - p.xy, slope)) ? 0.0 : 1.0);
     }
   }

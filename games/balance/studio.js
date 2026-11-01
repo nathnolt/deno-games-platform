@@ -1649,7 +1649,7 @@ function backgroundStudio(view, api) {
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'resolution'), size),
         w.field('area shaded (width)', numIn(() => g.range, (v) => { if (v >= 20 && v <= 600) { g.range = v; api.touch(kind); } }, 10)),
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'edge softness'), soft),
-        w.slider('depth bias', g, 'bias', kind, 0, 1, 0.01),
+        w.slider('depth bias', g, 'bias', kind, 0, 4, 0.02),
         w.slider('normal bias (texels)', g, 'normalBias', kind, 0, 6, 0.1),
       ];
     };

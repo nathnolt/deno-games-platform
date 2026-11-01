@@ -1870,9 +1870,14 @@ void main() {
     const half = cfg.range / 2;
     if (!fx.shadowRT || fx.shadowRT.width !== size) {
       fx.shadowRT?.dispose();
-      fx.shadowRT = new THREE.WebGLRenderTarget(size, size, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+      // the shadow map IS the depth buffer of this target (a depth texture: 24 bits, read back as it is). The old way, packing the depth into the four
+      // 8-bit colour channels, loses its precision on some graphics cards, and that shows up as stripes (shadow acne) over every flat surface.
+      fx.shadowRT = new THREE.WebGLRenderTarget(size, size, {
+        format: THREE.RedFormat, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: true,
+        depthTexture: new THREE.DepthTexture(size, size),
+      });
     }
-    if (!fx.depthMat) fx.depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide });
+    if (!fx.depthMat) fx.depthMat = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4 }); // (the usual hardware slope bias: occluders are stored a little further away)
     if (!fx.shadowCam) fx.shadowCam = new THREE.OrthographicCamera(-half, half, half, -half, SHADOW_NEAR, SHADOW_FAR);
     if (fx.shadowCam.right !== half) {
       Object.assign(fx.shadowCam, { left: -half, right: half, top: half, bottom: -half });
@@ -1916,7 +1921,7 @@ void main() {
     if (this.water) this.water.visible = true;
     if (this.lightMarkers) this.lightMarkers.visible = this.markersOn;
     if (this.floorMesh) this.floorMesh.visible = true;
-    u.uShadowMap.value = fx.shadowRT.texture;
+    u.uShadowMap.value = fx.shadowRT.depthTexture;
     u.uShadowStr.value = L.shadow;
     return true;
   }

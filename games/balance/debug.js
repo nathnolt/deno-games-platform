@@ -312,7 +312,7 @@ export function createDebugMenu(view) {
         s.addEventListener('change', () => { obj.softness = +s.value; touch(kind); });
         return field('edge softness', s);
       })(),
-      slider('depth bias (world units)', obj, 'bias', kind, 0, 1, 0.01),
+      slider('depth bias (world units)', obj, 'bias', kind, 0, 4, 0.02),
       slider('normal bias (texels)', obj, 'normalBias', kind, 0, 6, 0.1),
       note('Stripes or lines on surfaces: raise the normal bias a little. Shadows that float away from their object: lower the biases. A bigger area with the same resolution is blurrier.'),
     ];

@@ -289,7 +289,7 @@ function shadowErrors(s, where, err) {
   if (s.size !== undefined && ![1024, 2048, 4096, 8192].includes(s.size)) err(`${where}.size must be 1024, 2048, 4096 or 8192`);
   if (s.range !== undefined && !(isNum(s.range) && s.range >= 20 && s.range <= 600)) err(`${where}.range must be from 20 to 600`);
   if (s.softness !== undefined && ![1, 2, 3].includes(s.softness)) err(`${where}.softness must be 1, 2 or 3`);
-  if (s.bias !== undefined && !(isNum(s.bias) && s.bias >= 0 && s.bias <= 3)) err(`${where}.bias must be from 0 to 3`);
+  if (s.bias !== undefined && !(isNum(s.bias) && s.bias >= 0 && s.bias <= 5)) err(`${where}.bias must be from 0 to 5`);
   if (s.normalBias !== undefined && !(isNum(s.normalBias) && s.normalBias >= 0 && s.normalBias <= 8)) err(`${where}.normalBias must be from 0 to 8`);
 }
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
