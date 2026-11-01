@@ -53,7 +53,7 @@ export function createDebugMenu(view) {
   let draft = S.cloneDefinitions();
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
-    needsRestart: false, problems: [], restored: false, base: null, staleDropped: false,
+    needsRestart: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, sentRev: 0,
     fxShadows: true, fxReflection: true, fxBlur: true,
   };
   let timer = 0;
@@ -97,9 +97,11 @@ export function createDebugMenu(view) {
     timer = 0;
     if (!validate()) return;
     sendDefs(draft);
+    state.sentAt = performance.now();
+    state.sentRev = view.defsRev;
     try {
-      if (state.base !== null) { // (kept together with a fingerprint of the definitions.js it was made from: see the restore at the bottom)
-        localStorage.setItem(STORE, JSON.stringify({ base: state.base, draft }));
+      if (!state.pending) { // (while an old backup waits for your decision it is not overwritten)
+        localStorage.setItem(STORE, JSON.stringify(draft));
         state.restored = true;
       }
     } catch { /* private mode */ }
@@ -685,7 +687,7 @@ export function createDebugMenu(view) {
             msg.replaceChildren(err(`Not valid JSON: ${e.message}`));
           }
         }), msg),
-      section('Saved edits', note(state.restored ? 'Your edits are kept in this browser and used again after a reload, instead of the definitions.js on the server.' : 'Nothing saved yet.'),
+      section('Saved edits', note(state.restored ? 'Your edits are kept in this browser as a backup. After a reload the menu offers to restore them; the game itself always starts from definitions.js.' : 'Nothing saved yet.'),
         btn('Discard saved edits and reload', () => {
           try { localStorage.removeItem(STORE); } catch { /* ignore */ }
           window.location.reload();
@@ -775,7 +777,25 @@ export function createDebugMenu(view) {
 
   function renderStatus() {
     const kids = [];
-    if (state.staleDropped) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Edits saved by an earlier visit were thrown away because definitions.js has changed since. '));
+    if (state.pending) {
+      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Edits from an earlier visit are saved in this browser. They are not used unless you restore them (new edits are not saved until you choose). ',
+        btn('Restore them', () => {
+          draft = state.pending;
+          state.pending = null;
+          PHYSICS.forEach((k) => touch(k));
+          touch('backgrounds');
+          render();
+          studio.refresh();
+        }),
+        btn('Discard', () => {
+          try { localStorage.removeItem(STORE); } catch { /* ignore */ }
+          state.pending = null;
+          renderStatus();
+        }, 'bb-dbg-danger')));
+    }
+    if (state.serverError) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, 'The server refused your last change: '), state.serverError));
+    if (state.unconfirmed) kids.push(h('div', { class: 'bb-dbg-warn' }, 'The server has not confirmed your last change. Is it running? After replacing server.js or shared.js the game server has to be restarted.'));
+    for (const m of state.viewProblems) kids.push(h('div', { class: 'bb-dbg-err' }, m));
     if (state.problems.length) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, `${state.problems.length} problem${state.problems.length > 1 ? 's' : ''}, nothing is sent until fixed:`), '\n', state.problems.slice(0, 6).join('\n')));
     if (state.needsRestart && !state.problems.length) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Physics changes apply when the level restarts. ', btn('Restart now', () => { flush(); view.ctx.sendInput({ restart: true }); })));
     statusEl.replaceChildren(...kids);
@@ -808,34 +828,35 @@ export function createDebugMenu(view) {
     renderStatus();
   };
 
-  // Edits from a previous visit. They are only used when they were made from THIS definitions.js: a new file (you changed it, or got a new
-  // version) starts clean, otherwise old saved edits would silently override everything in it (new backgrounds, new tuning ...).
-  const fingerprint = (text) => {
-    let x = 5381;
-    for (let i = 0; i < text.length; i++) x = ((x * 33) ^ text.charCodeAt(i)) >>> 0;
-    return `${text.length}:${x}`;
+  // Edits from a previous visit are only a BACKUP: the game starts from definitions.js (and what the server has), so a new file is never
+  // silently overridden by old saved edits. If the backup differs from what is running now, the menu offers to restore or discard it.
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE) ?? 'null');
+    const plain = saved && saved.draft ? saved.draft : saved; // (an older version wrapped it)
+    if (plain && typeof plain === 'object' && JSON.stringify(plain) !== JSON.stringify(draft)) state.pending = plain;
+  } catch { /* a broken save is ignored */ }
+  view.onProblem = (msg) => {
+    if (!state.viewProblems.includes(msg)) state.viewProblems.push(msg);
+    renderStatus();
   };
-  fetch(new URL('./definitions.js', import.meta.url), { cache: 'no-cache' })
-    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
-    .then((text) => {
-      state.base = fingerprint(text);
-      let saved = null;
-      try { saved = JSON.parse(localStorage.getItem(STORE) ?? 'null'); } catch { /* broken save */ }
-      if (!saved) return;
-      if (saved.base === state.base && saved.draft && S.validateDefinitions(saved.draft, { shaderNames: shaderNames() }).length === 0) {
-        draft = saved.draft;
-        state.restored = true;
-        sendDefs(draft); // the server (and everybody else) gets them too
-        validate();
-        render();
-        studio.refresh();
-      } else {
-        try { localStorage.removeItem(STORE); } catch { /* ignore */ }
-        state.staleDropped = true;
-        render();
+  view.onDefsError = (msg) => {
+    state.serverError = msg;
+    renderStatus();
+  };
+  // a change that the server never confirms (it needs to be restarted after new files, or it is down) must not fail silently
+  const watchdog = setInterval(() => {
+    if (state.sentAt && performance.now() - state.sentAt > 2500) {
+      if (view.defsRev === state.sentRev && !state.serverError) {
+        state.unconfirmed = true;
+        renderStatus();
       }
-    })
-    .catch(() => { /* no definitions.js to compare with: nothing is restored or saved */ });
+      state.sentAt = 0;
+    }
+    if (state.sentAt === 0 && state.unconfirmed && view.defsRev !== state.sentRev) {
+      state.unconfirmed = false;
+      renderStatus();
+    }
+  }, 500);
   validate();
 
   return {
@@ -853,6 +874,9 @@ export function createDebugMenu(view) {
       modelPrev?.dispose();
       clearTimeout(timer);
       view.onRun = null;
+      view.onProblem = null;
+      view.onDefsError = null;
+      clearInterval(watchdog);
       view.debugFreeCam(false);
       view.debugShowDrop(false);
       root.remove();

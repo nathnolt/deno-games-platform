@@ -83,6 +83,7 @@ class BalanceGame {
     this.startedAt = -Infinity;
     this.defsRev = 0; //          debug: bumps every time somebody changes the definitions
     this.defsFrom = null; //      debug: who made the last change
+    this.defsError = ''; //       debug: why the last change was refused ('' = it was not)
     this.defsBurst = 0; //        debug: > 0 while the definitions are attached to the snapshots
     this.lab = { on: false, paused: false, rules: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
     this.labId = LAB_ID_START;
@@ -148,7 +149,7 @@ class BalanceGame {
       total: this.total,
       why: this.why,
       still: round2(clamp(this.settle / tuning.settleTime, 0, 1)),
-      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, dfrom: this.defsFrom, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
+      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, dfrom: this.defsFrom, derr: this.defsError, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
   }
 
@@ -200,13 +201,15 @@ class BalanceGame {
     if (asm.got < asm.n) return;
     this.defsParts.delete(id);
     let defs;
-    try { defs = JSON.parse(asm.parts.join('')); } catch { return; }
+    try { defs = JSON.parse(asm.parts.join('')); } catch { this.defsError = 'the definitions arrived damaged (not valid JSON)'; return; }
     if (!defs || typeof defs !== 'object') return;
     const problems = validateDefinitions(defs); // shader names are a client matter: not checked here
     if (problems.length) {
       console.warn('balance: refused new definitions:', problems.slice(0, 5));
+      this.defsError = problems.slice(0, 3).join('; ');
       return;
     }
+    this.defsError = '';
     const keys = () => `${SHAPE_KEYS.join()}|${MATERIAL_KEYS.join()}`;
     const before = keys();
     applyDefinitions(defs);
@@ -326,7 +329,8 @@ class BalanceGame {
     if (!h) return;
     const level = levels[this.levelIdx];
     const pos = h.rec.body.getPosition();
-    if (!this.lab.on && (!inDrop(level, pos.x, pos.y) || this.#overlaps(h.rec))) return this.#putBack(p); // (the level lab lets you drop anywhere)
+    // Once a block has been lifted into the drop zone (`armed`) it may be dropped anywhere that is free; a block that never got there, or that overlaps another block, goes back to the table.
+    if (!this.lab.on && (!(h.rec.armed || inDrop(level, pos.x, pos.y)) || this.#overlaps(h.rec))) return this.#putBack(p); // (the level lab lets you drop anywhere)
 
     const angle = h.rec.body.getAngle();
     const item = h.item;
@@ -502,7 +506,7 @@ class BalanceGame {
       const pos = p.held.rec.body.getPosition();
       const inside = inDrop(level, pos.x, pos.y);
       if (inside) p.held.rec.armed = true;
-      p.held.rec.bad = !this.lab.on && ((p.held.rec.armed && !inside) || this.#overlaps(p.held.rec)); // red = you have taken it out of the drop zone again (letting go sends it back to the table)
+      p.held.rec.bad = !this.lab.on && this.#overlaps(p.held.rec); // red = it overlaps another block (and only then) // red = you have taken it out of the drop zone again (letting go sends it back to the table)
     }
     if (this.phase === PHASE.PLAY && !this.lab.paused) this.#fragile(dt);
     if (this.phase === PHASE.PLAY && (!this.lab.on || this.lab.rules)) this.#rules(dt); // (the level lab can switch the rules back on to test failing)

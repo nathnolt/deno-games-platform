@@ -187,6 +187,10 @@ class BalanceView {
   dropHelper = null; //      debug: wireframe of the drop zone
   defsRev = 0; //            debug: which version of the definitions we have
   defsAsk = 0;
+  onDefsError = null; //    debug: called with the server's reason when it refused new definitions ('' = fine again)
+  onProblem = null; //      debug: called with a message when something in the drawing or the definitions went wrong (the debug menu shows it)
+  problems = new Map(); //  message -> count (each message is reported once)
+  lastDerr = '';
   onRun = null; //           debug: called when a level starts / restarts
   onSnap = null; //          debug: called with every snapshot (the level studio draws the live world from it)
   dock = 0; //               debug: pixels at the left that the studio panel covers (the game is drawn in the rest)
@@ -361,7 +365,19 @@ class BalanceView {
 
   // ── debug menu support (everything the menu in debug.js needs from the view) ──
   /** Is somebody else's change to the definitions on its way? Then take it. (Only with DEBUG on.) */
+  /** Report a problem once (console + the debug menu). */
+  #report(msg, e) {
+    if (this.problems.has(msg)) return;
+    this.problems.set(msg, 1);
+    console.error(`balance: ${msg}`, e ?? '');
+    this.onProblem?.(msg);
+  }
+
   #syncDefs(s) {
+    if ((s.derr ?? '') !== this.lastDerr) { // the server refused our last change (or accepted a new one after refusing)
+      this.lastDerr = s.derr ?? '';
+      this.onDefsError?.(this.lastDerr);
+    }
     if (s.drev === undefined || s.drev === this.defsRev) return;
     if (s.defs) { // the server applied somebody's change (maybe ours): everybody takes over its version, at the same snapshot
       applyDefinitions(s.defs);
@@ -376,6 +392,14 @@ class BalanceView {
 
   /** Rebuild everything that is drawn from the definitions: the block geometry, the level cards and the world. */
   debugRefresh() {
+    try {
+      this.#refresh();
+    } catch (e) {
+      this.#report(`building the scene failed: ${e?.message ?? e}`, e);
+    }
+  }
+
+  #refresh() {
     for (const parts of this.geoCache.values()) parts.forEach((p) => p.geo.dispose());
     this.geoCache.clear();
     this.#clearModelGeo();
@@ -1280,7 +1304,8 @@ void main() {
       const mine = v.owner === this.ctx.me.slot && this.#carrying();
       const [x, y, a] = mine ? [this.local.x, this.local.y, (this.local.rot * Math.PI) / 180] : [v.tx, v.ty, v.ta];
       const pose = this.#hoverPose(x, y, a);
-      pose.tl = this.#tiltAt(v, y);
+      v.tlMax = Math.max(v.tlMax ?? 0, this.#tiltAt(v, y)); // once it has stood up it stays upright, also when you carry it down again
+      pose.tl = v.tlMax;
       // a lying block is only DEPTH thick: lower its centre so it rests on the table instead of floating half its height above it
       pose.y -= (1 - pose.tl) * (v.size.h / 2 - DEPTH / 2);
       return pose;
@@ -1494,7 +1519,13 @@ void main() {
       }
     }
 
-    this.#renderAll();
+    try {
+      this.#renderAll();
+    } catch (e) {
+      this.#report(`drawing failed: ${e?.message ?? e}`, e);
+      this.renderer.setRenderTarget(null);
+      this.#showAll();
+    }
   };
 
   // ── drawing: shadow map → reflection → (blurred background) → everything else → the blocks you hold ──
@@ -1505,7 +1536,7 @@ void main() {
       try {
         return fn();
       } catch (e) { // a pass that cannot run on this machine is switched off for good; the game itself keeps working
-        console.warn(`balance: the ${name} effect failed and was switched off`, e);
+        this.#report(`the ${name} effect failed and was switched off: ${e?.message ?? e}`, e);
         this.fx.off.add(name);
         r.setRenderTarget(null);
         this.#showAll();
@@ -1534,7 +1565,8 @@ void main() {
   }
 
   #showAll() {
-    for (const c of this.scene.children) c.visible = true;
+    for (const [c, v] of this.hidden ?? []) c.visible = v;
+    this.hidden = [];
     if (this.world) this.world.visible = true;
     if (this.scenery) this.scenery.visible = true;
     if (this.mainGroup) this.mainGroup.visible = true;
@@ -1594,7 +1626,17 @@ void main() {
 
   /** Hide everything that is not part of the scenery (blocks, table, bowl, water); optionally the floor too. */
   #soloScenery(on, hideFloor) {
-    for (const c of this.scene.children) if (c !== this.world) c.visible = !on;
+    if (on) {
+      this.hidden = [];
+      for (const c of this.scene.children) {
+        if (c === this.world) continue;
+        this.hidden.push([c, c.visible]);
+        c.visible = false;
+      }
+    } else {
+      for (const [c, v] of this.hidden ?? []) c.visible = v; // (back to what each one was: the drop-zone outline is hidden on purpose)
+      this.hidden = [];
+    }
     if (this.mainGroup) this.mainGroup.visible = !on;
     if (hideFloor && this.floorMesh) this.floorMesh.visible = !on;
   }

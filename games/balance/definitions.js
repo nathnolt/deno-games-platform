@@ -35,9 +35,12 @@ export const tuning = {
 
   zone: { x0: -30, x1: 30 }, //                       default sideways limit: a block whose centre leaves it loses the level
   drop: { x0: -120, x1: 120, y0: 1.5, y1: 100 }, //     default DROP ZONE (invisible): let go of a block inside it and it falls into the bowl
-  view: { w: 84, h: 46, cy: 10 }, //                  what the camera must always show (width, height, centre height)
-  camera: { fov: 28, pitch: 20, targetY: 8 }, //      vertical field of view, degrees the camera looks down, height it looks at
+  view: { w: 72, h: 46, cy: 10 }, //                  what the camera must always show (width, height, centre height)
+  camera: { fov: 21, pitch: 12, targetY: 10 }, //      vertical field of view, degrees the camera looks down, height it looks at
 };
+
+
+
 
 // ── Materials ────────────────────────────────────────────────────────────────────────────────────────────────
 // friction: 0..20 (mu = friction / 20)         weight: density, 10 = same density as water (mass = area * weight / 10)
@@ -80,17 +83,17 @@ export const shapes = {
 // Blocks that are not 'float' blocks lose the level if they touch the bowl.
 // The floor of the bowl is at y = rimY - b - t: static blocks (pillars) that stand in it must reach down to rimY - b.
 export const bowls = {
-    bowl1: {
-    a: 16.5,
+  bowl1: {
+    a: 20.5,
     b: 8,
-    t: 0.7,
-    rimY: 1.6,
-    r: 4.3,
-    zscale: 0.8,
-    square: 6.4,
-    squareBottom: 5.9,
-    shader: 'bowlwood',
-    water: { color: '#71b5fe', opacity: 0.45, reflect: 0.6 },
+    t: 0.9,
+    rimY: 1.5,
+    r: 3.3,
+    zscale: 0.6,
+    square: 8.6,
+    squareBottom: 9.1,
+    shader: 'mahogany',
+    water: { color: '#0084ff', opacity: 0.45, reflect: 1 },
   },
   bowl2: {
     a: 22,
@@ -105,6 +108,10 @@ export const bowls = {
     water: { color: '#6cc3d5', opacity: 0.45, reflect: 0.6 },
   },
 };
+
+
+
+
 
 
 // ── Models ───────────────────────────────────────────────────────────────────────────────────────────────────
