@@ -42,11 +42,13 @@ export const tuning = {
 // ── Materials ────────────────────────────────────────────────────────────────────────────────────────────────
 // friction: 0..20 (mu = friction / 20)         weight: density, 10 = same density as water (mass = area * weight / 10)
 // static:   never moves                        float: dynamic, pushed up by the water, never counts as "fallen in the water"
+// stackLimit: how many blocks may rest on top of this block (directly or through other blocks). One more and it breaks.
+//           The block wears a coloured dot: green = nothing on it, orange = 1, red = 2 (= the limit), and it shatters at limit + 1.
 // shader:   name of a GLSL shader in client/shaders.js
 export const materials = {
   wood: { friction: 10, weight: 10, shader: 'wood' },
   ash: { friction: 8, weight: 8, shader: 'wood2' },
-  glass: { friction: 4, weight: 5, shader: 'glass' },
+  glass: { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
   stone: { friction: 14, weight: 20, shader: 'stone1' },
   static: { static: true, friction: 12, shader: 'stone2' },
   floatBlock: { float: true, friction: 8, weight: 3, shader: 'float' },
@@ -59,24 +61,7 @@ export const materials = {
 //   add `visual: true` to a poly to make it a drawing-only outline (it replaces the parts when the block is drawn)
 // Origin and orientation do not matter: every shape is re-centred on the middle of its bounding box when it is used.
 export const shapes = {
-  rect1: [{ type: 'poly', points: '0,0 4,0 4,1 0,1' }],
   square1: [{ type: 'poly', points: '0,0 4,0 4,4 0,4' }],
-  small1: [{ type: 'poly', points: '0,0 2,0 2,2 0,2' }],
-  plank1: [{ type: 'poly', points: '0,0 8,0 8,1 0,1' }],
-  bridge1: [{ type: 'poly', points: '0,0 14,0 14,1.5 0,1.5' }],
-  slab1: [{ type: 'poly', points: '0,0 12,0 12,1.5 0,1.5' }],
-  raft1: [{ type: 'poly', points: '0,0 16,0 16,3 0,3' }],
-  raft2: [{ type: 'poly', points: '0,0 11,0 11,3 0,3' }],
-  pillar1: [{ type: 'poly', points: '0,0 2,0 2,10 0,10' }],
-  pillar2: [{ type: 'poly', points: '0,0 2,0 2,7 0,7' }],
-  tri1: [{ type: 'poly', points: '0,0 4,0 2,3' }],
-  plus1: [
-    { type: 'poly', points: '0,1 3,1 3,2 0,2' },
-    { type: 'poly', points: '1,0 2,0 2,3 1,3' },
-    { type: 'poly', visual: true, points: '1,0 2,0 2,1 3,1 3,2 2,2 2,3 1,3 1,2 0,2 0,1 1,1' },
-  ],
-  circle1: [{ type: 'circle', diameter: 4 }],
-  circle2: [{ type: 'circle', diameter: 2.5 }],
 };
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -188,123 +173,27 @@ export const backgrounds = {
 // zone (optional)      { x0, x1 }: sideways limits (default tuning.zone). Leaving it, or touching the water/bowl, loses the level.
 // drop (optional)      { x0, x1, y0, y1 }: the drop zone rectangle (default tuning.drop)
 //
-// Pillars below are 'pillar1' (2 x 10) centred at y = -3: they stand on the floor of the bowl (y = -8) and top out at y = 2.
 export const levels = [
   {
-    name: 'First Steps',
+    name: 'Level 1',
     difficulty: 'easy',
     bowl: 'bowl1',
     background: 'zen1',
+    // two columns of two static squares: their tops are at y = 1.6, just above the water
     initialBlocks: [
-      { shape: 'pillar1', material: 'static', rot: 0, x: -5, y: -3 },
-      { shape: 'pillar1', material: 'static', rot: 0, x: 5, y: -3 },
-    ],
-    chooseShapes: 4,
-    shapes: [
-      { shape: 'plank1', material: 'wood' },
-      { shape: 'square1', material: 'wood' },
-      { shape: 'rect1', material: 'wood' },
-      { shape: 'square1', material: 'wood' },
-      { shape: 'small1', material: 'wood' },
-    ],
-  },
-  {
-    name: 'The Slope',
-    difficulty: 'easy',
-    bowl: 'bowl1',
-    background: 'zen1',
-    // one short pillar with a slanted slab on top: the surface you build on is tilted
-    initialBlocks: [
-      { shape: 'pillar1', material: 'static', rot: 0, x: 0, y: -3 },
-      { shape: 'slab1', material: 'static', rot: 14, x: 0, y: 2.75 },
-    ],
-    chooseShapes: 4,
-    shapes: [
-      { shape: 'rect1', material: 'wood' },
-      { shape: 'square1', material: 'stone' },
-      { shape: 'rect1', material: 'wood' },
-      { shape: 'small1', material: 'wood' },
-      { shape: 'plus1', material: 'wood' },
-      { shape: 'tri1', material: 'wood' },
-    ],
-  },
-  {
-    name: 'Twin Pillars',
-    difficulty: 'medium',
-    bowl: 'bowl1',
-    background: 'zen1',
-    initialBlocks: [
-      { shape: 'pillar1', material: 'static', rot: 0, x: -7, y: -3 },
-      { shape: 'pillar1', material: 'static', rot: 0, x: 7, y: -3 },
-    ],
-    chooseShapes: 4,
-    shapes: [
-      { shape: 'bridge1', material: 'wood' },
-      { shape: 'square1', material: 'stone' },
-      { shape: 'plank1', material: 'wood' },
-      { shape: 'plus1', material: 'wood' },
-      { shape: 'circle1', material: 'wood' },
-      { shape: 'rect1', material: 'glass' },
-      { shape: 'square1', material: 'wood' },
-      { shape: 'tri1', material: 'wood' },
-    ],
-  },
-  {
-    name: 'Lily Pad',
-    difficulty: 'medium',
-    bowl: 'bowl2',
-    background: 'zen2',
-    // no pillars: everything is built on a block that floats on the water. One-sided piles tip it over.
-    initialBlocks: [{ shape: 'raft1', material: 'floatBlock', rot: 0, x: 0, y: 0.6 }],
-    chooseShapes: 3,
-    shapes: [
-      { shape: 'rect1', material: 'wood' },
-      { shape: 'rect1', material: 'wood' },
-      { shape: 'small1', material: 'wood' },
-      { shape: 'small1', material: 'wood' },
-      { shape: 'plank1', material: 'wood' },
-      { shape: 'rect1', material: 'wood' },
-    ],
-  },
-  {
-    name: 'Glass Cannon',
-    difficulty: 'hard',
-    bowl: 'bowl1',
-    background: 'zen2',
-    initialBlocks: [
-      { shape: 'pillar1', material: 'static', rot: 0, x: 0, y: -3 },
-      { shape: 'slab1', material: 'static', rot: -18, x: 0, y: 2.75 },
+      { shape: 'square1', material: 'static', rot: 0, x: -5, y: -4.4 },
+      { shape: 'square1', material: 'static', rot: 0, x: -5, y: -0.4 },
+      { shape: 'square1', material: 'static', rot: 0, x: 5, y: -4.4 },
+      { shape: 'square1', material: 'static', rot: 0, x: 5, y: -0.4 },
     ],
     chooseShapes: 3,
     shapes: [
-      { shape: 'square1', material: 'stone' },
-      { shape: 'plank1', material: 'glass' },
-      { shape: 'rect1', material: 'wood' },
-      { shape: 'plus1', material: 'glass' },
-      { shape: 'tri1', material: 'stone' },
-      { shape: 'rect1', material: 'glass' },
-      { shape: 'circle2', material: 'wood' },
-      { shape: 'small1', material: 'wood' },
-    ],
-  },
-  {
-    name: 'Tightrope',
-    difficulty: 'hard',
-    bowl: 'bowl1',
-    background: 'zen2',
-    zone: { x0: -22, x1: 22 },
-    initialBlocks: [
-      { shape: 'raft2', material: 'floatBlock', rot: 0, x: 0, y: 0.6 },
-      { shape: 'pillar1', material: 'static', rot: 0, x: -14, y: -3 },
-    ],
-    chooseShapes: 2,
-    shapes: [
-      { shape: 'small1', material: 'wood' },
-      { shape: 'rect1', material: 'wood' },
-      { shape: 'small1', material: 'wood' },
-      { shape: 'rect1', material: 'glass' },
       { shape: 'square1', material: 'wood' },
-      { shape: 'small1', material: 'glass' },
+      { shape: 'square1', material: 'glass' },
+      { shape: 'square1', material: 'wood' },
+      { shape: 'square1', material: 'wood' },
+      { shape: 'square1', material: 'stone' },
+      { shape: 'square1', material: 'wood' },
     ],
   },
 ];

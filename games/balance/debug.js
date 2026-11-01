@@ -57,6 +57,7 @@ export function createDebugMenu(view) {
   };
   let timer = 0;
   let infoToken = 0;
+  let modelPrev = null; // the preview window of the Models tab
   const shaderNames = () => view.shaderNames;
   const keys = (table) => Object.keys(draft[table]);
   const pick = (name, list) => {
@@ -76,6 +77,7 @@ export function createDebugMenu(view) {
     if (PHYSICS.has(kind)) state.needsRestart = true;
     clearTimeout(timer);
     if (validate()) timer = setTimeout(send, 300);
+    if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
     studio.changed(kind); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
   }
 
@@ -117,6 +119,11 @@ export function createDebugMenu(view) {
   function num(text, obj, key, kind, o = {}) {
     const i = h('input', { type: 'number', step: o.step ?? 'any', min: o.min, max: o.max, value: obj[key] ?? '' });
     i.addEventListener('input', () => {
+      if (i.value === '' && o.optional) {
+        delete obj[key];
+        touch(kind);
+        return;
+      }
       const v = parseFloat(i.value);
       if (!Number.isFinite(v)) return;
       obj[key] = o.int ? Math.round(v) : v;
@@ -461,6 +468,7 @@ export function createDebugMenu(view) {
         slider('weight', m, 'weight', 'materials', 0, 40, 0.5),
         check('static (never moves)', m, 'static', 'materials'),
         check('float (buoyant)', m, 'float', 'materials'),
+        num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),
         select('shader', shaderNames(), m, 'shader', 'materials'),
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),
       note('Block shaders (wood, glass, stone1, stone2, float) use the face of the block; 3D shaders (wood2, ceramic, bark ...) work everywhere.'),
@@ -542,7 +550,17 @@ export function createDebugMenu(view) {
       if (!parts.length) list.replaceChildren(err('The file has no faces.'));
     }).catch((e) => { if (token === infoToken) list.replaceChildren(err(`Cannot load ${m.file}: ${e.message}`)); });
     load();
+    // a little window with the model, as the game draws it (turns slowly; drag to turn, wheel to zoom)
+    const canvas = h('canvas', { class: 'bb-st-canvas' });
+    const prevBox = h('div', { class: 'bb-dbg-modelprev' }, canvas);
+    modelPrev?.dispose();
+    modelPrev = null;
+    try {
+      modelPrev = view.debugModelPreview(canvas);
+      modelPrev.set(m);
+    } catch (e) { prevBox.append(h('div', { class: 'bb-dbg-err' }, String(e.message ?? e))); }
     out.push(
+      section('Preview', prevBox),
       section(null,
         text('file in ./models', m, 'file', 'models'),
         select('default shader', [['', '(stone1)'], ...shaderNames()], m, 'shader', 'models'),
@@ -679,6 +697,7 @@ export function createDebugMenu(view) {
     h('span', { class: 'bb-dbg-grow' }),
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
+    btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
     btn('Restart', () => { flush(); view.ctx.sendInput({ restart: true }); }),
     btn('Menu', () => view.ctx.sendInput({ menu: true })),
     btn('✕', () => setOpen(false)));
@@ -717,6 +736,7 @@ export function createDebugMenu(view) {
   function setOpen(on) {
     state.open = on;
     panel.classList.toggle('bb-show', on);
+    if (!on) { modelPrev?.dispose(); modelPrev = null; }
     toggle.classList.toggle('bb-hide', on);
     if (on) render();
   }
@@ -737,6 +757,7 @@ export function createDebugMenu(view) {
     renderTabs();
     renderStatus();
     const top = bodyEl.scrollTop;
+    if (state.tab !== 'models') { modelPrev?.dispose(); modelPrev = null; }
     bodyEl.replaceChildren(...[TABS[state.tab].render()].flat().filter(Boolean));
     bodyEl.scrollTop = top;
   }
@@ -777,6 +798,7 @@ export function createDebugMenu(view) {
     dispose() {
       window.removeEventListener('keydown', onKey);
       studio.dispose();
+      modelPrev?.dispose();
       clearTimeout(timer);
       view.onRun = null;
       view.debugFreeCam(false);

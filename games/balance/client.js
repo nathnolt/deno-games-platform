@@ -21,6 +21,7 @@ const SEND_GAP = 33; //          ms between move messages (~30 per second)
 const ROTATE_SPEED = 150; //     degrees per second while Q / E is held
 const WHEEL_STEP = 15; //        degrees per mouse-wheel notch
 const BOWL_SEGS = 72;
+const LAMP = ['#22c55e', '#f97316', '#ef4444']; // lamp on a fragile block: nothing on it, something on it, at its limit
 const TABLE = { w: 110, d: 52, h: 4, z: 2 }; // the wooden table the bowl and the waiting blocks stand on (its top is the bottom of the bowl)
 
 /** A colour as the raw numbers of its hex code: for our own shaders, which write colours to the screen without any conversion. */
@@ -149,6 +150,15 @@ function circleOutline(part, sides = 48) {
 
 class BalanceView {
   markerGeo = Object.assign(new THREE.SphereGeometry(0.55, 16, 12), { userData: { shared: true } }); // (never disposed with a scene)
+  dotGeo = Object.assign(new THREE.CircleGeometry(1, 32), { userData: { shared: true } }); // the stack-limit lamp on glass
+  shardGeo = Object.assign(new THREE.BoxGeometry(1, 1, 1), { userData: { shared: true } });
+  shards = []; //            pieces of a block that just broke: { mesh, vx, vy, vz, spin, life }
+  instGroups = new Map(); // debug: background model instance index -> its 3D group (the background studio picks and moves them)
+  selIndex = null; //       debug: selected instance
+  selBox = null; //         debug: box drawn around it
+  floorY = 0;
+  camHook = null; //        debug: { down(e) -> consumed?, move(e), up(e) } lets a studio use the pointer while the free camera is on
+  hookDrag = false;
   objCache = new Map(); //   model file -> Promise of the parsed .obj
   modelGeo = new Map(); //   file|flat/smooth -> [{ name, geo }] (shared by every instance of the model)
   worldToken = 0; //         bumps whenever the world is rebuilt, so late-loading models of the old one are dropped
@@ -260,7 +270,11 @@ class BalanceView {
     // 1. drop views whose block is gone (remembering where they were, so the block can move on smoothly from there)
     const inBody = new Set(s.b.map((r) => r[0]));
     const onTable = new Set(s.tbl.filter((r) => r[4] < 0).map((r) => r[0]));
-    for (const [id, v] of this.bodyViews) if (!inBody.has(id)) this.#remove(this.bodyViews, id, v);
+    for (const [id, v] of this.bodyViews) {
+      if (inBody.has(id)) continue;
+      if (v.limit !== undefined && v.st === BODY.NORMAL && s.ph === PHASE.PLAY) this.#shatter(v); // a fragile block that was just lying there: it broke
+      this.#remove(this.bodyViews, id, v);
+    }
     for (const [id, v] of this.tableViews) if (!onTable.has(id)) this.#remove(this.tableViews, id, v);
 
     // 2. blocks on the table
@@ -273,9 +287,10 @@ class BalanceView {
 
     // 3. blocks in the play area
     let mine = null;
-    for (const [id, si, mi, x, y, a, st, owner] of s.b) {
+    for (const [id, si, mi, x, y, a, st, owner, load] of s.b) {
       const v = this.bodyViews.get(id) ?? this.#makeView(this.bodyViews, id, si, mi, { x, y, a, st, owner });
       Object.assign(v, { tx: x, ty: y, ta: a, st, owner });
+      this.#setLoad(v, load ?? 0);
       v.static = st === BODY.STATIC;
       const held = st === BODY.HELD || st === BODY.HELD_BAD;
       if (held && owner === this.ctx.me.slot) mine = id;
@@ -317,6 +332,8 @@ class BalanceView {
     this.#disposeTree(this.scene);
     this.#disposeTree(this.frontScene);
     this.markerGeo.dispose();
+    this.dotGeo.dispose();
+    this.shardGeo.dispose();
     this.renderer.dispose();
     this.root.remove();
   }
@@ -374,6 +391,150 @@ class BalanceView {
     const off = this.camera.position.clone().sub(target);
     this.freeCam = { target, dist: off.length(), yaw: Math.atan2(off.x, off.z), pitch: Math.asin(off.y / off.length()) };
     this.mode = 'none';
+  }
+
+  /**
+   * A small 3D window that shows one model with its shaders (for the Models tab and the background studio).
+   *   preview.set(def)   def = { file, shader?, shaders?, smooth? } (a draft entry of `models`)     preview.dispose()
+   * It turns slowly; drag to turn it yourself, wheel to zoom.
+   */
+  debugModelPreview(canvas) {
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#e7e2d6');
+    scene.add(new THREE.AmbientLight('#ffffff', 0.9));
+    const sun = new THREE.DirectionalLight('#ffffff', 1.4);
+    sun.position.set(-20, 40, 40);
+    scene.add(sun);
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 5000);
+    const cam = { yaw: 0.6, pitch: 0.35, dist: 50, target: new THREE.Vector3(), auto: true };
+    let group = null;
+    let token = 0;
+    let drag = null;
+    let raf = 0;
+    let dead = false;
+    let last = performance.now();
+
+    const place = () => {
+      const cp = Math.cos(cam.pitch);
+      camera.position.set(cam.target.x + cam.dist * cp * Math.sin(cam.yaw), cam.target.y + cam.dist * Math.sin(cam.pitch), cam.target.z + cam.dist * cp * Math.cos(cam.yaw));
+      camera.lookAt(cam.target);
+    };
+    const loop = () => {
+      if (dead) return;
+      raf = requestAnimationFrame(loop);
+      const now = performance.now();
+      if (cam.auto && !drag) cam.yaw += ((now - last) / 1000) * 0.5;
+      last = now;
+      const w = Math.max(1, canvas.clientWidth);
+      const h = Math.max(1, canvas.clientHeight);
+      if (canvas.width !== Math.floor(w * renderer.getPixelRatio()) || canvas.height !== Math.floor(h * renderer.getPixelRatio())) {
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      place();
+      renderer.render(scene, camera);
+    };
+    const onDown = (e) => { drag = { x: e.clientX, y: e.clientY }; cam.auto = false; canvas.setPointerCapture(e.pointerId); };
+    const onMove = (e) => {
+      if (!drag) return;
+      cam.yaw -= (e.clientX - drag.x) * 0.008;
+      cam.pitch = THREE.MathUtils.clamp(cam.pitch + (e.clientY - drag.y) * 0.008, -0.3, 1.5);
+      drag = { x: e.clientX, y: e.clientY };
+    };
+    const onUp = () => { drag = null; };
+    const onWheel = (e) => { e.preventDefault(); cam.dist = THREE.MathUtils.clamp(cam.dist * Math.exp(e.deltaY * 0.001), 1, 5000); };
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointermove', onMove);
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointercancel', onUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    raf = requestAnimationFrame(loop);
+
+    return {
+      set: async (def) => {
+        const mine = ++token;
+        let parts;
+        try {
+          parts = await this.#modelParts(def);
+        } catch {
+          return;
+        }
+        if (mine !== token || dead) return;
+        if (group) {
+          group.removeFromParent();
+          group.traverse((o) => o.material?.dispose());
+        }
+        group = new THREE.Group();
+        parts.forEach((p, i) => {
+          const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
+          group.add(new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide)));
+        });
+        scene.add(group);
+        const box = new THREE.Box3().setFromObject(group);
+        const size = box.getSize(new THREE.Vector3());
+        box.getCenter(cam.target);
+        cam.dist = Math.max(size.x, size.y, size.z, 0.01) * 1.9;
+      },
+      dispose: () => {
+        dead = true;
+        cancelAnimationFrame(raf);
+        canvas.removeEventListener('pointerdown', onDown);
+        canvas.removeEventListener('pointermove', onMove);
+        canvas.removeEventListener('pointerup', onUp);
+        canvas.removeEventListener('pointercancel', onUp);
+        canvas.removeEventListener('wheel', onWheel);
+        if (group) group.traverse((o) => o.material?.dispose());
+        renderer.dispose();
+      },
+    };
+  }
+
+  /** The free camera back at the place the game puts it. */
+  debugCameraHome() {
+    this.debugFreeCam(false);
+    this.debugFreeCam(true);
+  }
+
+  /** Aim the free camera at a point (and keep its distance). */
+  debugLookAt(x, y, z) {
+    if (this.freeCam) this.freeCam.target.set(x, y, z);
+  }
+
+  /** Index of the background model under the pointer (client coordinates), or null. */
+  debugModelAt(clientX, clientY) {
+    this.#setRay({ clientX, clientY });
+    const meshes = [];
+    for (const g of this.instGroups.values()) g.traverse((o) => o.isMesh && meshes.push(o));
+    return this.ray.intersectObjects(meshes, false)[0]?.object.userData.inst ?? null;
+  }
+
+  /** Where the pointer's ray meets the horizontal plane `y` above the floor: { x, z } in world units, or null. */
+  debugGroundAt(clientX, clientY, y) {
+    this.#setRay({ clientX, clientY });
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(this.floorY + y));
+    const hit = new THREE.Vector3();
+    return this.ray.ray.intersectPlane(plane, hit) ? { x: hit.x, z: hit.z } : null;
+  }
+
+  /** Show a model instance's new numbers at once (the draft reaches the server and comes back a moment later). */
+  debugSetInstance(index, inst) {
+    const g = this.instGroups.get(index);
+    if (!g) return;
+    const deg = Math.PI / 180;
+    g.scale.setScalar(inst.scale ?? 1);
+    const r = inst.rotation ?? [0, 0, 0];
+    g.rotation.set(r[0] * deg, r[1] * deg, r[2] * deg, 'YXZ');
+    const t = inst.translate ?? [0, 0, 0];
+    g.position.set(t[0], t[1] + this.floorY, t[2]);
+  }
+
+  /** Draw a box around background model `index` (null = none). */
+  debugSelectInstance(index) {
+    this.selIndex = index;
+    this.#attachSelBox();
   }
 
   /** Make room for a studio panel `px` pixels wide at the left: the game is drawn in the rest. */
@@ -594,12 +755,15 @@ class BalanceView {
       this.world.removeFromParent();
       this.#disposeTree(this.world);
     }
+    this.instGroups.clear();
+    this.#dropSelBox();
     const token = ++this.worldToken;
     const world = (this.world = new THREE.Group());
     this.scene.add(world);
     this.bowlDef = bowl;
     this.groundY = groundYOf(bowl);
     const floorY = this.groundY - TABLE.h;
+    this.floorY = floorY;
     this.scene.background = new THREE.Color(bg.mist);
     const fog = { uFogColor: { value: rawColor(bg.mist) }, uFog: { value: new THREE.Vector2(bg.fog?.[0] ?? 150, bg.fog?.[1] ?? 520) } };
 
@@ -626,7 +790,7 @@ class BalanceView {
     world.add(water);
 
     // the scenery
-    for (const inst of bg.models) this.#addModel(world, inst, token, floorY, fog);
+    bg.models.forEach((inst, i) => this.#addModel(world, inst, token, floorY, fog, i));
     this.#fitCamera();
   }
 
@@ -745,7 +909,7 @@ void main() {
   }
 
   /** Place a model instance `{ model, scale, rotation: [x,y,z] degrees, translate: [x,y,z] }` into `parent` (when its file has arrived). */
-  async #addModel(parent, inst, token, yOffset, fog) {
+  async #addModel(parent, inst, token, yOffset, fog, index) {
     const def = models[inst.model];
     if (!def) return;
     let parts;
@@ -768,6 +932,28 @@ void main() {
     const t = inst.translate ?? [0, 0, 0];
     group.position.set(t[0], t[1] + yOffset, t[2]);
     parent.add(group);
+    if (index !== undefined) { // a model of the background (not the bowl): the background studio can find it again
+      group.userData.inst = index;
+      group.traverse((o) => { o.userData.inst = index; });
+      this.instGroups.set(index, group);
+      if (index === this.selIndex) this.#attachSelBox();
+    }
+  }
+
+  #dropSelBox() {
+    if (!this.selBox) return;
+    this.selBox.removeFromParent();
+    this.selBox.geometry.dispose();
+    this.selBox.material.dispose();
+    this.selBox = null;
+  }
+
+  #attachSelBox() {
+    this.#dropSelBox();
+    const g = this.instGroups.get(this.selIndex);
+    if (!g) return;
+    this.selBox = new THREE.BoxHelper(g, '#f43f5e');
+    this.scene.add(this.selBox);
   }
 
   #clearModelGeo() {
@@ -862,7 +1048,21 @@ void main() {
     }
     this.scene.add(group);
 
+    // blocks with a stack limit (glass) carry a lamp: green = nothing on it, orange = something, red = at the limit (one more breaks it)
+    const limit = materials[MATERIAL_KEYS[mi]].stackLimit;
+    let dot = null;
+    if (limit !== undefined) {
+      const sh = getShape(shapeKey);
+      const r = THREE.MathUtils.clamp(Math.min(sh.w, sh.h) * 0.16, 0.3, 1.1);
+      dot = new THREE.Mesh(this.dotGeo, new THREE.MeshBasicMaterial({ color: LAMP[0] }));
+      dot.scale.set(r, r, 1);
+      dot.position.set(0, sh.h / 2 - r - 0.55, DEPTH / 2 + 0.04);
+      dot.userData.id = id;
+      group.add(dot);
+    }
+
     const v = {
+      dot, limit, load: -1,
       id, group, mats: [mat], marker: null, size: getShape(shapeKey), shapeKey,
       table: !!opts.table, slot: opts.slot ?? 0, n: opts.n ?? 4,
       tx: opts.x ?? 0, ty: opts.y ?? 0, ta: opts.a ?? 0, st: opts.st ?? BODY.NORMAL, owner: opts.owner ?? -1,
@@ -875,6 +1075,35 @@ void main() {
     return v;
   }
 
+  /** Colour of the lamp of a fragile block for the number of blocks resting on it. */
+  #setLoad(v, load) {
+    if (!v.dot || v.load === load) return;
+    v.load = load;
+    v.dot.material.color.set(LAMP[Math.min(LAMP.length - 1, load <= 0 ? 0 : load >= v.limit ? 2 : 1)]);
+  }
+
+  /** A block broke: a handful of glass shards fly off and fall. */
+  #shatter(v) {
+    const p = v.group.position;
+    for (let i = 0; i < 16; i++) {
+      const mesh = new THREE.Mesh(this.shardGeo, new THREE.MeshBasicMaterial({ color: '#bfe6f2', transparent: true, opacity: 0.8 }));
+      const size = 0.35 + Math.random() * 0.7;
+      mesh.scale.set(size, size * (0.4 + Math.random() * 0.8), size * 0.4);
+      mesh.position.set(p.x + (Math.random() - 0.5) * v.size.w, p.y + (Math.random() - 0.5) * v.size.h, p.z);
+      mesh.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+      this.scene.add(mesh);
+      this.shards.push({ mesh, vx: (Math.random() - 0.5) * 14, vy: 3 + Math.random() * 9, vz: (Math.random() - 0.2) * 8, spin: (Math.random() - 0.5) * 12, life: 1.4 });
+    }
+  }
+
+  #clearShards() {
+    for (const sh of this.shards) {
+      sh.mesh.removeFromParent();
+      sh.mesh.material.dispose();
+    }
+    this.shards = [];
+  }
+
   #remove(map, id, v) {
     this.poseMem.set(id, { ...v.cur });
     this.#dispose(v);
@@ -884,6 +1113,7 @@ void main() {
   #dispose(v) {
     v.group.removeFromParent();
     v.mats.forEach((m) => m.dispose());
+    v.dot?.material.dispose();
     this.#dropMarker(v);
   }
 
@@ -896,6 +1126,7 @@ void main() {
   }
 
   #clearViews() {
+    this.#clearShards();
     for (const v of this.bodyViews.values()) this.#dispose(v);
     for (const v of this.tableViews.values()) this.#dispose(v);
     this.bodyViews.clear();
@@ -1129,6 +1360,24 @@ void main() {
       if (v.group.parent !== want) want.add(v.group);
     }
 
+    this.selBox?.update();
+    for (let i = this.shards.length - 1; i >= 0; i--) { // falling glass
+      const sh = this.shards[i];
+      sh.life -= dt;
+      sh.vy -= 38 * dt;
+      sh.mesh.position.x += sh.vx * dt;
+      sh.mesh.position.y += sh.vy * dt;
+      sh.mesh.position.z += sh.vz * dt;
+      sh.mesh.rotation.x += sh.spin * dt;
+      sh.mesh.rotation.z += sh.spin * dt * 0.7;
+      sh.mesh.material.opacity = Math.max(0, Math.min(0.8, sh.life));
+      if (sh.life <= 0) {
+        sh.mesh.removeFromParent();
+        sh.mesh.material.dispose();
+        this.shards.splice(i, 1);
+      }
+    }
+
     this.renderer.clear();
     this.renderer.render(this.scene, this.camera);
     this.renderer.clearDepth();
@@ -1171,6 +1420,11 @@ void main() {
 
   #onDown = (e) => {
     if (this.freeCam) {
+      if (e.button === 0 && this.camHook?.down(e)) { // a studio took the pointer (e.g. it picked a background model)
+        this.hookDrag = true;
+        this.renderer.domElement.setPointerCapture(e.pointerId);
+        return;
+      }
       this.camDrag = { x: e.clientX, y: e.clientY, pan: e.button !== 0 };
       this.renderer.domElement.setPointerCapture(e.pointerId);
       return;
@@ -1198,6 +1452,10 @@ void main() {
   };
 
   #onMove = (e) => {
+    if (this.hookDrag) {
+      this.camHook?.move(e);
+      return;
+    }
     if (this.freeCam) {
       const d = this.camDrag;
       if (!d) return;
@@ -1229,6 +1487,11 @@ void main() {
   };
 
   #onUp = (e) => {
+    if (this.hookDrag) {
+      this.hookDrag = false;
+      this.camHook?.up(e);
+      return;
+    }
     if (this.freeCam) {
       this.camDrag = null;
       return;

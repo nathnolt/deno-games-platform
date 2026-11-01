@@ -5,6 +5,9 @@
 //                 Next to it a 3D preview draws the same shapes with the game's own geometry and shaders, standing on the table in
 //                 front of the bowl, updating while you edit.
 //
+//   BACKGROUND STUDIO  The game with the free camera on and a panel to place the models of a background (move / turn / scale, collapsed rows,
+//                 a preview window for the model you are about to add, a button that puts the camera back where the game has it).
+//
 //   LEVEL STUDIO  A blueprint (side view of the bowl, water, drop zone, limits and blocks) next to the running game. Two modes:
 //                   Layout     the game shows the start layout frozen; drag blocks in the blueprint to place them, Q / E turn them.
 //                   Live test  gravity is on and you can spawn any shape, grab and move any block (also the static ones), freeze
@@ -256,7 +259,7 @@ function drawParts(def, fill, stroke, extra = {}) {
 //  SHAPE STUDIO
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 function shapeStudio(view, api) {
-  const st = { sel: null, part: 0, draw: null, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
+  const st = { sel: null, part: 0, editing: false, draw: null, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
   let manual = {}; //   shapes the user moved on the board: key -> { ox, oy } (only where a shape is drawn, never its data)
   let layout = null; // { cells: { key: { ox, oy, ax, ay } }, rows: [{ y, x0, x1 }], bowlKey }
   let preview = null;
@@ -322,7 +325,7 @@ function shapeStudio(view, api) {
         drawClick(w);
         return { move() {}, up() {} };
       }
-      if (role && def) {
+      if (role && def && st.editing) {
         const part = def[+t.dataset.part];
         const sh = shift(st.sel);
         const local = (q) => ({ x: snapV(q.x - sh.x), y: snapV(q.y - sh.y) });
@@ -362,7 +365,7 @@ function shapeStudio(view, api) {
       if (hit) {
         const key = hit.dataset.shape;
         const body = t.closest?.('[data-pbody]');
-        const whole = key !== st.sel || e.shiftKey || e.altKey || !body; // otherwise the part under the pointer moves
+        const whole = !st.editing || key !== st.sel || e.shiftKey || e.altKey || !body; // only while editing does a subshape under the pointer move
         if (key !== st.sel) select(key);
         if (!whole) {
           const i = +body.dataset.pbody;
@@ -436,11 +439,13 @@ function shapeStudio(view, api) {
   // ── drawing a new polygon, point by point ──
   function startDraw() {
     if (!st.sel) return;
+    st.editing = true;
     st.draw = { pts: [], cur: null };
     st.msg = '';
     board.el.classList.add('bb-st-drawing');
     renderHead();
     renderList();
+    renderInspector();
     scheduleDraw();
   }
   function cancelDraw() {
@@ -473,8 +478,33 @@ function shapeStudio(view, api) {
     scheduleDraw();
     return undefined;
   }
+  function setEditing(on) {
+    if (on === st.editing) return;
+    st.editing = on;
+    if (!on) cancelDraw();
+    renderInspector();
+    scheduleDraw();
+  }
+  function removeSubshape(i) {
+    const def = D().shapes[st.sel];
+    if (!def) return;
+    if (def.length <= 1) return fail('A shape needs at least one subshape (delete the whole shape from the list instead).');
+    def.splice(i, 1);
+    st.part = Math.max(0, Math.min(st.part, def.length - 1));
+    st.msg = '';
+    renderList();
+    edited();
+    return undefined;
+  }
   const onKey = (e) => {
-    if (!st.open || !st.draw || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!st.open || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!st.draw) {
+      if (st.editing && (e.key === 'Delete' || e.key === 'Backspace')) {
+        removeSubshape(st.part);
+        e.preventDefault();
+      }
+      return;
+    }
     if (e.key === 'Enter') finishDraw();
     else if (e.key === 'Escape') cancelDraw();
     else if (e.key === 'Backspace') { st.draw.pts.pop(); scheduleDraw(); } else return;
@@ -517,7 +547,7 @@ function shapeStudio(view, api) {
       const kids = drawParts(def, col, sel ? ACCENT : '#1f2937', { opacity: sel ? 1 : 0.92 });
       kids.forEach((node, i) => {
         node.setAttribute('data-pbody', i);
-        if (sel && def.length > 1) {
+        if (sel && st.editing && def.length > 1) {
           node.setAttribute('stroke', i === st.part ? ACCENT : '#64748b');
           if (i !== st.part) node.setAttribute('opacity', 0.6);
         }
@@ -532,9 +562,9 @@ function shapeStudio(view, api) {
       const box = boxOf(def);
       g.append(label(key, c.ox + (box[2] - box[0]) / 2, c.oy - 1.7, sel ? 12 : 10.5, sel ? '#fff' : '#94a3b8', 'middle'));
       if (sel) {
-        g.append(label(`${f3(box[2] - box[0])} × ${f3(box[3] - box[1])}`, c.ox + (box[2] - box[0]) / 2, c.oy - 3.2, 10.5, '#fda4af', 'middle'));
+        g.append(label(`${f3(box[2] - box[0])} × ${f3(box[3] - box[1])}${st.editing ? '  (editing)' : ''}`, c.ox + (box[2] - box[0]) / 2, c.oy - 3.2, 10.5, '#fda4af', 'middle'));
         for (const [pi, p] of def.entries()) {
-          if (pi !== st.part) continue; // handles only for the part you are working on
+          if (!st.editing || pi !== st.part) continue; // handles only while editing, and only for the subshape you work on
           const hg = svg('g', { transform: `translate(${sh.x} ${sh.y})` });
           if (p.type === 'circle') {
             const cc = circleOf(p);
@@ -591,6 +621,7 @@ function shapeStudio(view, api) {
   function select(key) {
     if (key !== st.sel) {
       st.part = 0;
+      st.editing = false;
       cancelDraw();
     }
     st.sel = key;
@@ -736,14 +767,22 @@ function shapeStudio(view, api) {
     const def = d.shapes[st.sel];
     if (!def) return put(inspEl, h('p', { class: 'bb-dbg-note' }, 'No shape selected.'));
     renderInfo();
+    const toggle = st.editing
+      ? btn('✓ Done editing', () => setEditing(false), 'bb-dbg-go')
+      : btn('✎ Edit shape', () => setEditing(true), 'bb-dbg-go');
+    if (!st.editing) {
+      return put(inspEl,
+        h('div', { class: 'bb-st-row' }, toggle, h('span', { class: 'bb-dbg-note' }, `${def.length} subshape${def.length === 1 ? '' : 's'}`)),
+        h('p', { class: 'bb-dbg-note' }, 'Dragging shapes on the board only moves where they are drawn, to compare their size and fit with the others: nothing about the shape changes. Press Edit shape to work on its subshapes.'));
+    }
     const rows = def.map((p, i) => {
-      const head = h('div', { class: 'bb-st-row' }, h('strong', {}, p.type === 'circle' ? `circle ${i + 1}` : `polygon ${i + 1}`), h('span', { class: 'bb-dbg-grow' }));
+      const head = h('div', { class: 'bb-st-row' }, h('strong', {}, `subshape ${i + 1}`), h('span', { class: 'bb-dbg-note' }, p.type === 'circle' ? 'circle' : `polygon, ${parsePts(p.points).length} points`), h('span', { class: 'bb-dbg-grow' }));
       if (p.type !== 'circle') {
         const vis = h('input', { type: 'checkbox', checked: !!p.visual });
         vis.addEventListener('change', () => { if (vis.checked) p.visual = true; else delete p.visual; edited(); });
-        head.append(h('label', { class: 'bb-dbg-chk', title: 'A drawing-only outline: it replaces the parts when the block is drawn (collision stays the other parts)' }, vis, 'drawing only'));
+        head.append(h('label', { class: 'bb-dbg-chk', title: 'A drawing-only outline: it replaces the other subshapes when the block is drawn (collision stays as it is)' }, vis, 'drawing only'));
       }
-      head.append(btn('✕', () => { if (def.length > 1) { def.splice(i, 1); edited(); } }, 'bb-dbg-danger'));
+      head.append(btn('✕', () => removeSubshape(i), 'bb-dbg-danger'));
       let body;
       if (p.type === 'circle') {
         const mk = (label, get, set) => {
@@ -763,16 +802,19 @@ function shapeStudio(view, api) {
       return h('div', { class: `bb-dbg-part${i === st.part ? ' bb-st-focus' : ''}` }, head, body);
     });
     put(inspEl,
+      h('div', { class: 'bb-st-row' }, toggle),
       ...rows,
       h('div', { class: 'bb-st-row' },
         btn('+ polygon', startDraw),
-        btn('+ circle', () => { def.push({ type: 'circle', diameter: 2 }); edited(); })),
+        btn('+ circle', () => { def.push({ type: 'circle', diameter: 2 }); st.part = def.length - 1; edited(); })),
       h('div', { class: 'bb-st-row' },
+        h('span', { class: 'bb-st-mini' }, 'whole shape'),
         btn('Mirror ↔', () => transform(([x, y]) => [-x, y])),
         btn('Mirror ↕', () => transform(([x, y]) => [x, -y])),
         btn('Rotate 90°', () => transform(([x, y]) => [-y, x])),
         btn('To 0,0', toOrigin)),
-      h('p', { class: 'bb-dbg-note' }, '+ Polygon: click the board to put down points 1, 2, 3 … then press Enter, click the first point, or press Done (Backspace removes the last point, Esc cancels). Drag a corner to move it · click a small dot on an edge to insert a corner · right-click a corner to remove it. Click a part to work on it and drag it to move all of its points. Drag a shape that is not selected (or Shift-drag the selected one) to move it on the board only, to compare it with the others: its points do not change. Every part must be convex: build an L or a plus from several parts and, if you like, add a "drawing only" outline for the looks.'));
+      h('p', { class: 'bb-dbg-note' }, 'Editing: drag a subshape to move it (all its points move together) · Delete removes the selected subshape · drag a corner to move it · click a small dot on an edge to insert a corner · right-click a corner to remove it. + polygon: click the board to put down points 1, 2, 3 …, then Enter, click the first point, or Done (Backspace removes the last point, Esc cancels). Shift-drag moves the whole shape on the board only. Every subshape must be convex: build an L or a plus from several subshapes and, if you like, add a "drawing only" outline for the looks.'));
+    return undefined;
   }
 
   // ── 3D preview ──
@@ -893,7 +935,7 @@ function shapeStudio(view, api) {
 //  LEVEL STUDIO
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 function levelStudio(view, api) {
-  const st = { lvl: 0, mode: 'layout', sel: -1, snap: 0.25, mat: 'wood', open: false, lab: -1, msg: '', armDelete: 0 };
+  const st = { lvl: 0, mode: 'layout', sel: -1, snap: 0.25, mat: 'wood', open: false, lab: -1, ph: 1, rules: false, msg: '', armDelete: 0 };
   let applyTimer = 0;
   let raf = 0;
   let live = null; // a block we are carrying in live mode: { rot, off, x, y, last }
@@ -918,7 +960,11 @@ function levelStudio(view, api) {
     applyTimer = 0;
     if (!st.open) return;
     api.flush();
-    if (api.problems().length || !L()) return;
+    if (api.problems().length || !L()) {
+      if (api.problems().length) { st.msg = `Not applied to the game until this is fixed: ${api.problems()[0]}`; renderBar(); }
+      return;
+    }
+    if (st.msg.startsWith('Not applied')) { st.msg = ''; renderBar(); }
     lab({ play: st.lvl });
     lab({ paused: st.mode === 'layout' });
   }
@@ -1093,18 +1139,15 @@ function levelStudio(view, api) {
     });
     st.sel = -1;
     st.msg = `Captured ${bodies.length} block${bodies.length === 1 ? '' : 's'} as the start layout.`;
-    setMode('layout');
-    api.touch('levels');
+    api.touch('levels'); // first the new layout goes to the server ...
+    setMode('layout'); //   ... then the level restarts with it
   }
 
   function setMode(m) {
     st.mode = m;
     if (live) { view.ctx.sendInput({ cancel: true }); live = null; }
     if (m === 'layout') applyNow(); // restart with the draft, frozen
-    else {
-      if (applyTimer) applyNow();
-      lab({ paused: false }); // gravity on
-    }
+    else applyNow(); // always restart from the layout as it is now (not only when an edit is still waiting), with gravity on
     renderAll();
   }
 
@@ -1137,7 +1180,9 @@ function levelStudio(view, api) {
       st.mode === 'live'
         ? [
           btn(paused ? '▶ Gravity on' : '⏸ Freeze', () => lab({ paused: !paused }), paused ? 'bb-dbg-go' : ''),
-          btn('⟲ Reset', () => { applyNow(); lab({ paused: false }); }),
+          btn('⟲ Reset', () => { st.msg = ''; applyNow(); }),
+          h('label', { class: 'bb-dbg-chk', title: 'Off: nothing is won or lost while you test. On: the level can be failed (block in the water, out of bounds, touching the bowl) or won, like in the real game. Press Reset to try again.' },
+            (() => { const c = h('input', { type: 'checkbox', checked: st.rules }); c.addEventListener('change', () => { st.rules = c.checked; lab({ rules: st.rules }); }); return c; })(), 'fail enabled'),
           btn('⤓ Capture as start layout', capture, 'bb-dbg-go'),
         ]
         : [btn('Fit', () => board.fit(bounds()))],
@@ -1320,11 +1365,18 @@ function levelStudio(view, api) {
     // the lab must be on while we are open (another player's studio, a server restart ...)
     if (s.lab === 0 && performance.now() - askedAt > 1500) {
       askedAt = performance.now();
-      lab({ on: true, paused: st.mode === 'layout' });
+      lab({ on: true, paused: st.mode === 'layout', rules: st.rules });
       applyNow();
     }
     if (s.lab !== st.lab) {
       st.lab = s.lab;
+      renderBar();
+    }
+    if (s.ph !== st.ph) { // the level was lost or won (only with "fail enabled")
+      st.ph = s.ph;
+      if (s.ph === S.PHASE.LOST) st.msg = `Level failed: ${S.LOSE_TEXT[s.why] ?? ''} Press Reset to try again.`;
+      else if (s.ph === S.PHASE.WON) st.msg = 'Level won! Press Reset to try again.';
+      else if (/^Level (failed|won)/.test(st.msg)) st.msg = '';
       renderBar();
     }
     if (s.lv >= 0 && s.lv !== st.lvl && s.lv < D().levels.length && s.run !== st.run) { // somebody started another level
@@ -1354,7 +1406,9 @@ function levelStudio(view, api) {
       root.classList.add('bb-show');
       view.debugDock(DOCK);
       view.onSnap = onSnap;
-      lab({ on: true, paused: true });
+      st.rules = false;
+      st.ph = 1;
+      lab({ on: true, paused: true, rules: false });
       renderAll();
       requestAnimationFrame(() => { if (L()) board.fit(bounds()); scheduleDraw(); });
       applyNow();
@@ -1393,6 +1447,295 @@ function levelStudio(view, api) {
   };
 }
 
+// ───────────────────────────── BACKGROUND STUDIO ─────────────────────────────
+/**
+ * The game (a level of your choice, frozen) with the free camera on, and a panel to place background models: pick one in the
+ * viewport (drag = move over the floor, Shift-drag = up / down, Q / E = turn, Delete = remove) or type exact numbers.
+ * Every model is a collapsed row; "Camera to game view" puts the camera back where the game has it.
+ */
+function backgroundStudio(view, api) {
+  const st = { lvl: 0, bg: '', sel: -1, snap: 0.5, open: false, add: '', prev: null };
+  let applyTimer = 0;
+  let drag = null;
+  let askedAt = 0;
+  const openRows = new Set();
+
+  const D = () => api.draft();
+  const L = () => D().levels[st.lvl];
+  const lab = (c) => view.ctx.sendInput({ lab: c });
+  const btn = (text, fn, cls = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, onclick: fn }, text);
+  const sel = (options, value, onchange, cls = '') => {
+    const s = h('select', { class: cls }, options.map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return h('option', { value: v }, l); }));
+    s.value = value;
+    s.addEventListener('change', () => onchange(s.value));
+    return s;
+  };
+  const bgKey = () => {
+    const d = D();
+    const k = L()?.background;
+    return k && d.backgrounds[k] ? k : Object.keys(d.backgrounds)[0];
+  };
+  const BG = () => D().backgrounds[bgKey()];
+  const models = () => (BG().models ??= []);
+  const snapV = (v) => snapTo(v, st.snap);
+  const fresh = (model) => ({ model, scale: 1, rotation: [0, 0, 0], translate: [0, 0, -40] });
+
+  const probEl = h('span', { class: 'bb-st-prob' });
+  const head = h('div', { class: 'bb-st-head' }, h('strong', {}, 'Background studio'), probEl, h('span', { class: 'bb-dbg-grow' }),
+    btn('Close', () => api.close()));
+  const bar = h('div', { class: 'bb-st-bar' });
+  const body = h('div', { class: 'bb-st-body' });
+  const root = h('div', { class: 'bb-st bb-st-dock' }, head, bar, body);
+
+  function applyLevel() {
+    clearTimeout(applyTimer);
+    applyTimer = 0;
+    if (!st.open) return;
+    api.flush();
+    if (api.problems().length || !L()) return;
+    lab({ play: st.lvl });
+  }
+
+  /** the numbers of one model changed: show it at once, tell the draft */
+  function pushInst(i) {
+    view.debugSetInstance(i, models()[i]);
+    api.touch('backgrounds');
+  }
+  function select(i, scroll = false) {
+    st.sel = i;
+    if (i >= 0) openRows.add(i);
+    view.debugSelectInstance(i >= 0 ? i : null);
+    renderBody();
+    if (scroll && i >= 0) body.querySelector(`[data-i="${i}"]`)?.scrollIntoView({ block: 'nearest' });
+  }
+  function structural() { // models added / removed / reordered / switched: the game rebuilds them when the draft comes back
+    api.touch('backgrounds');
+    renderBody();
+  }
+
+  const numIn = (get, set, step = 1) => {
+    const n = h('input', { type: 'number', step, class: 'bb-dbg-n', value: get() });
+    n.addEventListener('input', () => { const v = parseFloat(n.value); if (Number.isFinite(v)) set(v); });
+    return n;
+  };
+  const row3 = (label, arr, i, step) => h('label', { class: 'bb-dbg-field' }, h('span', {}, label),
+    ...['x', 'y', 'z'].map((a, k) => h('span', { class: 'bb-st-axis' }, a, numIn(() => arr[k], (v) => { arr[k] = v; pushInst(i); }, step))));
+
+  function renderBar() {
+    const d = D();
+    put(bar,
+      h('div', { class: 'bb-st-row' },
+        h('span', { class: 'bb-st-mini' }, 'level'),
+        sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; openRows.clear(); applyLevel(); renderAll(); }, 'bb-dbg-grow')),
+      h('div', { class: 'bb-st-row' },
+        h('span', { class: 'bb-st-mini' }, 'background'),
+        sel(Object.keys(d.backgrounds), bgKey(), (v) => { L().background = v; st.sel = -1; openRows.clear(); api.touch('levels'); renderAll(); }, 'bb-dbg-grow')),
+      h('div', { class: 'bb-st-row' },
+        btn('⌖ Camera to game view', () => view.debugCameraHome(), 'bb-dbg-go'),
+        h('span', { class: 'bb-st-mini' }, 'snap'),
+        sel(SNAPS, String(st.snap), (v) => { st.snap = +v; }),
+      ),
+      h('div', { class: 'bb-st-hint' }, 'Drag the camera: turn · right-drag: move · wheel: zoom. Click a model in the view to pick it, drag to move it over the floor, Shift-drag to lift it, Q / E turn it, Delete removes it.'));
+  }
+
+  function renderBody() {
+    const d = D();
+    const bg = BG();
+    bg.ground ??= { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2 };
+    bg.fog ??= [150, 520];
+    const w = api.w;
+    const ms = models();
+    if (st.prev) { st.prev.dispose(); st.prev = null; }
+    const canvas = h('canvas', { class: 'bb-st-canvas' });
+    const addKeys = Object.keys(d.models);
+    if (!addKeys.includes(st.add)) st.add = addKeys[0] ?? '';
+    const addBox = h('div', { class: 'bb-st-addbox' },
+      h('div', { class: 'bb-dbg-modelprev' }, canvas),
+      h('div', { class: 'bb-st-row' },
+        sel(addKeys, st.add, (v) => { st.add = v; showPrev(); }, 'bb-dbg-grow'),
+        btn('+ Add', () => {
+          if (!st.add) return;
+          ms.push(fresh(st.add));
+          const t = view.debugGroundAt?.(innerWidth * 0.6, innerHeight * 0.6, 0);
+          if (t) ms[ms.length - 1].translate = [snapV(t.x), 0, snapV(t.z)];
+          openRows.add(ms.length - 1);
+          st.sel = ms.length - 1;
+          structural();
+          view.debugSelectInstance(st.sel);
+        }, 'bb-dbg-go')));
+    const showPrev = () => {
+      st.prev?.dispose();
+      st.prev = null;
+      const def = d.models[st.add];
+      if (!def) return;
+      try {
+        st.prev = view.debugModelPreview(canvas);
+        st.prev.set(def);
+      } catch (e) { addBox.append(h('div', { class: 'bb-dbg-err' }, String(e.message ?? e))); }
+    };
+
+    const rows = ms.map((m, i) => {
+      const det = h('details', { class: `bb-st-inst${i === st.sel ? ' bb-on' : ''}`, 'data-i': String(i), open: openRows.has(i) },
+        h('summary', {}, h('span', { class: 'bb-st-itemname' }, `${i + 1}. ${m.model}`), h('span', { class: 'bb-st-badge' }, `${f3(m.translate[0])}, ${f3(m.translate[1])}, ${f3(m.translate[2])}`)),
+        h('div', { class: 'bb-st-instbody' },
+          h('div', { class: 'bb-st-row' },
+            sel(Object.keys(d.models), m.model, (v) => { m.model = v; structural(); }, 'bb-dbg-grow'),
+            btn('⌖', () => { view.debugLookAt(m.translate[0], m.translate[1] + view.floorY, m.translate[2]); select(i); }, ''),
+            btn('⤓', () => { m.translate[1] = 0; pushInst(i); renderBody(); }, ''),
+            btn('⧉', () => { ms.splice(i + 1, 0, clone(m)); ms[i + 1].translate[0] += 3; openRows.add(i + 1); st.sel = i + 1; structural(); view.debugSelectInstance(st.sel); }, ''),
+            btn('✕', () => { removeAt(i); }, 'bb-dbg-danger')),
+          h('label', { class: 'bb-dbg-field' }, h('span', {}, 'scale'), numIn(() => m.scale ?? 1, (v) => { m.scale = v; pushInst(i); }, 0.1)),
+          row3('rotation °', m.rotation, i, 5),
+          row3('translate', m.translate, i, 0.5)));
+      det.addEventListener('toggle', () => { det.open ? openRows.add(i) : openRows.delete(i); });
+      det.querySelector('summary').addEventListener('click', () => { if (st.sel !== i) { st.sel = i; view.debugSelectInstance(i); for (const e of body.querySelectorAll('.bb-st-inst')) e.classList.toggle('bb-on', e.dataset.i === String(i)); } });
+      return det;
+    });
+
+    put(body,
+      h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Sky and ground'),
+        h('div', { class: 'bb-st-instbody' },
+          w.color('mist (sky, distance)', bg, 'mist', 'backgrounds'),
+          w.field('fog near / far', ...[0, 1].map((k) => numIn(() => bg.fog[k], (v) => { bg.fog[k] = v; api.touch('backgrounds'); }, 10))),
+          w.color('sand grooves', bg.ground, 'colorA', 'backgrounds'),
+          w.color('sand ridges', bg.ground, 'colorB', 'backgrounds'),
+          w.slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1))),
+      h('div', { class: 'bb-st-sub' }, `Models (${ms.length})`, h('span', { class: 'bb-dbg-grow' }),
+        btn('Collapse all', () => { openRows.clear(); renderBody(); }, '')),
+      ...rows,
+      h('div', { class: 'bb-st-sub' }, 'Add a model'),
+      addBox);
+    showPrev();
+  }
+
+  function removeAt(i) {
+    models().splice(i, 1);
+    openRows.clear();
+    st.sel = -1;
+    view.debugSelectInstance(null);
+    structural();
+  }
+  function renderAll() {
+    api.showProblems(probEl);
+    renderBar();
+    renderBody();
+  }
+
+  // ── the viewport: the pointer hook of the free camera ──
+  const hook = {
+    down(e) {
+      const i = view.debugModelAt(e.clientX, e.clientY);
+      if (i === null || i === undefined || !models()[i]) { return false; }
+      select(i, true);
+      const m = models()[i];
+      drag = { i, vertical: e.shiftKey, start: { x: e.clientX, y: e.clientY }, t0: [...m.translate], off: null };
+      if (!drag.vertical) {
+        const g = view.debugGroundAt(e.clientX, e.clientY, m.translate[1]);
+        drag.off = g ? { x: m.translate[0] - g.x, z: m.translate[2] - g.z } : { x: 0, z: 0 };
+      }
+      return true;
+    },
+    move(e) {
+      if (!drag) return;
+      const m = models()[drag.i];
+      if (!m) return;
+      if (drag.vertical) {
+        const k = 0.06 * Math.max(0.2, Math.min(5, view.freeCam?.dist ?? 50) / 50);
+        m.translate[1] = snapV(drag.t0[1] - (e.clientY - drag.start.y) * k);
+      } else {
+        const g = view.debugGroundAt(e.clientX, e.clientY, m.translate[1]);
+        if (!g) return;
+        m.translate[0] = snapV(g.x + drag.off.x);
+        m.translate[2] = snapV(g.z + drag.off.z);
+      }
+      pushInst(drag.i);
+    },
+    up() {
+      if (drag) { drag = null; renderBody(); }
+    },
+  };
+
+  const onKey = (e) => {
+    if (!st.open || typing(e) || st.sel < 0 || !models()[st.sel]) return;
+    const m = models()[st.sel];
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      removeAt(st.sel);
+    } else if (e.key === 'q' || e.key === 'Q' || e.key === 'e' || e.key === 'E') {
+      const s = /q/i.test(e.key) ? -1 : 1;
+      m.rotation[1] = ((m.rotation[1] + s * (e.shiftKey ? 1 : 15)) % 360 + 360) % 360;
+      pushInst(st.sel);
+      renderBody();
+    }
+  };
+  window.addEventListener('keydown', onKey);
+
+  const onSnap = (s) => {
+    if (!st.open) return;
+    if (s.lab === 0 && performance.now() - askedAt > 1500) {
+      askedAt = performance.now();
+      lab({ on: true, paused: true, rules: false });
+      applyLevel();
+    }
+    if (s.lv < 0 && performance.now() - askedAt > 1500) {
+      askedAt = performance.now();
+      lab({ play: st.lvl });
+    }
+  };
+
+  return {
+    el: root,
+    show() {
+      const d = D();
+      st.open = true;
+      const cur = view.snap?.lv ?? -1;
+      st.lvl = Math.max(0, Math.min(cur >= 0 ? cur : st.lvl, d.levels.length - 1));
+      st.sel = -1;
+      openRows.clear();
+      root.classList.add('bb-show');
+      view.debugDock(DOCK);
+      view.onSnap = onSnap;
+      lab({ on: true, paused: true, rules: false });
+      view.debugFreeCam(true);
+      view.camHook = hook;
+      renderAll();
+      applyLevel();
+    },
+    hide() {
+      if (!st.open) return;
+      st.open = false;
+      clearTimeout(applyTimer);
+      drag = null;
+      st.prev?.dispose();
+      st.prev = null;
+      root.classList.remove('bb-show');
+      view.camHook = null;
+      view.debugSelectInstance(null);
+      view.debugFreeCam(false);
+      view.debugDock(0);
+      view.onSnap = null;
+      lab({ on: false });
+      lab({ reload: true });
+    },
+    changed(kind) {
+      if (!st.open) return;
+      api.showProblems(probEl);
+      if (kind === 'levels' || kind === 'all') {
+        st.lvl = Math.min(st.lvl, Math.max(0, D().levels.length - 1));
+      }
+      if (kind === 'all') renderAll();
+      else if (kind === 'models') renderBody();
+    },
+    refresh() {
+      if (st.open) renderAll();
+    },
+    dispose() {
+      this.hide();
+      window.removeEventListener('keydown', onKey);
+    },
+  };
+}
+
 /**
  * @param view  the BalanceView
  * @param api   { draft(): the current draft, touch(kind), flush(), problems(): string[], w: the widget builders of the debug menu,
@@ -1401,7 +1744,9 @@ function levelStudio(view, api) {
 export function createStudio(view, api) {
   const shapesS = shapeStudio(view, api);
   const levelsS = levelStudio(view, api);
-  const root = h('div', { class: 'bb-st-host' }, shapesS.el, levelsS.el);
+  const bgS = backgroundStudio(view, api);
+  const pane = (n) => (n === 'shapes' ? shapesS : n === 'backgrounds' ? bgS : levelsS);
+  const root = h('div', { class: 'bb-st-host' }, shapesS.el, levelsS.el, bgS.el);
   let current = null;
   return {
     el: root,
@@ -1411,27 +1756,26 @@ export function createStudio(view, api) {
       this.close();
       current = name;
       root.classList.add('bb-st-on');
-      (name === 'shapes' ? shapesS : levelsS).show();
+      pane(name).show();
     },
     close() {
       if (!current) return;
-      (current === 'shapes' ? shapesS : levelsS).hide();
+      pane(current).hide();
       current = null;
       root.classList.remove('bb-st-on');
     },
     /** The draft changed: `kind` is the table ('levels', 'shapes' ...) or 'all' (replaced wholesale). */
     changed(kind) {
-      if (current === 'shapes') shapesS.changed(kind);
-      else if (current === 'levels') levelsS.changed(kind);
+      if (current) pane(current).changed(kind);
     },
     refresh() {
-      if (current === 'shapes') shapesS.refresh();
-      else if (current === 'levels') levelsS.refresh();
+      if (current) pane(current).refresh();
     },
     dispose() {
       this.close();
       shapesS.dispose();
       levelsS.dispose();
+      bgS.dispose();
       root.remove();
     },
   };

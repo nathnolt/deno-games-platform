@@ -20,6 +20,7 @@ const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along 
 // settleTime, settleSpeed and follow come from `tuning` (definitions.js)
 const LAB_ID_START = 100000; //   ids of blocks spawned in the level lab (they never clash with the ids of a level's own blocks)
 const LAB_MAX_BLOCKS = 300;
+const FRAGILE_REST = 0.2; //      seconds a block must rest on a fragile one before it counts
 const START_GRACE = 0.8; //       seconds after a level starts during which start / restart clicks are ignored (two players clicking the same button)
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -82,7 +83,7 @@ class BalanceGame {
     this.defsRev = 0; //          debug: bumps every time somebody changes the definitions
     this.defsFrom = null; //      debug: who made the last change
     this.defsBurst = 0; //        debug: > 0 while the definitions are attached to the snapshots
-    this.lab = { on: false, paused: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
+    this.lab = { on: false, paused: false, rules: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
     this.labId = LAB_ID_START;
     for (const p of ctx.players) this.onJoin(p);
   }
@@ -98,7 +99,7 @@ class BalanceGame {
     this.#putBack(p);
     this.players.delete(id); // drop-in game: it just goes on, even with nobody in it
     if (DEBUG && this.lab.on && this.lab.by === id) { // the level designer left with the lab still on: make it an ordinary level again
-      this.lab = { on: false, paused: false, by: null };
+      this.lab = { on: false, paused: false, rules: false, by: null };
       if (this.levelIdx >= 0 && this.levelIdx < levels.length) this.#startLevel(this.levelIdx);
     }
   }
@@ -129,7 +130,7 @@ class BalanceGame {
       const pos = r.body.getPosition();
       let st = r.static ? BODY.STATIC : BODY.NORMAL;
       if (r.held) st = r.bad ? BODY.HELD_BAD : BODY.HELD;
-      b.push([r.id, r.si, r.mi, round2(pos.x), round2(pos.y), round3(r.body.getAngle()), st, r.held ? r.owner : -1]);
+      b.push([r.id, r.si, r.mi, round2(pos.x), round2(pos.y), round3(r.body.getAngle()), st, r.held ? r.owner : -1, r.load]);
     }
     const tbl = [];
     this.table.forEach((item, i) => {
@@ -146,7 +147,7 @@ class BalanceGame {
       total: this.total,
       why: this.why,
       still: round2(clamp(this.settle / tuning.settleTime, 0, 1)),
-      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, drev: this.defsRev, dfrom: this.defsFrom, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
+      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, dfrom: this.defsFrom, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
   }
 
@@ -221,6 +222,7 @@ class BalanceGame {
   /**
    * Debug: the LEVEL LAB. While it is on nothing is won or lost, the drop zone is ignored, and the level designer can
    *   { on: bool }              switch the lab on / off (off = the level is a normal level again; it is restarted by the client)
+   *   { rules: bool }           let the level be lost / won while the lab is on (to test failing); Reset (play / reload) starts it again
    *   { paused: bool }          freeze / unfreeze physics. Held blocks still move, so you can place blocks precisely and THEN let gravity act.
    *   { spawn: { shape, material, x, y, rot, held } }   a new block: held by you (default) or put straight into the world
    *   { grab: id }              pick up a block that is already in the world (also static ones: letting go makes it static again)
@@ -233,7 +235,10 @@ class BalanceGame {
     if (typeof c.on === 'boolean') {
       lab.on = c.on;
       lab.by = c.on ? id : null; // whoever switched it on: when they leave, the lab ends (see onLeave)
-      if (!c.on) lab.paused = false;
+      if (!c.on) {
+        lab.paused = false;
+        lab.rules = false;
+      }
       if (c.on && (this.phase === PHASE.WON || this.phase === PHASE.LOST)) {
         this.phase = PHASE.PLAY;
         this.why = 0;
@@ -242,6 +247,7 @@ class BalanceGame {
       }
     }
     if (typeof c.paused === 'boolean' && lab.on) lab.paused = c.paused;
+    if (typeof c.rules === 'boolean' && lab.on) lab.rules = c.rules;
     if (c.play !== undefined) {
       if (Number.isInteger(c.play) && c.play >= 0 && c.play < levels.length) this.#startLevel(c.play);
       return;
@@ -434,6 +440,9 @@ class BalanceGame {
       held,
       owner,
       bad: false,
+      stackLimit: mat.stackLimit ?? null, // blocks that may rest on this one; one more and it breaks (see #glass)
+      load: 0, //           how many do rest on it (shown as the colour of its dot): 0 .. stackLimit
+      seen: new Map(), //   block id -> seconds it has been resting on this one
       armed: false, // becomes true once the held block has been inside the drop zone; before that it is never shown as 'bad'
       body,
       floatPolys,
@@ -483,7 +492,51 @@ class BalanceGame {
       if (inside) p.held.rec.armed = true;
       p.held.rec.bad = !this.lab.on && p.held.rec.armed && !inside; // red = you have taken it out of the drop zone again (letting go sends it back to the table)
     }
-    if (this.phase === PHASE.PLAY && !this.lab.on) this.#rules(dt);
+    if (this.phase === PHASE.PLAY && !this.lab.paused) this.#fragile(dt);
+    if (this.phase === PHASE.PLAY && (!this.lab.on || this.lab.rules)) this.#rules(dt); // (the level lab can switch the rules back on to test failing)
+  }
+
+  /**
+   * Blocks with a stack limit (glass): count the blocks resting on top of them, directly or through other blocks. A block only counts
+   * once it has rested there for a moment, so one that is still falling past does not. More than the limit and the block breaks.
+   */
+  #fragile(dt) {
+    for (const rec of [...this.recs.values()]) {
+      if (rec.stackLimit === null || rec.held || rec.static) continue;
+      const above = new Set();
+      const queue = [rec];
+      while (queue.length) {
+        const cur = queue.pop();
+        for (let ce = cur.body.getContactList(); ce; ce = ce.next) {
+          const other = this.recOf.get(ce.other);
+          if (!other || other.kind !== 'block' || other.held || other.static || above.has(other.id) || other === rec) continue;
+          if (!ce.contact.isTouching() || !this.#isAbove(ce.contact, cur.body, ce.other)) continue;
+          above.add(other.id);
+          queue.push(other);
+        }
+      }
+      for (const id of above) rec.seen.set(id, (rec.seen.get(id) ?? 0) + dt);
+      for (const id of [...rec.seen.keys()]) if (!above.has(id)) rec.seen.delete(id);
+      let n = 0;
+      for (const t of rec.seen.values()) if (t >= FRAGILE_REST) n++;
+      if (n > rec.stackLimit) {
+        this.#removeBlock(rec); // it shatters (the clients see it vanish and draw the shards)
+        this.settle = 0;
+        continue;
+      }
+      rec.load = n;
+    }
+  }
+
+  /** Is `upper` resting on `lower` in this contact (the contact normal points up from lower to upper)? */
+  #isAbove(contact, lower, upper) {
+    try {
+      const n = contact.getWorldManifold(undefined).normal; // points from fixture A to fixture B
+      const lowerIsA = contact.getFixtureA().getBody() === lower;
+      return (lowerIsA ? n.y : -n.y) > 0.5;
+    } catch {
+      return upper.getPosition().y > lower.getPosition().y;
+    }
   }
 
   #moveHeld(dt) {

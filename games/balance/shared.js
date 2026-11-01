@@ -317,6 +317,7 @@ export function validateDefinitions(defs, extra = {}) {
   for (const [k, m] of Object.entries(mats)) {
     if (!isNum(m.friction ?? 10)) err(`material ${k}: friction is not a number`);
     if (!isNum(m.weight ?? 10)) err(`material ${k}: weight is not a number`);
+    if (m.stackLimit !== undefined && !(Number.isInteger(m.stackLimit) && m.stackLimit >= 0 && m.stackLimit <= 20)) err(`material ${k}: stackLimit must be a whole number from 0 to 20`);
     shaderOk(m.shader, `material ${k}`);
   }
 
