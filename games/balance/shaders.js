@@ -9,26 +9,65 @@
 //   finish()  call it for the final colour: it adds simple lighting (so the 3D sides are shaded), the coloured glow of a block
 //             somebody is holding, and the red tint of a block that cannot be dropped where it is
 
-/** The shadow lookup shared by every lit material (and the floor): `shadowAt(worldPosition, worldNormal)` is 1 in light, less in shadow. */
+/** Light shared by every lit material (and the floor). ONE light in world space drives both the shading and the shadow map, so they always agree:
+ *   uLightDir  towards the sun / moon      uLightCol  its colour times its strength (changes with the time of day)
+ *   uAmbSky / uAmbGround  the soft light from above and from below (a hemisphere): shadows are never black, they take the colour of the sky
+ *   sceneLight(position, normal) -> the colour a surface is multiplied with. Wrap lighting softens the edge between lit and dark side,
+ *   and the shadow map only ever removes the DIRECT light.
+ *   shadowAt(position, normal) -> 1 in light, 0 in shadow: normal-offset + slope bias against acne, and a contact-hardening soft edge
+ *   (the further a block is above what it shades, the softer the shadow gets: blocker search, then a rotated 16-tap disc). */
 export const SHADOW_GLSL = /* glsl */ `
 uniform sampler2D uShadowMap;
 uniform mat4 uShadowMat;
 uniform float uShadowStr;
 uniform vec2 uShadowTexel;
+uniform float uShadowRange;
+uniform float uShadowDepth;
+uniform vec3 uLightDir;
+uniform vec3 uLightCol;
+uniform vec3 uAmbSky;
+uniform vec3 uAmbGround;
 float unpackShadowDepth(vec4 v) { return dot(v, vec4(255.0 / 256.0 / 16777216.0, 255.0 / 256.0 / 65536.0, 255.0 / 256.0 / 256.0, 255.0 / 256.0)); }
+float shadowNoise(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+vec2 vogel(int i, int n, float phi) {
+  float r = sqrt((float(i) + 0.5) / float(n));
+  float th = float(i) * 2.399963 + phi;
+  return vec2(cos(th), sin(th)) * r;
+}
 float shadowAt(vec3 wp, vec3 n) {
   if (uShadowStr <= 0.0) return 1.0;
-  vec4 sp = uShadowMat * vec4(wp + n * 0.15, 1.0);
+  float ndl = clamp(dot(n, uLightDir), 0.0, 1.0);
+  float texW = uShadowTexel.x * uShadowRange; // world size of one shadow texel
+  vec4 sp = uShadowMat * vec4(wp + n * texW * (1.2 + 2.8 * (1.0 - ndl)), 1.0);
   vec3 p = sp.xyz / sp.w * 0.5 + 0.5;
   if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
-  float lit = 0.0;
-  for (int i = -1; i <= 1; i++) {
-    for (int j = -1; j <= 1; j++) {
-      float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + vec2(float(i), float(j)) * uShadowTexel));
-      lit += (p.z - 0.0012 > d) ? 0.0 : 1.0;
-    }
+  float zr = p.z - (0.0003 + 0.0007 * (1.0 - ndl));
+  float phi = 6.2831853 * shadowNoise(gl_FragCoord.xy);
+  float sum = 0.0;
+  float cnt = 0.0;
+  for (int i = 0; i < 12; i++) { // 1. who is in the way?
+    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + vogel(i, 12, phi) * uShadowTexel * 6.0));
+    if (d < zr) { sum += d; cnt += 1.0; }
   }
-  return 1.0 - uShadowStr * (1.0 - lit / 9.0);
+  if (cnt < 0.5) return 1.0;
+  float gap = (zr - sum / cnt) * uShadowDepth; // 2. how far above this surface is it (world units)
+  float rad = clamp(gap * 0.07 / texW, 1.2, 7.0); //   the further, the softer
+  float lit = 0.0;
+  for (int i = 0; i < 16; i++) { // 3. soft edge
+    float d = unpackShadowDepth(texture2D(uShadowMap, p.xy + vogel(i, 16, phi + 1.7) * uShadowTexel * rad));
+    lit += (d < zr) ? 0.0 : 1.0;
+  }
+  return lit / 16.0;
+}
+vec3 sceneLight(vec3 wp, vec3 n) {
+  float ndl = dot(n, uLightDir);
+  float wrap = clamp((ndl + 0.35) / 1.35, 0.0, 1.0);
+  float sh = shadowAt(wp, n);
+  float k = clamp(uShadowStr * 1.8, 0.0, 1.0); // (the strength in definitions.js: 0 = no shadows, 0.55+ = fully dark)
+  sh = 1.0 - k * (1.0 - sh);
+  sh = mix(1.0, sh, smoothstep(-0.05, 0.25, ndl)); // the side turned away from the light is dark anyway: no map noise there
+  vec3 amb = mix(uAmbGround, uAmbSky, n.y * 0.5 + 0.5);
+  return amb + uLightCol * (wrap * sh);
 }
 `;
 
@@ -64,6 +103,9 @@ uniform float uTime;
 uniform float uSeed;
 uniform vec3 uGlow;
 uniform float uBad;
+uniform float uWaterY;
+uniform float uCaus;
+uniform vec2 uBowlHalf;
 
 ${SHADOW_GLSL}
 float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
@@ -77,13 +119,36 @@ float fbm(vec2 p) {
   for (int i = 0; i < 4; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; }
   return s;
 }
+// caustics: the bright net the ripples of the water throw on whatever is under it (a tiling pattern of folded sines)
+float caustic(vec2 p, float t) {
+  vec2 i = p;
+  float c = 1.0;
+  for (int n = 0; n < 4; n++) {
+    float tt = t * (1.0 - 3.5 / float(n + 1));
+    i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));
+    c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / 0.005), p.y / (cos(i.y + tt) / 0.005)));
+  }
+  c /= 4.0;
+  c = 1.17 - pow(c, 1.4);
+  return pow(abs(c), 8.0);
+}
 vec4 finish(vec3 c, float a) {
-  vec3 n = normalize(vN);
-  if (!gl_FrontFacing) n = -n; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
-  float light = 0.52 + 0.55 * max(dot(n, normalize(vec3(-0.35, 0.6, 0.72))), 0.0) + 0.12 * max(n.y, 0.0);
   vec3 wn = normalize(vWN);
-  if (!gl_FrontFacing) wn = -wn;
-  c *= light * shadowAt(vW, wn);
+  if (!gl_FrontFacing) wn = -wn; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
+  vec3 L = sceneLight(vW, wn);
+  float depth = uWaterY - vW.y;
+  if (uCaus > 0.0 && depth > 0.0) { // under the water, inside the bowl
+    vec2 m = abs(vW.xz) / uBowlHalf;
+    float inside = 1.0 - smoothstep(0.9, 1.0, pow(pow(m.x, 4.0) + pow(m.y, 4.0), 0.25));
+    vec2 q = vW.xz + uLightDir.xz / max(uLightDir.y, 0.3) * depth; // where the ray crossed the surface
+    float k = caustic(q * 0.3, uTime * 0.55) * (0.35 + 0.65 * clamp(dot(wn, uLightDir) + 0.4, 0.0, 1.0));
+    float fade = exp(-depth * 0.06) * smoothstep(0.0, 0.5, depth) * inside;
+    L += uLightCol * (k * uCaus * fade * 2.4);
+    c = mix(c, c * vec3(0.8, 0.93, 1.0), 0.55 * fade);
+  }
+  c *= L * 0.86;
+  float rim = pow(1.0 - clamp(dot(wn, normalize(cameraPosition - vW)), 0.0, 1.0), 3.0);
+  c += uAmbSky * (rim * 0.16);
   c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
   c += uGlow * 0.28;
   c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, vDist)); // distant background models melt into the mist

@@ -202,3 +202,9 @@
 .bb-st-axis { display: inline-flex; align-items: center; gap: .15rem; color: #94a3b8; font-size: 11px; }
 .bb-st-axis input { width: 4.2rem; }
 .bb-st-addbox { display: flex; flex-direction: column; gap: .4rem; }
+
+/* time of day slider */
+.bb-tod { position: absolute; right: 12px; bottom: 12px; z-index: 30; display: flex; align-items: center; gap: .45rem; padding: .3rem .7rem; border-radius: 999px; background: rgba(255,255,255,.55); backdrop-filter: blur(4px); box-shadow: 0 1px 6px rgba(0,0,0,.25); }
+.bb-tod-icon { font-size: 1.1rem; line-height: 1; color: #333; width: 1.2rem; text-align: center; }
+.bb-tod-range { width: 9rem; accent-color: #f59e0b; cursor: pointer; }
+.bb-dbg-sec > summary { cursor: pointer; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #94a3b8; }

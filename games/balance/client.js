@@ -21,6 +21,8 @@ const SEND_GAP = 33; //          ms between move messages (~30 per second)
 const ROTATE_STEP = 45; //       a held block turns in steps of this many degrees (Q / E, or the mouse wheel)
 const BOWL_SEGS = 72;
 const SHADOW_SIZE = 2048; //     resolution of the shadow map
+const SHADOW_NEAR = 60; //       the light camera looks at the table from 200 away
+const SHADOW_FAR = 340;
 const SHADOW_RANGE = 95; //      half the width of the area the light shades (world units around the table)
 const LAMP = ['#22c55e', '#f97316', '#ef4444']; // lamp on a fragile block: nothing on it, something on it, at its limit
 const TABLE_INDEX = -2; // the instance number of the table model in the background studio (the models of the background are 0, 1, 2 ...)
@@ -156,13 +158,27 @@ class BalanceView {
   shardGeo = Object.assign(new THREE.BoxGeometry(1, 1, 1), { userData: { shared: true } });
   shards = []; //            pieces of a block that just broke: { mesh, vx, vy, vz, spin, life }
   // visual effects (see #renderAll): shadows from a light, a blurred background, a reflective water surface. A pass that throws is switched off.
-  fx = { off: new Set(), shadowRT: null, shadowCam: null, depthMat: null, reflRT: null, reflCam: null, blurA: null, blurB: null, quad: null };
+  fx = { off: new Set(), shadowRT: null, shadowCam: null, depthMat: null, reflRT: null, reflCam: null, kawase: null };
   shadowU = {
     uShadowMap: { value: null },
     uShadowMat: { value: new THREE.Matrix4() },
     uShadowStr: { value: 0 },
     uShadowTexel: { value: new THREE.Vector2(1 / SHADOW_SIZE, 1 / SHADOW_SIZE) },
+    uShadowRange: { value: SHADOW_RANGE * 2 },
+    uShadowDepth: { value: SHADOW_FAR - SHADOW_NEAR },
+    // the light of the moment (see #applyDay): one sun / moon for shading and shadows, soft light from the sky and from the ground
+    uLightDir: { value: new THREE.Vector3(-0.35, 0.8, 0.5).normalize() },
+    uLightCol: { value: new THREE.Vector3(0.72, 0.7, 0.64) },
+    uAmbSky: { value: new THREE.Vector3(0.6, 0.63, 0.68) },
+    uAmbGround: { value: new THREE.Vector3(0.45, 0.41, 0.35) },
+    // caustics under the water
+    uWaterY: { value: WATER_Y },
+    uCaus: { value: 0 },
+    uBowlHalf: { value: new THREE.Vector2(20, 12) },
   };
+  tod = null; //     hour of the day (0-24) the player chose with the slider; null = what the background says
+  fogs = []; //      the mist colours of the world: { value, base }, tinted by the time of day
+  mistNow = new THREE.Color('#e7e2d6');
   waterU = { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 } };
   bgFx = { blur: 0, light: null };
   scenery = null; //  the part of the world that is blurred: the floor and the models of the background
@@ -237,7 +253,7 @@ class BalanceView {
     this.whiteTex = white;
     this.#buildScene();
     this.#buildUi();
-    this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.cdEl, this.menu, this.result);
+    this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.cdEl, this.todBox, this.menu, this.result);
     ctx.container.append(this.root);
     this.#setScene(null);
 
@@ -359,9 +375,10 @@ class BalanceView {
     this.#clearModelGeo();
     this.#disposeTree(this.scene);
     this.#disposeTree(this.frontScene);
-    for (const k of ['shadowRT', 'reflRT', 'blurA', 'blurB']) this.fx[k]?.dispose();
+    for (const k of ['shadowRT', 'reflRT']) this.fx[k]?.dispose();
+    for (const t of [...(this.fx.kawase?.rts ?? []), ...(this.fx.kawase?.nearUp ?? []), ...(this.fx.kawase?.farUp ?? [])]) t?.dispose();
+    for (const m of ['down', 'up', 'mix']) this.fx.kawase?.[m].dispose();
     this.fx.depthMat?.dispose();
-    this.fx.quad?.mat.dispose();
     this.markerGeo.dispose();
     this.dotGeo.dispose();
     this.shardGeo.dispose();
@@ -760,6 +777,7 @@ class BalanceView {
       this.scene.add(this.dropHelper);
     }
     if (this.dropHelper) this.dropHelper.visible = on;
+    this.#applyDay(); // (the level may have its own time of day on the same background)
     this.#updateDropHelper();
   }
 
@@ -799,6 +817,7 @@ class BalanceView {
 
   /** Show the world of a level (null = the menu). Only rebuilt when the bowl or the background changed, or when `force` is set. */
   #setScene(level, force = false) {
+    if (level !== this.currentLevel) this.tod = null; // a new level: back to its own time of day
     this.currentLevel = level;
     const sig = `${bowlKeyOf(level)}|${backgroundKeyOf(level)}`;
     if (force || sig !== this.sceneSig) {
@@ -806,6 +825,55 @@ class BalanceView {
       this.#buildWorld(bowlOf(level), backgroundOf(level));
     }
     this.#updateDropHelper();
+  }
+
+  // ── time of day ──
+  /** The hour that is shown: the slider (just for now), else the level's own `time`, else the background's `light.time`, else noon. */
+  #hourNow() {
+    return this.tod ?? this.currentLevel?.time ?? this.bgFx.light?.time ?? 12;
+  }
+
+  /** Sun or moon, its colour, the sky light, the mist: all worked out from the hour. 6 = sunrise, 12 = noon, 18 = sunset, 0 = midnight. */
+  #applyDay() {
+    const h = this.#hourNow();
+    const sm = (a, b, x) => { const t = THREE.MathUtils.clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+    const mixv = (a, b, t) => a.map((x, i) => x + (b[i] - x) * t);
+    const elev = Math.sin(((h - 6) / 12) * Math.PI); // sun height: 1 at noon, 0 at 6 and 18, below 0 at night
+    const day = sm(-0.12, 0.22, elev);
+    const dusk = Math.exp(-(elev * elev) / (2 * 0.2 * 0.2)); // 1 right at the horizon
+    // direction: the background's `light.dir` is the noon light; over the day it sweeps from one side to the other and gets lower at the ends
+    const base = this.bgFx.light?.dir ?? [-0.45, 0.85, 0.55];
+    const sweep = -Math.sin(((h - 12) / 12) * Math.PI);
+    const dayDir = new THREE.Vector3(base[0] + sweep * 0.9, base[1] * (0.35 + 0.65 * Math.max(elev, 0.05)), base[2]);
+    const moonDir = new THREE.Vector3(base[0] * -0.8 + 0.2, base[1] * 0.7, base[2]);
+    const dir = dayDir.normalize().lerp(moonDir.normalize(), 1 - day).normalize();
+    const sunCol = mixv([1.0, 0.55, 0.28], [1.0, 0.95, 0.85], sm(0.0, 0.55, elev)).map((x) => x * 0.76);
+    const moonCol = [0.2, 0.26, 0.48];
+    const lightCol = mixv(moonCol, sunCol, day);
+    const sky = mixv(mixv([0.1, 0.13, 0.26], [0.6, 0.63, 0.7], day), [0.55, 0.42, 0.42], dusk * 0.55 * day);
+    const ground = mixv(mixv([0.05, 0.06, 0.1], [0.45, 0.41, 0.35], day), [0.42, 0.3, 0.24], dusk * 0.5 * day);
+    const tint = mixv(mixv([0.1, 0.13, 0.25], [1, 1, 1], day), [1.0, 0.7, 0.58], dusk * 0.65 * day);
+    const u = this.shadowU;
+    u.uLightDir.value.copy(dir);
+    u.uLightCol.value.set(...lightCol);
+    u.uAmbSky.value.set(...sky);
+    u.uAmbGround.value.set(...ground);
+    for (const f of this.fogs) f.value.setRGB(f.base.r * tint[0], f.base.g * tint[1], f.base.b * tint[2]);
+    const mist = this.bgFx.mist ? rawColor(this.bgFx.mist) : new THREE.Color('#e7e2d6');
+    this.mistNow.setRGB(mist.r * tint[0], mist.g * tint[1], mist.b * tint[2]);
+    if (this.scene?.background?.isColor) {
+      this.scene.background.set(this.bgFx.mist ?? '#e7e2d6');
+      this.scene.background.r *= tint[0];
+      this.scene.background.g *= tint[1];
+      this.scene.background.b *= tint[2];
+    }
+    if (this.todEl) this.todEl.value = String(h);
+    if (this.todIcon) this.todIcon.textContent = day > 0.3 ? '☀' : '☾';
+  }
+
+  #setTod(h) {
+    this.tod = h; // (only a preview: the next level goes back to its own time)
+    this.#applyDay();
   }
 
   /** Floor, table, bowl, water and the models of the background. */
@@ -826,12 +894,15 @@ class BalanceView {
     this.floorY = floorY;
     this.scene.background = new THREE.Color(bg.mist);
     const fog = { uFogColor: { value: rawColor(bg.mist) }, uFog: { value: new THREE.Vector2(bg.fog?.[0] ?? 150, bg.fog?.[1] ?? 520) } };
+    this.fogs = [{ value: fog.uFogColor.value, base: rawColor(bg.mist) }];
 
     // the world is two groups: the SCENERY (floor, models of the background: this is what the blur pass blurs) and the MAIN part (table, bowl, water)
     const scenery = (this.scenery = new THREE.Group());
     const main = (this.mainGroup = new THREE.Group());
     world.add(scenery, main);
-    this.bgFx = { blur: bg.blur ?? 0, light: bg.light ?? null, mist: bg.mist };
+    this.bgFx = { blur: bg.blur ?? 0, blurStart: bg.blurStart ?? 0, blurFar: bg.blurFar ?? 0, blurFarStart: bg.blurFarStart ?? -45, blurRamp: bg.blurRamp ?? 30, light: bg.light ?? null, mist: bg.mist };
+    this.shadowU.uCaus.value = bowl.water?.caustics ?? 0.9;
+    this.shadowU.uBowlHalf.value.set(bowl.a * 0.97, bowl.a * bowl.zscale * 0.97);
 
     // the ground: raked sand or wooden planks. Ripples run around the table like around a rock, and the far end fades into mist.
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
@@ -864,6 +935,7 @@ class BalanceView {
 
     // the scenery
     bg.models.forEach((inst, i) => this.#addModel(scenery, inst, token, floorY, fog, i));
+    this.#applyDay();
     this.#fitCamera();
   }
 
@@ -894,10 +966,12 @@ class BalanceView {
     return [wood, water];
   }
 
-  /** Water: see-through blue, and its top mirrors what is behind and above it (the reflection texture of #reflectPass), more at a low viewing angle. */
+  /** Water: see-through blue with waves. Four crossing sine waves tilt the surface normal; the tilt bends the reflection (the texture of #reflectPass),
+   *  makes the sun glitter, and the surface takes the colour of the light of the day. (The waves are in the shading, not in the geometry.) */
   #waterMaterial(bowl, plain = false) {
+    const u = plain ? { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 }, ...this.#plainLight() } : { ...this.waterU, ...this.shadowU };
     return new THREE.ShaderMaterial({
-      uniforms: { uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: bowl.water.opacity }, uTime: this.uTime, ...(plain ? { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 } } : this.waterU) },
+      uniforms: { uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: bowl.water.opacity }, uTime: this.uTime, ...u },
       vertexShader: /* glsl */ `
 varying vec3 vW;
 varying vec3 vWN;
@@ -917,20 +991,36 @@ uniform float uTime;
 uniform sampler2D uRefl;
 uniform mat4 uReflMat;
 uniform float uReflStr;
+uniform vec3 uLightDir;
+uniform vec3 uLightCol;
+uniform vec3 uAmbSky;
+vec2 waveSlope(vec2 p, float t) {
+  vec2 g = vec2(0.0);
+  g += vec2(1.0, 0.3) * (0.55 * 0.10 * cos(dot(p, vec2(1.0, 0.3)) * 0.55 + t * 1.0));
+  g += vec2(-0.4, 1.0) * (0.90 * 0.05 * cos(dot(p, vec2(-0.4, 1.0)) * 0.90 + t * 1.3));
+  g += vec2(0.7, 0.7) * (1.70 * 0.02 * cos(dot(p, vec2(0.7, 0.7)) * 1.70 + t * 1.9));
+  g += vec2(-0.9, -0.2) * (3.10 * 0.008 * cos(dot(p, vec2(-0.9, -0.2)) * 3.10 + t * 2.4));
+  return g;
+}
 void main() {
   float top = smoothstep(0.55, 0.9, abs(normalize(vWN).y));
-  vec3 col = uColor;
+  vec2 g = waveSlope(vW.xz, uTime);
+  vec3 N = normalize(mix(normalize(vWN), vec3(-g.x, 1.0, -g.y), top));
+  vec3 V = normalize(cameraPosition - vW);
+  vec3 col = uColor * ((uAmbSky * 0.7 + uLightCol * 0.35) * 1.28); // the colour of the water follows the light of the day
   float alpha = uOpacity;
+  float fres = pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 3.0);
   if (uReflStr > 0.0 && top > 0.0) {
     vec4 pr = uReflMat * vec4(vW, 1.0);
-    vec2 ripple = vec2(sin(vW.x * 1.9 + uTime * 1.3) + sin(vW.z * 2.7 - uTime * 0.9), cos(vW.x * 2.3 - uTime * 1.1) + sin(vW.z * 1.7 + uTime * 1.2)) * 0.0025;
-    vec2 uv = pr.xy / pr.w + ripple;
+    vec2 uv = pr.xy / pr.w + N.xz * 0.045; // the waves bend the mirror image
     vec3 refl = texture2D(uRefl, clamp(uv, 0.001, 0.999)).rgb;
-    float fres = pow(1.0 - clamp(dot(normalize(cameraPosition - vW), vec3(0.0, 1.0, 0.0)), 0.0, 1.0), 2.5);
-    float k = clamp(uReflStr * (0.35 + 0.65 * fres), 0.0, 1.0) * top;
+    float k = clamp(uReflStr * (0.3 + 0.7 * fres), 0.0, 1.0) * top;
     col = mix(col, refl, k);
     alpha = mix(alpha, 1.0, k * 0.85);
   }
+  float glint = pow(max(dot(N, normalize(uLightDir + V)), 0.0), 140.0) * top; // sun (or moon) glitter on the ripples
+  col += uLightCol * (glint * 1.6);
+  alpha = clamp(alpha + glint * 0.6 + fres * 0.12 * top, 0.0, 1.0);
   gl_FragColor = vec4(col, alpha);
 }`,
       transparent: true,
@@ -998,7 +1088,7 @@ void main() {
     sand = base * (0.6 + 0.4 * smoothstep(0.0, 0.25, seam));
   }
   sand *= 0.7 + 0.3 * smoothstep(0.0, 10.0, dist); // the table's soft shadow
-  sand *= shadowAt(vW, vec3(0.0, 1.0, 0.0));
+  sand *= sceneLight(vW, vec3(0.0, 1.0, 0.0)) * 0.86;
   gl_FragColor = vec4(mix(sand, uMist, smoothstep(uFogRange.x * 0.9, uFogRange.y, dc)), 1.0);
 }`,
     });
@@ -1133,6 +1223,17 @@ void main() {
     return geo;
   }
 
+  /** The light uniforms for the little preview windows (other WebGL contexts: no shared textures, a fixed daylight). */
+  #plainLight() {
+    const v = (x) => ({ value: x });
+    return {
+      uShadowMap: v(this.whiteTex), uShadowMat: v(new THREE.Matrix4()), uShadowStr: v(0), uShadowTexel: v(new THREE.Vector2(1, 1)), uShadowRange: v(190), uShadowDepth: v(280),
+      uLightDir: v(new THREE.Vector3(-0.35, 0.8, 0.5).normalize()), uLightCol: v(new THREE.Vector3(0.72, 0.7, 0.64)),
+      uAmbSky: v(new THREE.Vector3(0.6, 0.63, 0.68)), uAmbGround: v(new THREE.Vector3(0.45, 0.41, 0.35)),
+      uWaterY: v(WATER_Y), uCaus: v(0), uBowlHalf: v(new THREE.Vector2(20, 12)),
+    };
+  }
+
   /** One ShaderMaterial per block; the time uniform is shared by all of them. */
   #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false) {
     const transparent = transparentShaders.has(shaderName);
@@ -1146,7 +1247,7 @@ void main() {
         uBad: { value: 0 },
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
         uFog: fog?.uFog ?? { value: new THREE.Vector2(1e6, 2e6) }, // blocks never fade; background models do
-        ...(plain ? { uShadowMap: { value: this.whiteTex }, uShadowMat: { value: new THREE.Matrix4() }, uShadowStr: { value: 0 }, uShadowTexel: { value: new THREE.Vector2(1, 1) } } : this.shadowU), // (the little preview windows are other WebGL contexts: no shared textures)
+        ...(plain ? this.#plainLight() : this.shadowU), // (the little preview windows are other WebGL contexts: no shared textures)
       },
       transparent,
       depthWrite: !transparent,
@@ -1340,6 +1441,13 @@ void main() {
     this.restartBtn = el('button', { class: 'bb-btn', onclick: () => send({ restart: true }) }, 'Restart');
     this.levelsBtn = el('button', { class: 'bb-btn', onclick: () => send({ menu: true }) }, 'Levels');
     this.camBtn = el('button', { class: 'bb-btn', title: 'Back to the normal view (C)', onclick: () => this.#resetCamera() }, 'Reset camera');
+    // time of day: a small slider in the corner (double-click it to go back to the level's own time)
+    this.todIcon = el('span', { class: 'bb-tod-icon' }, '☀');
+    this.todEl = el('input', { type: 'range', min: '0', max: '24', step: '0.05', class: 'bb-tod-range', title: 'Look at another time of day (double-click: back to the time of the level)' });
+    this.todEl.addEventListener('input', () => this.#setTod(parseFloat(this.todEl.value)));
+    this.todEl.addEventListener('dblclick', () => this.#setTod(null));
+    this.todBox = el('div', { class: 'bb-tod' }, this.todIcon, this.todEl);
+    this.#applyDay();
     this.hintEl = el('div', { class: 'bb-hint' });
     this.hud = el(
       'div',
@@ -1642,9 +1750,9 @@ void main() {
     if (!fx.shadowRT) {
       fx.shadowRT = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
       fx.depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide });
-      fx.shadowCam = new THREE.OrthographicCamera(-SHADOW_RANGE, SHADOW_RANGE, SHADOW_RANGE, -SHADOW_RANGE, 1, 420);
+      fx.shadowCam = new THREE.OrthographicCamera(-SHADOW_RANGE, SHADOW_RANGE, SHADOW_RANGE, -SHADOW_RANGE, SHADOW_NEAR, SHADOW_FAR);
     }
-    const dir = new THREE.Vector3(...(L.dir ?? [-0.45, 0.85, 0.55])).normalize();
+    const dir = this.shadowU.uLightDir.value.clone();
     const target = new THREE.Vector3(0, this.groundY + 6, 0);
     const cam = fx.shadowCam;
     cam.position.copy(target).addScaledVector(dir, 200);
@@ -1743,7 +1851,7 @@ void main() {
     const bgSave = this.scene.background;
     this.scene.background = null;
     this.#soloScenery(true, true);
-    r.setClearColor(rawColor(this.bgFx.mist ?? '#e7e2d6'), 1);
+    r.setClearColor(this.mistNow, 1);
     r.setRenderTarget(fx.reflRT);
     r.clear();
     r.render(this.scene, vc);
@@ -1756,70 +1864,165 @@ void main() {
     return true;
   }
 
-  /** The scenery (floor and background models) is drawn into a texture, blurred in two passes and put on the screen as the backdrop. */
+  /**
+   * The scenery (floor and background models) is drawn at full size, with its depth. It is then shrunk step by step (each step averages 5 taps into a
+   * texture half the size) and grown back (8 taps): a DUAL KAWASE blur, a wide soft blur for a few tiny passes. That pyramid is built ONCE and read
+   * twice, grown back to two strengths: a light one (`blur`) and a heavy one (`blurFar`). One last pass looks at the depth of every pixel (its world z)
+   * and picks: sharp in front of `blurStart`, the light blur behind it, the heavy blur behind `blurFarStart`, eased over `blurRamp` units.
+   * (A blur that changes its radius per pixel would cost far more; two planes plus a mix costs about one extra tiny chain.)
+   */
   #blurPass() {
-    const radius = this.bgFx.blur;
-    if (!(radius > 0) || !this.scenery) return false;
+    const B = this.bgFx;
+    const near = Math.max(0, B.blur ?? 0);
+    const far = Math.max(0, B.blurFar ?? 0);
+    if (!(near > 0 || far > 0) || !this.scenery) return false;
     const fx = this.fx;
     const r = this.renderer;
     const size = r.getDrawingBufferSize(new THREE.Vector2());
-    const w = Math.max(16, Math.round(size.x));
-    const h = Math.max(16, Math.round(size.y));
-    if (!fx.blurA) {
-      fx.blurA = new THREE.WebGLRenderTarget(w, h);
-      fx.blurB = new THREE.WebGLRenderTarget(w, h);
-      const mat = new THREE.ShaderMaterial({
-        uniforms: { uTex: { value: null }, uStep: { value: new THREE.Vector2() } },
-        vertexShader: /* glsl */ `
+    const w0 = Math.max(16, Math.round(size.x));
+    const h0 = Math.max(16, Math.round(size.y));
+    const plan = (radius) => { // levels of the pyramid and the tap offset for a blur of about `radius` pixels (full-size pixels)
+      if (!(radius > 0)) return null;
+      const levels = THREE.MathUtils.clamp(Math.ceil(Math.log2(Math.max(radius, 1) / 3)), 1, 5);
+      return { levels, offset: THREE.MathUtils.clamp(radius / 2 ** (levels + 1), 0.5, 3) };
+    };
+    const pn = plan(near);
+    const pf = plan(far);
+    const depthLevels = Math.max(pn?.levels ?? 1, pf?.levels ?? 1);
+    if (!fx.kawase) {
+      const vs = /* glsl */ `
 varying vec2 vUv;
-void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
-        fragmentShader: /* glsl */ `
-precision highp float;
-varying vec2 vUv;
-uniform sampler2D uTex;
-uniform vec2 uStep;
-void main() {
-  vec4 c = texture2D(uTex, vUv) * 0.2270270270;
-  c += (texture2D(uTex, vUv + uStep * 1.3846153846) + texture2D(uTex, vUv - uStep * 1.3846153846)) * 0.3162162162;
-  c += (texture2D(uTex, vUv + uStep * 3.2307692308) + texture2D(uTex, vUv - uStep * 3.2307692308)) * 0.0702702703;
-  gl_FragColor = vec4(c.rgb, 1.0);
-}`,
+void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+      const mk = (fs, extra = {}) => new THREE.ShaderMaterial({
+        uniforms: { uTex: { value: null }, uHalf: { value: new THREE.Vector2() }, uOff: { value: 1 }, ...extra },
+        vertexShader: vs,
+        fragmentShader: fs,
         depthTest: false,
         depthWrite: false,
       });
+      const down = mk(/* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform vec2 uHalf;
+uniform float uOff;
+void main() {
+  vec2 o = uHalf * uOff;
+  vec4 s = texture2D(uTex, vUv) * 4.0;
+  s += texture2D(uTex, vUv - o);
+  s += texture2D(uTex, vUv + o);
+  s += texture2D(uTex, vUv + vec2(o.x, -o.y));
+  s += texture2D(uTex, vUv - vec2(o.x, -o.y));
+  gl_FragColor = vec4(s.rgb / 8.0, 1.0);
+}`);
+      const up = mk(/* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform vec2 uHalf;
+uniform float uOff;
+void main() {
+  vec2 o = uHalf * uOff;
+  vec4 s = texture2D(uTex, vUv + vec2(-o.x * 2.0, 0.0));
+  s += texture2D(uTex, vUv + vec2(-o.x, o.y)) * 2.0;
+  s += texture2D(uTex, vUv + vec2(0.0, o.y * 2.0));
+  s += texture2D(uTex, vUv + vec2(o.x, o.y)) * 2.0;
+  s += texture2D(uTex, vUv + vec2(o.x * 2.0, 0.0));
+  s += texture2D(uTex, vUv + vec2(o.x, -o.y)) * 2.0;
+  s += texture2D(uTex, vUv + vec2(0.0, -o.y * 2.0));
+  s += texture2D(uTex, vUv + vec2(-o.x, -o.y)) * 2.0;
+  gl_FragColor = vec4(s.rgb / 12.0, 1.0);
+}`);
+      const mix = mk(/* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D uTex;   // sharp
+uniform sampler2D uNear;  // light blur
+uniform sampler2D uFar;   // heavy blur
+uniform sampler2D uDepth;
+uniform mat4 uInvVP;
+uniform vec4 uPlanes;     // blurStart, blurFarStart, ramp, unused
+void main() {
+  float d = texture2D(uDepth, vUv).r;
+  vec4 wp = uInvVP * vec4(vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  float z = (d >= 0.99999) ? -1e5 : wp.z / wp.w; // (empty sky is as far as it gets)
+  float t1 = smoothstep(0.0, 1.0, (uPlanes.x - z) / uPlanes.z);
+  float t2 = smoothstep(0.0, 1.0, (uPlanes.y - z) / uPlanes.z);
+  vec3 c = mix(mix(texture2D(uTex, vUv).rgb, texture2D(uNear, vUv).rgb, t1), texture2D(uFar, vUv).rgb, t2);
+  gl_FragColor = vec4(c, 1.0);
+}`, { uNear: { value: null }, uFar: { value: null }, uDepth: { value: null }, uInvVP: { value: new THREE.Matrix4() }, uPlanes: { value: new THREE.Vector4() } });
       const scene = new THREE.Scene();
-      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), down);
       quad.frustumCulled = false;
       scene.add(quad);
-      fx.quad = { scene, mat, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1) };
-    } else if (fx.blurA.width !== w || fx.blurA.height !== h) {
-      fx.blurA.setSize(w, h);
-      fx.blurB.setSize(w, h);
+      fx.kawase = { scene, quad, down, up, mix, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), rts: [], nearUp: [], farUp: [], key: '' };
     }
-    // 1. the scenery alone, on the sky colour
+    const k = fx.kawase;
+    const key = `${w0}x${h0}x${depthLevels}`;
+    if (k.key !== key) { // (re)build the pyramids: `rts` shrinks (level 0 = the scene with its depth), `nearUp` and `farUp` hold the two ways back up
+      [...k.rts, ...k.nearUp, ...k.farUp].forEach((t) => t?.dispose());
+      const rt = (i, depth) => new THREE.WebGLRenderTarget(Math.max(2, w0 >> i), Math.max(2, h0 >> i), {
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: depth, wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+        ...(depth ? { depthTexture: new THREE.DepthTexture(Math.max(2, w0), Math.max(2, h0)) } : {}),
+      });
+      k.rts = [];
+      k.nearUp = [];
+      k.farUp = [];
+      for (let i = 0; i <= depthLevels; i++) {
+        k.rts.push(rt(i, i === 0));
+        k.nearUp.push(i >= 1 && i < depthLevels ? rt(i, false) : null); // (level i of an up chain; the deepest level is read from `rts`)
+        k.farUp.push(i >= 1 && i < depthLevels ? rt(i, false) : null);
+      }
+      k.key = key;
+    }
+    // 1. the scenery alone, on the colour of the sky
     const oldColor = r.getClearColor(new THREE.Color());
     const oldAlpha = r.getClearAlpha();
     const bgSave = this.scene.background;
     this.scene.background = null;
     this.#soloScenery(true, false);
-    r.setClearColor(rawColor(this.bgFx.mist ?? '#e7e2d6'), 1);
-    r.setRenderTarget(fx.blurA);
+    r.setClearColor(this.mistNow, 1);
+    r.setRenderTarget(k.rts[0]);
     r.clear();
     r.render(this.scene, this.camera);
     this.#soloScenery(false, false);
-    // 2. blur sideways into B, then up / down onto the screen. `radius` is in screen pixels (a 9-tap gaussian stretched to that size)
-    const q = fx.quad;
-    const k = radius / 3.2;
-    q.mat.uniforms.uTex.value = fx.blurA.texture;
-    q.mat.uniforms.uStep.value.set((k / w) * 1, 0);
-    r.setRenderTarget(fx.blurB);
-    r.render(q.scene, q.cam);
-    q.mat.uniforms.uTex.value = fx.blurB.texture;
-    q.mat.uniforms.uStep.value.set(0, (k / h) * 1);
-    r.setRenderTarget(null);
+    // 2. shrink (once), 3. grow back to each strength
+    const pass = (mat, from, to, offset, half) => {
+      k.quad.material = mat;
+      mat.uniforms.uTex.value = from.texture;
+      mat.uniforms.uHalf.value.set(0.5 / half.width, 0.5 / half.height); // (half a texel of the smaller of the two textures)
+      mat.uniforms.uOff.value = offset;
+      r.setRenderTarget(to);
+      r.render(k.scene, k.cam);
+    };
+    for (let i = 0; i < depthLevels; i++) pass(k.down, k.rts[i], k.rts[i + 1], 1, k.rts[i + 1]);
+    const grow = (p, store) => { // up the pyramid from level p.levels to level 1; the result is the texture at level 1 (half size)
+      if (!p) return k.rts[0].texture;
+      let from = k.rts[p.levels];
+      for (let i = p.levels; i > 1; i--) {
+        const to = store[i - 1];
+        pass(k.up, from, to, p.offset, from);
+        from = to;
+      }
+      if (p.levels === 1) return from.texture;
+      return from.texture;
+    };
+    const nearTex = grow(pn, k.nearUp);
+    const farTex = pf ? grow(pf, k.farUp) : nearTex;
+    // 4. the mix, onto the screen
     r.setClearColor(oldColor, oldAlpha);
+    this.camera.updateMatrixWorld(true);
+    const m = k.mix.uniforms;
+    m.uTex.value = k.rts[0].texture;
+    m.uDepth.value = k.rts[0].depthTexture;
+    m.uNear.value = nearTex;
+    m.uFar.value = farTex;
+    m.uInvVP.value.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse).invert();
+    m.uPlanes.value.set(B.blurStart ?? 0, B.blurFarStart ?? -45, Math.max(1, B.blurRamp ?? 30), 0);
+    k.quad.material = k.mix;
+    r.setRenderTarget(null);
     r.clear();
-    r.render(q.scene, q.cam);
+    r.render(k.scene, k.cam);
     this.scene.background = bgSave;
     return true;
   }

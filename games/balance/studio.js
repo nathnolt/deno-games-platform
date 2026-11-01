@@ -1561,7 +1561,12 @@ function backgroundStudio(view, api) {
     bg.ground ??= { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2 };
     bg.fog ??= [150, 520];
     bg.blur ??= 3;
+    bg.blurStart ??= 0;
+    bg.blurFar ??= 10;
+    bg.blurFarStart ??= -45;
+    bg.blurRamp ??= 30;
     bg.light ??= { dir: [-0.45, 0.85, 0.55], shadow: 0.4 };
+    bg.light.time ??= 12;
     bg.light.dir ??= [-0.45, 0.85, 0.55];
     bg.light.shadow ??= 0.4;
     bg.ground.style ??= 'sand';
@@ -1630,9 +1635,16 @@ function backgroundStudio(view, api) {
           w.color('sand ridges', bg.ground, 'colorB', 'backgrounds'),
           w.slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1),
           w.select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks']], bg.ground, 'style', 'backgrounds'),
-          w.slider('background blur (px)', bg, 'blur', 'backgrounds', 0, 12, 0.5),
+          w.slider('time of day (hour)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
           w.slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
           row3('light direction', bg.light.dir, -1, 0.1))),
+      h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Blur (two planes by depth)'),
+        h('div', { class: 'bb-st-instbody' },
+          w.slider('light blur (px)', bg, 'blur', 'backgrounds', 0, 20, 0.5),
+          w.field('light blur starts at z', numIn(() => bg.blurStart, (v) => { bg.blurStart = v; api.touch('backgrounds'); }, 1)),
+          w.slider('heavy blur (px)', bg, 'blurFar', 'backgrounds', 0, 40, 0.5),
+          w.field('heavy blur starts at z', numIn(() => bg.blurFarStart, (v) => { bg.blurFarStart = v; api.touch('backgrounds'); }, 1)),
+          w.field('ease in over', numIn(() => bg.blurRamp, (v) => { if (v >= 1) { bg.blurRamp = v; api.touch('backgrounds'); } }, 1)))),
       h('div', { class: 'bb-st-sub' }, 'Table and bowl'),
       h('label', { class: 'bb-dbg-field' }, h('span', {}, 'bowl height above the floor'), numIn(() => bg.bowlHeight ?? 4, (v) => { if (v >= 0) { bg.bowlHeight = v; api.touch('backgrounds'); } }, 0.5)),
       bg.table ? null : h('div', { class: 'bb-st-instbody' },

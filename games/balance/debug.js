@@ -350,6 +350,7 @@ export function createDebugMenu(view) {
         select('world', keys('worlds'), lv, 'world', 'levels'),
         select('bowl', keys('bowls'), lv, 'bowl', 'levels'),
         select('background', keys('backgrounds'), lv, 'background', 'levels'),
+        num('time of day override (hour, empty = the background\'s)', lv, 'time', 'levels', { optional: true, min: 0, max: 24, step: 0.25 }),
         num('blocks on the table', lv, 'chooseShapes', 'levels', { int: true, min: 1 }),
         customRect(lv, 'zone', ['x0', 'x1'], 'own sideways limits'),
         customRect(lv, 'drop', ['x0', 'x1', 'y0', 'y1'], 'own drop zone'),
@@ -500,6 +501,7 @@ export function createDebugMenu(view) {
     const b = draft.bowls[key];
     b.water ??= { color: '#3d9bff', opacity: 0.4 };
     b.water.reflect ??= 0.6;
+    b.water.caustics ??= 0.9;
     const flat = Math.max(0, 2 * (b.a - b.r));
     out.push(
       btn('Use this bowl in the current level', () => {
@@ -525,7 +527,8 @@ export function createDebugMenu(view) {
         select('shader', shaderNames(), b, 'shader', 'bowls'),
         color('water colour', b.water, 'color', 'bowls'),
         slider('water opacity', b.water, 'opacity', 'bowls', 0, 1, 0.05),
-        slider('water reflection', b.water, 'reflect', 'bowls', 0, 1, 0.05)),
+        slider('water reflection', b.water, 'reflect', 'bowls', 0, 1, 0.05),
+        slider('water caustics', b.water, 'caustics', 'bowls', 0, 2, 0.05)),
       section('Model instead of the generated bowl (optional)', modelPicker(b)),
     );
     return out;
@@ -608,9 +611,14 @@ export function createDebugMenu(view) {
     bg.fog ??= [150, 520];
     bg.models ??= [];
     bg.blur ??= 3;
+    bg.blurStart ??= 0;
+    bg.blurFar ??= 10;
+    bg.blurFarStart ??= -45;
+    bg.blurRamp ??= 30;
     bg.light ??= { dir: [-0.45, 0.85, 0.55], shadow: 0.4 };
     bg.light.dir ??= [-0.45, 0.85, 0.55];
-    bg.light.shadow ??= 0.4;
+    bg.light.shadow ??= 0.55;
+    bg.light.time ??= 12;
     bg.ground.style ??= 'sand';
     bg.bowlHeight ??= 4;
     bg.box ??= { w: 110, d: 52, z: 2, shader: 'floorwood' };
@@ -639,9 +647,19 @@ export function createDebugMenu(view) {
         num('table depth (z)', bg.box, 'd', 'backgrounds', { min: 10, max: 1000 }),
         num('table centre z', bg.box, 'z', 'backgrounds'),
         select('table shader', shaderNames(), bg.box, 'shader', 'backgrounds'),
-        slider('background blur (px)', bg, 'blur', 'backgrounds', 0, 12, 0.5),
+        ),
+      section('Light and time of day',
+        slider('time of day (hour, 12 = noon, 0 = midnight)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
+        note('A level can set its own time in the Levels tab; that overrides this one.'),
         slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
-        vec('light direction', bg.light.dir, 'backgrounds', 0.1)),
+        vec('light direction at noon', bg.light.dir, 'backgrounds', 0.1)),
+      h('details', { class: 'bb-dbg-sec' }, h('summary', {}, 'Blur (two planes by depth)'),
+        note('Everything behind the table is blurred by depth: sharp in front of "blur starts", the light blur behind it, the heavy blur behind "heavy blur starts". z is in world units, 0 = the play plane, negative = behind the table.'),
+        slider('light blur (px)', bg, 'blur', 'backgrounds', 0, 20, 0.5),
+        num('light blur starts at z', bg, 'blurStart', 'backgrounds'),
+        slider('heavy blur (px)', bg, 'blurFar', 'backgrounds', 0, 40, 0.5),
+        num('heavy blur starts at z', bg, 'blurFarStart', 'backgrounds'),
+        num('ease in over (z units)', bg, 'blurRamp', 'backgrounds', { min: 1 })),
       section(`Models (${bg.models.length})`,
         ...bg.models.map((m, i) => h('div', { class: 'bb-dbg-part' },
           h('div', { class: 'bb-dbg-row' },
