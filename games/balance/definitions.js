@@ -79,6 +79,8 @@ export const shapes = {
   triangle: [{ type: 'poly', points: '0,0 6,6 6,0' }],
   plus: [{ type: 'poly', points: '3,0 3,6 5,6 5,0' }, { type: 'poly', points: '1,4 7,4 7,2 1,2' }],
   arrow: [{ type: 'poly', points: '-4,1 1,1 1,-1 -4,-1' }, { type: 'poly', points: '0,2.828 2.828,0 0,-2.828' }],
+  circle: [{ type: 'circle', diameter: 5 }],
+  what: [{ type: 'circle', diameter: 2 }, { type: 'circle', diameter: 2, x: 6, y: 1 }],
 };
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────

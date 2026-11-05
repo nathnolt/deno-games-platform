@@ -13,6 +13,7 @@ const { Vec2 } = planck;
 
 const STEP = 1 / 120; //          fixed physics step (the platform ticks at 30 Hz, so ~4 physics steps per snapshot)
 const MAX_STEPS = 12; //          never do more than this per tick (protects the server if it falls behind)
+const WIN_HOLD = 0.8; //          seconds the third green dot stays lit (the countdown has run out, everything still has to stand) before the level counts as cleared
 const WIN_SHOW = 2.6; //          seconds "level cleared" is shown before the game goes back to the level menu
 const FREEZE_AFTER = 5; //        stop simulating this long after the level has ended
 const FLOAT_SIDES = 24; //        circles are approximated by a polygon when computing buoyancy
@@ -229,7 +230,12 @@ class BalanceGame {
   }
 
   /** Debug: write the levels to levels.js (only when they changed). Needs `--allow-write=games/balance/levels.js` in deno.json; without it the error is shown in the debug menu. */
-  async #saveLevels() {
+  #saveLevels() { // (waits for a quiet second: a blueprint drag changes the levels many times a second)
+    clearTimeout(this.levelsTimer);
+    this.levelsTimer = setTimeout(() => this.#writeLevels(), 1000);
+  }
+
+  async #writeLevels() {
     if (typeof Deno === 'undefined' || typeof Deno.writeTextFile !== 'function') return;
     const text = serializeLevels(levels);
     if (text === this.levelsText) return;
@@ -516,7 +522,7 @@ class BalanceGame {
 
     this.acc += dt;
     let steps = 0;
-    if (this.lab.paused) this.acc = 0; // the lab froze physics
+    if (this.lab.paused || this.phase === PHASE.WON) this.acc = 0; // the lab froze physics; a cleared level is frozen as it stands (the winning tower stays still while "level cleared" is shown)
     while (this.acc >= STEP && steps < MAX_STEPS) {
       this.#buoyancy();
       this.world.step(STEP, 8, 4);
@@ -636,7 +642,7 @@ class BalanceGame {
     // won: every block is placed and a countdown has run out (no check for stability: only losing blocks into the water or the bowl matters)
     if (this.#remaining() === 0) {
       this.settle += dt;
-      if (this.settle >= (tuning.countdown ?? 3)) {
+      if (this.settle >= (tuning.countdown ?? 3) + WIN_HOLD) { // (the dots fill up during `countdown`: the third one is on for the last WIN_HOLD seconds)
         this.phase = PHASE.WON;
         this.endedFor = 0;
       }

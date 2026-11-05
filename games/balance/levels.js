@@ -55,4 +55,41 @@ export const levels = [
       { shape: 'square1', material: 'wood' },
     ],
   },
+  {
+    name: 'Level 3',
+    difficulty: 'easy',
+    world: 'world1',
+    bowl: 'canoe',
+    background: 'zen1',
+    initialBlocks: [
+      { shape: 'heart', material: 'static', rot: -45, x: -9, y: 1.25 },
+      { shape: 'heart', material: 'static', rot: 45, x: 4.5, y: 1.75 },
+    ],
+    chooseShapes: 3,
+    shapes: [
+      { shape: 'L', material: 'wood' },
+      { shape: 'L2', material: 'wood' },
+      { shape: 'L', material: 'wood' },
+      { shape: 'L2', material: 'wood' },
+    ],
+  },
+  {
+    name: 'Level 4',
+    difficulty: 'easy',
+    world: 'world1',
+    bowl: 'bowl1',
+    background: 'zen1',
+    initialBlocks: [
+      { shape: 'square1', material: 'static', rot: 45, x: -0.25, y: -4.75 },
+      { shape: 'triangle', material: 'wood', rot: -45, x: 0, y: 2.25 },
+      { shape: 'square1', material: 'static', rot: 45, x: 0.25, y: -4.75 },
+    ],
+    chooseShapes: 3,
+    shapes: [
+      { shape: 'arrow', material: 'wood' },
+      { shape: 'arrow', material: 'wood' },
+      { shape: 'arrow', material: 'wood' },
+      { shape: 'arrow', material: 'wood' },
+    ],
+  },
 ];

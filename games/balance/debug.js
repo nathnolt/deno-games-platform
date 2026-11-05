@@ -125,6 +125,19 @@ export function createDebugMenu(view) {
   }
   const scheduleBackup = () => { clearTimeout(backupTimer); backupTimer = setTimeout(backup, 500); };
 
+  /** Replace the draft by what the game is running now (everything the other players applied). */
+  function adoptRemote() {
+    clearTimeout(timer);
+    timer = 0;
+    draft = S.cloneDefinitions();
+    state.remoteChanged = false;
+    state.dirty = false;
+    validate();
+    backup();
+    render();
+    studio.refresh();
+  }
+
   /** Called before a command that needs the server to know the draft (play, restart, the level lab): sends it when it has unsent changes. */
   function flush() {
     if (state.dirty && !state.problems.length) send();
@@ -913,16 +926,8 @@ export function createDebugMenu(view) {
       kids.push(h('div', { class: 'bb-dbg-warn' }, 'Your edits are only in this editor (nothing is synchronised). ', btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go')));
     }
     if (state.remoteChanged) {
-      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Somebody else applied changes to the game. Your draft was not touched. ',
-        btn('Take their version (discard my draft)', () => {
-          draft = S.cloneDefinitions();
-          state.remoteChanged = false;
-          state.dirty = false;
-          validate();
-          backup();
-          render();
-          studio.refresh();
-        }), btn('Keep mine', () => { state.remoteChanged = false; renderStatus(); })));
+      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Somebody else applied changes to the game while you have edits that are not applied yet. Your draft was not touched. ',
+        btn('Take their version (discard my draft)', adoptRemote), btn('Keep mine', () => { state.remoteChanged = false; renderStatus(); })));
     }
     if (state.levelsError) kids.push(h('div', { class: 'bb-dbg-err' }, state.levelsError));
     else if (state.levelsSavedAt && performance.now() - state.levelsSavedAt < 4000) kids.push(h('div', { class: 'bb-dbg-note' }, '✓ levels.js was saved by the server.'));
@@ -1001,9 +1006,14 @@ export function createDebugMenu(view) {
   return {
     el: root,
     /** Somebody else applied changes to the game. */
-    onRemoteChange() { // (the game now uses their version, but your draft is yours: nothing is overwritten)
-      state.remoteChanged = true;
-      renderStatus();
+    onRemoteChange() {
+      // Nothing of yours is waiting to be sent: follow them, so the menu and an open studio show what everybody is playing.
+      // You have unsent edits: nothing is overwritten, you choose (banner).
+      if (!state.dirty && !timer) adoptRemote();
+      else {
+        state.remoteChanged = true;
+        renderStatus();
+      }
     },
     dispose() {
       window.removeEventListener('keydown', onKey);

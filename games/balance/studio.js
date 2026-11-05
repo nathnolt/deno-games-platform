@@ -21,7 +21,27 @@ import * as S from './shared.js';
 import { clone, h, svg } from './ui.js';
 
 const KEY = /^[A-Za-z][\w-]*$/;
-const DOCK = 470; // width of the level studio panel
+// How big the studio panels are is YOUR view, not game state: it is kept in this browser only and never sent to the server or the other players.
+const prefGet = (k, d) => { try { const v = parseFloat(localStorage.getItem(`balance.studio.${k}`)); return Number.isFinite(v) ? v : d; } catch { return d; } };
+const prefSet = (k, v) => { try { localStorage.setItem(`balance.studio.${k}`, String(v)); } catch { /* private mode */ } };
+const dockPref = { w: prefGet('dock', 470), bp: prefGet('bp', 300) }; // width of the level / background studio panel, height of the blueprint (px)
+/** A handle on the right edge of a docked studio panel: drag it to make the panel (and so the blueprint) wider; the game gets the rest. */
+function dockGrip(root, view) {
+  const g = h('div', { class: 'bb-st-gripx', title: 'Drag to make this panel wider or narrower (only for you: not shared with the other players)' });
+  g.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    g.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      dockPref.w = Math.round(Math.min(Math.max(ev.clientX - root.getBoundingClientRect().left, 320), window.innerWidth * 0.85));
+      root.style.width = `${dockPref.w}px`;
+      view.debugDock(dockPref.w);
+    };
+    const up = () => { g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); prefSet('dock', dockPref.w); };
+    g.addEventListener('pointermove', move);
+    g.addEventListener('pointerup', up);
+  });
+  root.append(g);
+}
 const SHADER_COLOR = { wood: '#c99a62', wood2: '#dcc294', glass: '#9fd3e6', stone1: '#8f9298', stone2: '#6d717a', float: '#86b0d6' };
 const LIGHT0 = 1000; // the viewport number of the first light (models are 0, 1, 2 ... see client.js)
 const BLUR_CHOICES = [['none', 'sharp (none)'], ['light', 'light blur'], ['heavy', 'heavy blur']];
@@ -1139,9 +1159,20 @@ function levelStudio(view, api) {
     lab({ play: st.lvl });
     lab({ paused: st.mode === 'layout' });
   }
+  // A THROTTLE, not a debounce: while a block is being dragged the game follows every ~0.45 s (the first change goes out after 0.15 s), and the last position always arrives.
+  let lastSend = 0;
+  const SYNC_EVERY = 450;
+  const syncDelay = () => Math.max(150, lastSend + SYNC_EVERY - performance.now());
   function scheduleApply() {
-    clearTimeout(applyTimer);
-    applyTimer = setTimeout(applyNow, 350);
+    if (applyTimer) return; // one is already on its way: it will send the newest state
+    applyTimer = setTimeout(() => { lastSend = performance.now(); applyNow(); }, syncDelay());
+  }
+  /** Layout: send the draft and restart the frozen layout with it. Live test: only send it (the running test is not disturbed; levels.js is saved too). */
+  function scheduleSync() {
+    if (st.mode === 'layout') return scheduleApply();
+    if (applyTimer) return undefined;
+    applyTimer = setTimeout(() => { applyTimer = 0; lastSend = performance.now(); if (st.open) api.flush(); }, syncDelay());
+    return undefined;
   }
 
   // ── blueprint ──
@@ -1531,7 +1562,19 @@ function levelStudio(view, api) {
   };
   board.el.addEventListener('wheel', (e) => { if (wheelHook(e)) e.stopImmediatePropagation(); }, { capture: true, passive: false });
 
-  const root = h('div', { class: 'bb-st bb-st-dock' }, head, bar, h('div', { class: 'bb-st-bp' }, board.el), palette, body);
+  const bpEl = h('div', { class: 'bb-st-bp' }, board.el);
+  bpEl.style.height = `${dockPref.bp}px`;
+  const gripY = h('div', { class: 'bb-st-gripy', title: 'Drag to make the blueprint taller or shorter (only for you: not shared with the other players)' });
+  gripY.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    gripY.setPointerCapture(e.pointerId);
+    const move = (ev) => { dockPref.bp = Math.round(Math.min(Math.max(ev.clientY - bpEl.getBoundingClientRect().top, 120), window.innerHeight - 230)); bpEl.style.height = `${dockPref.bp}px`; };
+    const up = () => { gripY.removeEventListener('pointermove', move); gripY.removeEventListener('pointerup', up); prefSet('bp', dockPref.bp); requestAnimationFrame(() => { if (L()) board.fit(bounds()); scheduleDraw(); }); };
+    gripY.addEventListener('pointermove', move);
+    gripY.addEventListener('pointerup', up);
+  });
+  const root = h('div', { class: 'bb-st bb-st-dock' }, head, bar, bpEl, gripY, palette, body);
+  dockGrip(root, view);
   window.addEventListener('keydown', onKey);
 
   let askedAt = 0;
@@ -1579,7 +1622,8 @@ function levelStudio(view, api) {
       st.sel = -1;
       st.msg = '';
       root.classList.add('bb-show');
-      view.debugDock(DOCK);
+      root.style.width = `${dockPref.w}px`;
+      view.debugDock(dockPref.w);
       view.onSnap = onSnap;
       st.rules = false;
       st.ph = 1;
@@ -1592,6 +1636,7 @@ function levelStudio(view, api) {
       if (!st.open) return;
       st.open = false;
       clearTimeout(applyTimer);
+      api.flush(); // an edit that was still waiting is sent before the studio closes
       if (live) { view.ctx.sendInput({ cancel: true }); live = null; }
       root.classList.remove('bb-show');
       view.debugDock(0);
@@ -1604,16 +1649,20 @@ function levelStudio(view, api) {
       api.showProblems(probEl);
       if (kind === 'levels' || kind === 'all') {
         st.lvl = Math.min(st.lvl, Math.max(0, D().levels.length - 1));
-        if (api.autoApply()) { if (st.mode === 'layout') scheduleApply(); } else if (!st.msg) { st.msg = 'Not applied to the test yet (nothing is synchronised): press Apply.'; renderBar(); }
+        scheduleSync(); // the level studio is always in sync: every edit reaches the server and the test at once
         scheduleDraw();
       } else if (kind === 'shapes' || kind === 'materials' || kind === 'bowls' || kind === 'tuning') {
         renderPalette();
         scheduleDraw();
-        if (st.mode === 'layout') scheduleApply();
+        scheduleSync();
       }
     },
-    refresh() {
-      if (st.open) renderAll();
+    refresh() { // somebody else's version was adopted: show it (keep your own selection when it still exists)
+      if (!st.open) return;
+      st.lvl = Math.min(st.lvl, Math.max(0, D().levels.length - 1));
+      if (st.sel >= (L()?.initialBlocks.length ?? 0)) st.sel = -1;
+      renderAll();
+      scheduleDraw();
     },
     dispose() {
       this.hide();
@@ -1665,6 +1714,7 @@ function backgroundStudio(view, api) {
   const bar = h('div', { class: 'bb-st-bar' });
   const body = h('div', { class: 'bb-st-body' });
   const root = h('div', { class: 'bb-st bb-st-dock' }, head, bar, body);
+  dockGrip(root, view);
 
   function applyLevel() {
     clearTimeout(applyTimer);
@@ -2002,7 +2052,8 @@ function backgroundStudio(view, api) {
       st.sel = -1;
       openRows.clear();
       root.classList.add('bb-show');
-      view.debugDock(DOCK);
+      root.style.width = `${dockPref.w}px`;
+      view.debugDock(dockPref.w);
       view.onSnap = onSnap;
       lab({ on: true, paused: true, rules: false });
       view.debugFreeCam(true);
