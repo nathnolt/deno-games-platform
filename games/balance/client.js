@@ -247,6 +247,12 @@ function circleOutline(part, sides = 48) {
   });
 }
 
+/** A block you hold: it stands up while it is lifted from 0 to TILT_UNTIL of the way to the play area, and moves back in z from BACK_FROM to the top. */
+const TILT_UNTIL = 0.7;
+const BACK_FROM = 0.4;
+const smooth = (t) => { const k = Math.min(1, Math.max(0, t)); return k * k * (3 - 2 * k); };
+const backOf = (prog) => smooth((prog - BACK_FROM) / (1 - BACK_FROM));
+
 class BalanceView {
   markerGeo = Object.assign(new THREE.SphereGeometry(0.55, 16, 12), { userData: { shared: true } }); // (never disposed with a scene)
   dotGeo = Object.assign(new THREE.CircleGeometry(1, 32), { userData: { shared: true } }); // the stack-limit lamp on glass
@@ -350,6 +356,8 @@ class BalanceView {
   // input state. mode: none | drag (button down, carrying) | released (sent drop, waiting to see)
   mode = 'none';
   local = { x: 0, y: 12, rot: 0 }; // where WE hold the block (play-plane coordinates, instant), rot in degrees
+  prog = 0; //                       how far the block we hold is lifted (0 = down on the table where we picked it up, 1 = up in the play area)
+  pickY = 0; //                      height of the pointer when we picked the block up
   grab = { x: 0, y: 0 }; //          pointer-to-block-centre offset, so the block does not jump
   modeTime = 0;
   downAt = { x: 0, y: 0, t: 0 };
@@ -1814,24 +1822,32 @@ void main() {
   }
 
   // ── where things are drawn ──
-  /** A block held at play-plane point (x, y) is drawn nearer the camera, but along the same line of sight, so it looks like it is at (x, y). */
-  #hoverPose(x, y, a) {
-    const c = this.camera.position;
-    const t = (c.z - HOVER_Z) / c.z;
-    return { x: c.x + (x - c.x) * t, y: c.y + (y - c.y) * t, z: HOVER_Z, s: t, a };
+  /**
+   * Picking a block up does NOT move it. It stays where it is, lying on the table, and follows the pointer with the offset it was grabbed at.
+   * Lifting it (the pointer going up) stands it up, and once it is on its way into the play area it moves back in z, until, where dropping is
+   * allowed, it is exactly where it lands when you let go (upright, in the play plane, under the pointer).
+   * `lift` runs from 0 (picked up) to 1 (the pointer is as high as the drop zone starts), and follows the pointer both ways: bringing the pointer
+   * down again plays all of it in reverse (the block comes forward again, lies down and gets its grab offset back).
+   */
+  #liftOf(y, fromY) {
+    const full = (this.currentLevel ? dropOf(this.currentLevel) : DROP).y0;
+    return THREE.MathUtils.clamp((y - fromY) / Math.max(1, full - fromY), 0, 1);
   }
 
-  /**
-   * Blocks wait lying flat on the table (tilt 0 = face up). While you carry one it stands up the higher you lift it:
-   * upright (tilt 1) once its centre is as high as the drop zone starts.
-   */
-  #tiltAt(v, y) {
+  /** Where a block lying on the table is seen in the play plane (height). */
+  #tableLift() {
     const camY = this.camera.position;
     const kk = camY.z / (camY.z - FRONT_Z);
-    const base = camY.y + (this.groundY + DEPTH / 2 - camY.y) * kk; // where a block lying on the table is seen in the play plane
-    const full = (this.currentLevel ? dropOf(this.currentLevel) : DROP).y0;
-    const t = THREE.MathUtils.clamp((y - base) / Math.max(1, full - base), 0, 1);
-    return t * t * (3 - 2 * t);
+    return camY.y + (this.groundY + DEPTH / 2 - camY.y) * kk;
+  }
+
+  /** The block we hold: where it is (from the pointer and the grab offset). The offset is gone by the time the block is back in the play plane. */
+  #follow() {
+    if (!this.ptr) return;
+    this.prog = this.#liftOf(this.ptr.y, this.pickY);
+    const keep = 1 - backOf(this.prog);
+    this.local.x = this.ptr.x + this.grab.x * keep;
+    this.local.y = this.ptr.y + this.grab.y * keep;
   }
 
   #target(v) {
@@ -1842,12 +1858,17 @@ void main() {
     if (v.st === BODY.HELD || v.st === BODY.HELD_BAD) {
       const mine = v.owner === this.ctx.me.slot && this.#carrying();
       const [x, y, a] = mine ? [this.local.x, this.local.y, (this.local.rot * Math.PI) / 180] : [v.tx, v.ty, v.ta];
-      const pose = this.#hoverPose(x, y, a);
-      v.tlMax = Math.max(v.tlMax ?? 0, this.#tiltAt(v, y)); // once it has stood up it stays upright, also when you carry it down again
-      pose.tl = v.tlMax;
-      // a lying block is only DEPTH thick: lower its centre so it rests on the table instead of floating half its height above it
-      pose.y -= (1 - pose.tl) * (v.size.h / 2 - DEPTH / 2);
-      return pose;
+      let prog = this.prog;
+      if (!mine) prog = this.#liftOf(y, this.#tableLift()); // somebody else's block: how far it has come follows from its height
+      const tl = smooth(prog / TILT_UNTIL); //                   1 = standing up
+      const z = FRONT_Z + (HOVER_Z - FRONT_Z) * backOf(prog); //  from the table back to the play plane
+      // (x, y) is a point of the play plane: the block is drawn on the line of sight to it, at depth z, so it always looks to be under the pointer
+      const c = this.camera.position;
+      const t = (c.z - z) / c.z;
+      const phi = (tl * Math.PI) / 2;
+      const tall = (Math.abs(Math.sin(a)) * v.size.w + Math.abs(Math.cos(a)) * v.size.h) / 2; // half the height of the block when it stands
+      const rest = this.groundY + (DEPTH / 2) * Math.cos(phi) + tall * Math.sin(phi); //          lowest centre that keeps it out of the table while it turns up
+      return { x: c.x + (x - c.x) * t, y: Math.max(c.y + (y - c.y) * t, rest), z, s: 1, a, tl };
     }
     return { x: v.tx, y: v.ty, z: PLAY_Z, s: 1, a: v.ta, tl: 1 };
   }
@@ -2044,14 +2065,11 @@ void main() {
     this.uTime.value += dt;
     if (this.freeCam) this.#applyFreeCam();
 
-    // the block we hold slides until its centre is under the pointer, so rotating turns it around its middle
-    if (this.#carrying() && this.ptr && (Math.abs(this.grab.x) > 0.01 || Math.abs(this.grab.y) > 0.01)) {
-      const kk = 1 - Math.exp(-12 * dt);
-      this.grab.x -= this.grab.x * kk;
-      this.grab.y -= this.grab.y * kk;
-      this.local.x = this.ptr.x + this.grab.x;
-      this.local.y = this.ptr.y + this.grab.y;
-      this.#sendMove(now);
+    // the block we hold keeps following the pointer with its grab offset, which melts away as the block comes back into the play area
+    if (this.#carrying() && this.ptr) {
+      const { x, y } = this.local;
+      this.#follow();
+      if (Math.abs(this.local.x - x) > 0.001 || Math.abs(this.local.y - y) > 0.001) this.#sendMove(now);
     }
 
     const TAU = Math.PI * 2;
@@ -2555,8 +2573,10 @@ void main() {
     const k = cam.z / (cam.z - v.cur.z);
     const cx = cam.x + (v.cur.x - cam.x) * k;
     const cy = cam.y + (v.cur.y - cam.y) * k;
-    this.grab = { x: cx - p.x, y: cy - p.y }; // fades to zero in #frame: the block ends up centred on the pointer, so it turns around its middle
+    this.grab = { x: cx - p.x, y: cy - p.y }; // the block stays where it is: this is how far it is from the pointer (it melts away while the block comes back to the play plane)
     this.ptr = p;
+    this.pickY = p.y;
+    this.prog = 0;
     this.local = { x: cx, y: cy, rot: 0 };
     this.ctx.sendInput({ pick: id, x: cx, y: cy, rot: 0 });
     this.mode = 'drag';
@@ -2616,8 +2636,7 @@ void main() {
     }
     if (!p) return;
     this.ptr = p;
-    this.local.x = p.x + this.grab.x;
-    this.local.y = p.y + this.grab.y;
+    this.#follow();
     this.#sendMove();
   };
 
@@ -2638,8 +2657,8 @@ void main() {
     if (this.mode !== 'drag') return;
     const p = this.#toWorld(e);
     if (p) {
-      this.local.x = p.x + this.grab.x;
-      this.local.y = p.y + this.grab.y;
+      this.ptr = p;
+      this.#follow();
     }
     this.#sendMove(performance.now(), true);
     this.ctx.sendInput({ drop: true }); // letting go of the mouse always lets go of the block

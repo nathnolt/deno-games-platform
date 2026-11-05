@@ -26,7 +26,7 @@ export const tuning = {
   chamfer: 0.18, //        size of the 45° bevel on every edge of a block
 
   frontZ: 17, //           z of the blocks waiting on the table (in front of the bowl)
-  hoverZ: 4.5, //          z of a block you hold: it floats in front of everything
+  hoverZ: 0, //            z a block you hold ends up at once it is up in the play area (0 = where it lands when you let go)
   slotGap: 10, //          the waiting blocks lie in a row this far apart (centre to centre); the widest shape is 7 wide, so 10 leaves a gap of 3
   mergeParts: true,
   maxHoldX: 120, //         how far sideways a held block may be carried

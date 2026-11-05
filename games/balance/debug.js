@@ -43,7 +43,7 @@ const TUNING_HELP = {
   chamfer: 'Size of the 45° bevel on every block edge.',
   mergeParts: 'On: the parts of a shape are joined in 2D and extruded as one block (no seams between parts). Collision always uses the separate parts. Off: every part is its own mesh.',
   frontZ: 'z of the waiting blocks on the table.',
-  hoverZ: 'z of the block you hold.',
+  hoverZ: 'z of the block you hold once it is in the play area (0 = the play plane, where it lands).',
   slotGap: 'Distance between the waiting blocks.',
   maxHoldX: 'How far sideways a held block may go.',
   maxHoldY: 'How high a held block may go.',

@@ -35,7 +35,7 @@ export const meta = {
 // (a 4x4 square is 4 units wide). Level x/y positions are the CENTRE of the shape.
 //
 //   z (towards the camera)
-//   HOVER_Z   ← a block you hold floats here, in front of everything (the drop zone is invisible, only the red tint tells you)
+//   HOVER_Z   ← a block you hold is carried here once it is up in the play area (0 = exactly where it lands when you let go; on the way up it comes from the table)
 //   FRONT_Z   ← blocks waiting on the table
 //   PLAY_Z    ← the tower, the pillars and the bowl: this is where the physics happens
 //
@@ -49,7 +49,7 @@ export let DEPTH = 2.4;
 export let FRONT_Z = 17;
 /** How many of the blocks that are still to come (after the ones on the table) are shown as an outline on the table. Server and client agree on it. */
 export const PREVIEW_COUNT = 2;
-export let HOVER_Z = 4.5;
+export let HOVER_Z = 0;
 export let SLOT_GAP = 17;
 export let MAX_HOLD_X = 120;
 export let MAX_HOLD_Y = 60;
@@ -76,7 +76,7 @@ export function syncDefinitions() {
   WATER_DENSITY = num(t.waterDensity, 1);
   DEPTH = num(t.depth, 2.4);
   FRONT_Z = num(t.frontZ, 17);
-  HOVER_Z = num(t.hoverZ, 4.5);
+  HOVER_Z = num(t.hoverZ, 0);
   SLOT_GAP = num(t.slotGap, 17);
   MAX_HOLD_X = num(t.maxHoldX, 120);
   MAX_HOLD_Y = num(t.maxHoldY, 60);
