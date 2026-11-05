@@ -250,6 +250,8 @@ function circleOutline(part, sides = 48) {
 /** A block you hold: it stands up while it is lifted from 0 to TILT_UNTIL of the way to the play area, and moves back in z from BACK_FROM to the top. */
 const TILT_UNTIL = 0.7;
 const BACK_FROM = 0.4;
+const GHOST_IN = 0.5; //  seconds: an outline fades in
+const GHOST_OUT = 0.45; // seconds: it fades away when its block takes over
 const smooth = (t) => { const k = Math.min(1, Math.max(0, t)); return k * k * (3 - 2 * k); };
 const backOf = (prog) => smooth((prog - BACK_FROM) / (1 - BACK_FROM));
 
@@ -345,8 +347,8 @@ class BalanceView {
   bodyViews = new Map(); //  blockId -> view of a block in the play area (static, floating, falling, or held by somebody)
   poseMem = new Map(); //    blockId -> last drawn pose of a removed view (a block picked up / put back moves from there)
   geoCache = new Map(); //   shape key -> [{ geo }]
-  ghosts = []; //           the outlines of the blocks still to come, lying on the table after the waiting ones: [{ group, geos, mat }]
-  ghostKey = ''; //         the shapes they show (so they are only rebuilt when the next blocks change)
+  ghosts = []; //           the chalk outlines of the blocks still to come, on fixed places of the row: [{ id, spot, group, geos, mat, t, out }]
+  ghostFirst = true; //     the next snapshot is the first of this level (the outlines are simply there then, they do not fade in)
   players = []; //           room players: { id, name, slot }
   snap = null;
   run = -1;
@@ -464,14 +466,25 @@ class BalanceView {
     }
     for (const [id, v] of this.tableViews) if (!onTable.has(id)) this.#remove(this.tableViews, id, v);
 
-    // 2. blocks on the table
+    // 2. blocks on the table (the row is centred on all of its places, outlines included: `w`, fixed for the level, so nothing ever shifts)
+    this.#syncGhosts(s);
     for (const [id, si, mi, slot, heldBy] of s.tbl) {
       if (heldBy >= 0) continue;
-      const v = this.tableViews.get(id) ?? this.#makeView(this.tableViews, id, si, mi, { table: true, slot, n: s.n });
+      let v = this.tableViews.get(id);
+      if (!v) {
+        const ghost = this.ghosts.find((g) => g.id === id);
+        if (ghost && !this.poseMem.has(id)) { // this block was an outline: it comes out of it, and slides from there to its place
+          this.poseMem.set(id, { x: ghost.group.position.x, y: this.groundY + DEPTH / 2, z: FRONT_Z, s: 1, a: 0, tl: 0 });
+        }
+        v = this.#makeView(this.tableViews, id, si, mi, { table: true, slot, n: s.w ?? s.n });
+        if (ghost) {
+          v.reveal = 0;
+          v.mats.forEach((m) => { m.uniforms.uReveal.value = 0; });
+        }
+      }
       v.slot = slot;
-      v.n = s.n;
+      v.n = s.w ?? s.n;
     }
-    this.#syncGhosts(s);
 
     // 3. blocks in the play area
     let mine = null;
@@ -1638,6 +1651,7 @@ void main() {
         uBad: { value: 0 },
         uCausOn: { value: 1 },
         uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
+        uReveal: { value: 1 }, //     below 1 the block dissolves in (see finish() in shaders.js)
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
         uFog: fog?.uFog ?? { value: new THREE.Vector2(1e6, 2e6) }, // blocks never fade; background models do
         ...(plain ? this.#plainLight() : this.shadowU), // (the little preview windows are other WebGL contexts: no shared textures)
@@ -1660,19 +1674,34 @@ void main() {
 
   /**
    * The blocks that have not appeared on the table yet: the next PREVIEW_COUNT of them are drawn as a chalk outline (the 'outline' shader) on the table,
-   * where the row of waiting blocks would continue. Only the SHAPE is known (the server does not tell the material). Called with every snapshot,
-   * but it only does something when the next shapes change (a block was dropped, or a new level started).
+   * in the places after the waiting blocks. Only the SHAPE is known (the server does not tell the material). The places never move:
+   *  - when a block is used, the outline of the block that takes its place (the first of them) fades away while the real block dissolves in out of it
+   *    and slides to its place (see #applySnapshot), and the place the outline had is free for the next outline (which fades in, a moment later);
+   *  - the outlines that stay where they are do not move at all.
+   * `s.nx` = [[id, shape], ...] in the order they will come, `s.w` = places in the row, `s.n` = of which for blocks.
    */
   #syncGhosts(s) {
-    const want = (s.nx ?? []).filter((si) => SHAPE_KEYS[si] !== undefined);
-    const key = `${s.n}:${want.join(',')}`;
-    if (key === this.ghostKey) return;
-    this.#clearGhosts();
-    this.ghostKey = key;
-    want.forEach((si, k) => {
+    const first = this.ghostFirst;
+    this.ghostFirst = false;
+    const want = (s.nx ?? []).filter(([, si]) => SHAPE_KEYS[si] !== undefined);
+    const w = s.w ?? s.n;
+    const here = new Set(s.tbl.map((r) => r[0])); // (also the ones that are being held)
+    for (const g of this.ghosts) {
+      if (g.out) continue;
+      if (here.has(g.id) || !want.some(([id]) => id === g.id)) { // it became a block (or the level changed under it): it fades away
+        g.out = true;
+        g.t = 0;
+      }
+    }
+    for (const [id, si] of want) {
+      if (this.ghosts.some((g) => g.id === id)) continue;
+      const busy = new Set(this.ghosts.filter((g) => !g.out).map((g) => g.spot));
+      let spot = -1;
+      for (let i = s.n; i < w; i++) if (!busy.has(i)) { spot = i; break; }
+      if (spot < 0) continue; // (no place left: cannot happen with the server's numbers)
       const shapeKey = SHAPE_KEYS[si];
       const shape = getShape(shapeKey);
-      const mat = this.#blockMaterial('outline', (k * 0.37 + 0.1) % 1, THREE.DoubleSide);
+      const mat = this.#blockMaterial('outline', (id * 0.37 + 0.1) % 1, THREE.DoubleSide);
       Object.assign(mat, { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }); // (on top of the table, never flickering with it)
       const group = new THREE.Group();
       const geos = [];
@@ -1686,22 +1715,44 @@ void main() {
         mesh.renderOrder = 2;
         group.add(mesh);
       }
-      const p = slotPos(s.n + k, s.n, shapeKey, this.groundY);
+      const p = slotPos(spot, w, shapeKey, this.groundY);
       group.position.set(p.x, this.groundY + 0.05, FRONT_Z); // on the surface of the table, exactly where a block of this shape would lie
       group.rotation.x = -Math.PI / 2; //                      (flat, the same way up as a waiting block)
+      const reuse = this.ghosts.some((g) => g.out && g.spot === spot); // the place was only just freed: wait until the old outline has gone
+      const g = { id, spot, group, geos, mat, t: first ? GHOST_IN : reuse ? -GHOST_OUT : 0, out: false };
+      mat.uniforms.uReveal.value = first ? 1 : 0;
+      group.visible = first;
       this.scene.add(group);
-      this.ghosts.push({ group, geos, mat });
-    });
+      this.ghosts.push(g);
+    }
+  }
+
+  /** Fade the outlines in and out (every frame). */
+  #animateGhosts(dt) {
+    for (const g of this.ghosts) {
+      g.t += dt;
+      const reveal = g.out ? 1 - Math.min(1, g.t / GHOST_OUT) : smooth(g.t / GHOST_IN);
+      g.mat.uniforms.uReveal.value = reveal;
+      g.group.visible = reveal > 0.001;
+    }
+    for (let i = this.ghosts.length - 1; i >= 0; i--) {
+      const g = this.ghosts[i];
+      if (!g.out || g.t < GHOST_OUT) continue;
+      this.#disposeGhost(g);
+      this.ghosts.splice(i, 1);
+    }
+  }
+
+  #disposeGhost(g) {
+    g.group.removeFromParent();
+    g.geos.forEach((geo) => geo.dispose());
+    g.mat.dispose();
   }
 
   #clearGhosts() {
-    for (const g of this.ghosts) {
-      g.group.removeFromParent();
-      g.geos.forEach((geo) => geo.dispose());
-      g.mat.dispose();
-    }
+    for (const g of this.ghosts) this.#disposeGhost(g);
     this.ghosts = [];
-    this.ghostKey = '';
+    this.ghostFirst = true;
   }
 
   /** @param {Map} map  @param opts `{table, slot, n}` for a block on the table, `{x, y, a, st, owner}` for one in the play area */
@@ -2011,13 +2062,13 @@ void main() {
     const pitch = THREE.MathUtils.degToRad(cam.pitch);
     const target = new THREE.Vector3(0, cam.targetY, 0);
     const dir = new THREE.Vector3(0, Math.sin(pitch), Math.cos(pitch));
-    const slots = Math.min(8, Math.max(1, this.currentLevel?.chooseShapes ?? 4));
-    const slotX = ((slots - 1) / 2) * tuning.slotGap + 7;
-    const ahead = Math.min(PREVIEW_COUNT, Math.max(0, (this.currentLevel?.shapes?.length ?? 0) - slots)); // outlines of the next blocks continue the row on the right
-    const slotR = slotX + ahead * tuning.slotGap;
+    const have = Math.max(1, this.currentLevel?.shapes?.length ?? 1);
+    const slots = Math.min(have, Math.min(8, Math.max(1, this.currentLevel?.chooseShapes ?? 4))); //  blocks on the table
+    const places = Math.min(have, slots + PREVIEW_COUNT); //                                             + the outlines of the next ones, at most as many as the level has
+    const slotX = ((places - 1) / 2) * tuning.slotGap + 7; //                                           the row is centred on all of them
     const key = [
       [-VIEW.w / 2, 10, 0], [VIEW.w / 2, 10, 0], [0, 30, 0], [-23, 28, 0], [23, 28, 0],
-      [-slotX, this.groundY, FRONT_Z + DEPTH / 2], [slotR, this.groundY, FRONT_Z + DEPTH / 2],
+      [-slotX, this.groundY, FRONT_Z + DEPTH / 2], [slotX, this.groundY, FRONT_Z + DEPTH / 2],
     ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
     const p = new THREE.Vector3();
     let dist = 40;
@@ -2094,6 +2145,12 @@ void main() {
       draw(v, v.static ? 1 : mineHeld ? 45 : 24);
     }
     for (const v of this.tableViews.values()) draw(v, 14);
+    this.#animateGhosts(dt);
+    for (const v of this.tableViews.values()) {
+      if (v.reveal === undefined || v.reveal >= 1) continue; // a block that just came out of its outline dissolves in
+      v.reveal = Math.min(1, v.reveal + dt / 0.55);
+      v.mats.forEach((m) => { m.uniforms.uReveal.value = v.reveal; });
+    }
 
     for (const v of this.bodyViews.values()) {
       const heldByOther = (v.st === BODY.HELD || v.st === BODY.HELD_BAD) && v.owner !== this.ctx.me.slot;

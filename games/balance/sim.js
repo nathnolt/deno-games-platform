@@ -117,6 +117,7 @@ export class BalanceGame {
     this.levelsSaveError = ''; // debug: why levels.js could not be written ('' = fine)
     this.levelsSaves = 0; //      debug: how many times levels.js was written
     this.lab = { on: false, paused: false, rules: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
+    this.rowSize = 0; //           how many places the row on the table has (blocks that wait + outlines of the next ones): fixed for a level, so nothing shifts
     this.floor = null; //          the level lab's invisible floor (the table top), see #labFloor
     this.labId = LAB_ID_START;
     for (const p of ctx.players) this.onJoin(p);
@@ -175,7 +176,7 @@ export class BalanceGame {
     this.table.forEach((item, i) => {
       if (item) tbl.push([item.id, SHAPE_KEYS.indexOf(item.shape), MATERIAL_KEYS.indexOf(item.material), i, item.heldBy ? (this.players.get(item.heldBy)?.slot ?? -1) : -1]);
     });
-    const nx = this.queue.slice(0, PREVIEW_COUNT).map((item) => SHAPE_KEYS.indexOf(item.shape)); // the next blocks to appear on the table: only their SHAPE is told
+    const nx = this.queue.slice(0, PREVIEW_COUNT).map((item) => [item.id, SHAPE_KEYS.indexOf(item.shape)]); // the next blocks to appear on the table: their id and SHAPE only (not the material)
     return {
       run: this.run,
       ph: this.phase,
@@ -184,6 +185,7 @@ export class BalanceGame {
       tbl,
       ...(nx.length ? { nx } : {}),
       n: this.table.length,
+      w: this.rowSize,
       left: this.#remaining(),
       total: this.total,
       why: this.why,
@@ -505,6 +507,7 @@ export class BalanceGame {
       return item;
     });
     this.queue = items.slice(n);
+    this.rowSize = n + Math.min(PREVIEW_COUNT, items.length - n); // (the row is centred on all of it, and stays like that while blocks are used up)
     for (const p of this.players.values()) p.held = null;
   }
 
@@ -519,6 +522,7 @@ export class BalanceGame {
 
   #teardown() {
     this.world = null;
+    this.rowSize = 0;
     this.floor = null;
     this.recs.clear();
     this.recOf.clear();

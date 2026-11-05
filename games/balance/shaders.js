@@ -127,6 +127,7 @@ uniform float uWaterY;
 uniform float uCaus;
 uniform float uCausOn; // 0 = this block gets no caustics (it is held, or waits on the table)
 uniform float uCausInward;
+uniform float uReveal; // 1 = the block is whole; below 1 it is dissolving in (a block that just came out of its outline on the table)
 uniform vec2 uBowlHalf;
 
 ${SHADOW_GLSL}
@@ -156,6 +157,13 @@ float caustic(vec2 uv, float t) {
   return min(pow(abs(c), 8.0), 1.5);
 }
 vec4 finish(vec3 c, float a) {
+  float dissolveEdge = 0.0;
+  if (uReveal < 1.0) { // dissolve: the block appears out of noise, with a pale rim where it is just appearing
+    float d = fbm(vP3.xy * 0.9 + vP3.z * 0.7 + uSeed * 9.0);
+    float k = uReveal * 1.12;
+    if (d > k) discard;
+    dissolveEdge = smoothstep(k - 0.07, k, d);
+  }
   vec3 wn = normalize(vWN);
   if (!gl_FrontFacing) wn = -wn; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
   vec3 L = sceneLight(vW, wn);
@@ -177,6 +185,7 @@ vec4 finish(vec3 c, float a) {
   c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
   c += uGlow * 0.28;
   c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, vDist)); // distant background models melt into the mist
+  c = mix(c, vec3(1.0, 0.98, 0.92), dissolveEdge * 0.85);
   return vec4(c, a);
 }
 `;
@@ -272,7 +281,7 @@ void main() {
   float across = smoothstep(0.0, 0.3, vP.y) * smoothstep(1.0, 0.7, vP.y); // soft edges on both sides of the line
   float rough = 0.55 + 0.45 * fbm(vec2(p.x * 2.2, vP.y * 2.5));             // the chalk is thicker and thinner along the line
   float dust = step(0.82, hash(floor(vec2(p.x * 9.0, vP.y * 4.0)))) * 0.25; // grains
-  float a = clamp(across * (rough - dust) * 1.15, 0.0, 1.0) * 0.92;
+  float a = clamp(across * (rough - dust) * 1.15, 0.0, 1.0) * 0.92 * uReveal; // (uReveal: the line fades in and out)
   gl_FragColor = vec4(vec3(0.97, 0.97, 0.94), a);
 }`),
 
