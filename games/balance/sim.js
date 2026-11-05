@@ -8,7 +8,7 @@
 // planck itself is not imported here: the server hands in `npm:planck@1` and the browser the module it loaded (usePlanck below).
 // The gameplay is 2D (x, y); the 3D look is purely client-side.
 import {
-  applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, inDrop, levels, LOSE,
+  applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, groundYOf, inDrop, levels, LOSE,
   materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, PHASE, PREVIEW_COUNT, serializeLevels, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
@@ -117,6 +117,7 @@ export class BalanceGame {
     this.levelsSaveError = ''; // debug: why levels.js could not be written ('' = fine)
     this.levelsSaves = 0; //      debug: how many times levels.js was written
     this.lab = { on: false, paused: false, rules: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
+    this.floor = null; //          the level lab's invisible floor (the table top), see #labFloor
     this.labId = LAB_ID_START;
     for (const p of ctx.players) this.onJoin(p);
   }
@@ -343,6 +344,7 @@ export class BalanceGame {
         lab.paused = false;
         lab.rules = false;
       }
+      this.#labFloor();
       if (c.on && (this.phase === PHASE.WON || this.phase === PHASE.LOST)) {
         this.phase = PHASE.PLAY;
         this.why = 0;
@@ -392,6 +394,25 @@ export class BalanceGame {
     }
   }
 
+  /**
+   * The level lab has a FLOOR: the table top, as a static body that is not drawn. Nothing is lost while the lab is on, so without a floor a block that misses the bowl
+   * (or one that is let go of next to it) would fall through the bottom of the world for ever. Called when a level starts and when the lab is switched on or off.
+   */
+  #labFloor() {
+    if (!this.world) return;
+    if (this.floor && !this.lab.on) {
+      this.world.destroyBody(this.floor);
+      this.recOf.delete(this.floor);
+      this.floor = null;
+    } else if (!this.floor && this.lab.on) {
+      const top = groundYOf(bowlOf(levels[this.levelIdx]));
+      const half = MAX_HOLD_X + 40;
+      this.floor = this.world.createBody({ type: 'static', position: new Vec2(0, top - 2) });
+      this.floor.createFixture({ shape: new planck.Box(half, 2), friction: 0.6 });
+      this.recOf.set(this.floor, { kind: 'floor' });
+    }
+  }
+
   /** Take a block from the table. Its slot stays empty (no refill) until the block is dropped into the play area. */
   #pick(id, p, d) {
     if (p.held) return;
@@ -430,7 +451,9 @@ export class BalanceGame {
     const level = levels[this.levelIdx];
     const pos = h.rec.body.getPosition();
     // A block can only be dropped while it is inside the drop zone right now and does not overlap another block; otherwise it goes back to the table.
-    if (!this.lab.on && (!inDrop(level, pos.x, pos.y) || this.#overlaps(h.rec))) return this.#putBack(p); // (the level lab lets you drop anywhere)
+    // (the level lab lets you drop the blocks it made itself anywhere; the blocks of the level, from the table, follow the real rules there too:
+    // letting go of one below the drop zone, or where it overlaps, sends it back to the table instead of dropping it into the water)
+    if ((!this.lab.on || !h.item.lab) && (!inDrop(level, pos.x, pos.y) || this.#overlaps(h.rec))) return this.#putBack(p);
 
     const angle = h.rec.body.getAngle();
     const item = h.item;
@@ -468,6 +491,7 @@ export class BalanceGame {
     this.recOf.set(bowl, { kind: 'bowl' });
 
     this.labId = LAB_ID_START;
+    this.#labFloor();
     let nextId = 1;
     for (const ib of level.initialBlocks) {
       this.#makeBlock({ id: nextId++, shape: ib.shape, material: ib.material }, ib.x, ib.y, rad(ib.rot ?? 0), false);
@@ -495,6 +519,7 @@ export class BalanceGame {
 
   #teardown() {
     this.world = null;
+    this.floor = null;
     this.recs.clear();
     this.recOf.clear();
     this.floaters = [];
@@ -607,7 +632,7 @@ export class BalanceGame {
       const pos = p.held.rec.body.getPosition();
       const inside = inDrop(level, pos.x, pos.y);
       if (inside) p.held.rec.armed = true;
-      p.held.rec.bad = !this.lab.on && this.#overlaps(p.held.rec); // red = it overlaps another block (and only then) // red = you have taken it out of the drop zone again (letting go sends it back to the table)
+      p.held.rec.bad = (!this.lab.on || !p.held.item.lab) && this.#overlaps(p.held.rec); // red = it overlaps another block (and only then) // red = you have taken it out of the drop zone again (letting go sends it back to the table)
     }
     if (this.phase === PHASE.PLAY && !this.lab.paused) this.#fragile(dt);
     if (this.phase === PHASE.PLAY && (!this.lab.on || this.lab.rules)) this.#rules(dt); // (the level lab can switch the rules back on to test failing)
