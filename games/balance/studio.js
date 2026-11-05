@@ -227,6 +227,35 @@ function drawGrid(g, view, step, px) {
   void px;
 }
 
+/** A grid aligned with the shape being drawn or edited: lines every snap step from the shape's own 0,0 (amber axes), whole units stronger and numbered. */
+function drawShapeGrid(g, view, ox, oy, snap, k, px) {
+  let step = snap > 0 ? snap : 1;
+  while (step * k < 7) step *= 5; // too dense to see: show every 5th line
+  const unit = step < 1 ? 1 : step * 5;
+  const lines = [];
+  const major = [];
+  const axes = [];
+  const nums = [];
+  const x0 = Math.floor((view.x0 - ox) / step) * step;
+  const y0 = Math.floor((view.y0 - oy) / step) * step;
+  if ((view.x1 - view.x0) / step > 600 || (view.y1 - view.y0) / step > 600) return;
+  const near = (v, m) => Math.abs(v / m - Math.round(v / m)) < 1e-6;
+  for (let lx = x0; lx + ox <= view.x1; lx += step) {
+    const x = lx + ox;
+    const path = Math.abs(lx) < 1e-9 ? axes : near(lx, unit) ? major : lines;
+    path.push(`M${x} ${view.y0}V${view.y1}`);
+    if (near(lx, unit) && Math.abs(lx) > 1e-9 && unit * k >= 26) nums.push(svg('text', { transform: `translate(${x + 3 * px} ${oy - 12 * px}) scale(1 -1)`, 'font-size': 10 * px, fill: 'rgba(251,191,36,.8)', 'font-family': 'system-ui, sans-serif' }, f3(lx)));
+  }
+  for (let ly = y0; ly + oy <= view.y1; ly += step) {
+    const y = ly + oy;
+    const path = Math.abs(ly) < 1e-9 ? axes : near(ly, unit) ? major : lines;
+    path.push(`M${view.x0} ${y}H${view.x1}`);
+    if (near(ly, unit) && Math.abs(ly) > 1e-9 && unit * k >= 26) nums.push(svg('text', { transform: `translate(${ox + 3 * px} ${y + 3 * px}) scale(1 -1)`, 'font-size': 10 * px, fill: 'rgba(251,191,36,.8)', 'font-family': 'system-ui, sans-serif' }, f3(ly)));
+  }
+  const line = (d, stroke, w = 1) => svg('path', { d: d.join(''), stroke, fill: 'none', 'stroke-width': w, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' });
+  g.append(line(lines, 'rgba(250,204,21,.16)'), line(major, 'rgba(250,204,21,.34)'), line(axes, 'rgba(251,146,60,.85)', 1.5), ...nums);
+}
+
 let clipId = 0;
 /** The bowl: wood, water inside up to the water line, and the table top under it. */
 function drawBowl(g, bowl) {
@@ -261,7 +290,7 @@ function drawParts(def, fill, stroke, extra = {}) {
 //  SHAPE STUDIO
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 function shapeStudio(view, api) {
-  const st = { sel: null, part: 0, editing: false, draw: null, closeOnFirst: true, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '' };
+  const st = { sel: null, part: 0, editing: false, draw: null, closeOnFirst: true, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '', tf: { x: 1.5, y: 1.5, lock: true } };
   let manual = {}; //   shapes the user moved on the board: key -> { ox, oy } (only where a shape is drawn, never its data)
   let layout = null; // { cells: { key: { ox, oy, ax, ay } }, rows: [{ y, x0, x1 }], bowlKey }
   let preview = null;
@@ -380,7 +409,7 @@ function shapeStudio(view, api) {
     },
     hover(w) {
       if (!st.draw) return;
-      const sh = shift(st.sel);
+      const sh = drawShift();
       st.draw.cur = [snapV(w.x - sh.x), snapV(w.y - sh.y)];
       scheduleDraw();
     },
@@ -439,10 +468,27 @@ function shapeStudio(view, api) {
   }
 
   // ── drawing a new polygon, point by point ──
-  function startDraw() {
-    if (!st.sel) return;
+  // A new shape starts empty: nothing is created until its first polygon is finished (newKey), so there is no starting rectangle to delete.
+  const drawShift = () => (st.draw?.newKey ? st.draw.origin : shift(st.sel));
+  function startNew(raw) {
+    const key = raw.trim();
+    if (!KEY.test(key)) return fail('A shape name starts with a letter and uses letters, digits, _ and - only.');
+    if (D().shapes[key]) return fail(`"${key}" already exists.`);
+    startDraw(key);
+    return undefined;
+  }
+  function startDraw(newKey) {
+    if (typeof newKey !== 'string') newKey = null;
+    if (!newKey && !st.sel) return;
     st.editing = true;
-    st.draw = { pts: [], cur: null };
+    st.draw = { pts: [], cur: null, newKey };
+    if (newKey) {
+      // a new shape is drawn on a fresh grid in the middle of the view, zoomed in so a normal block (a few units) is comfortable to place
+      const vw = board.view();
+      const origin = { x: Math.round((vw.x0 + vw.x1) / 2 - 4), y: Math.round((vw.y0 + vw.y1) / 2 - 3) };
+      st.draw.origin = origin;
+      board.fit([origin.x - 3, origin.y - 3, origin.x + 12, origin.y + 9]);
+    } else if (st.sel) focus();
     st.msg = '';
     board.el.classList.add('bb-st-drawing');
     renderHead();
@@ -461,6 +507,18 @@ function shapeStudio(view, api) {
     const dr = st.draw;
     if (!dr) return;
     if (dr.pts.length < 3) return fail('A polygon needs at least 3 points: click the board to put them down.');
+    if (dr.newKey) {
+      const key = dr.newKey;
+      const pts = ptsStr(dr.pts);
+      cancelDraw();
+      addShape(key, [{ type: 'poly', points: pts }]);
+      st.editing = true;
+      st.part = 0;
+      toOrigin();
+      renderAll();
+      requestAnimationFrame(() => requestAnimationFrame(() => focus(key)));
+      return undefined;
+    }
     const def = D().shapes[st.sel];
     def.push({ type: 'poly', points: ptsStr(dr.pts) });
     st.part = def.length - 1;
@@ -472,7 +530,7 @@ function shapeStudio(view, api) {
   }
   function drawClick(w) {
     const dr = st.draw;
-    const sh = shift(st.sel);
+    const sh = drawShift();
     const p = [snapV(w.x - sh.x), snapV(w.y - sh.y)];
     if (st.closeOnFirst && dr.pts.length >= 3 && Math.hypot(w.x - sh.x - dr.pts[0][0], w.y - sh.y - dr.pts[0][1]) < 9 / board.v.k) return finishDraw(); // click the first point to close
     const last = dr.pts[dr.pts.length - 1];
@@ -533,6 +591,10 @@ function shapeStudio(view, api) {
     drawBowl(g, bowl);
     const label = (text, x, y, size, fill = '#cbd5e1', anchor = 'start') => svg('text', { transform: `translate(${x} ${y}) scale(1 -1)`, 'font-size': size * px, fill, 'text-anchor': anchor, 'font-family': 'system-ui, sans-serif' }, text);
     g.append(label(`bowl "${layout.bowlKey}"  ${f3(bowl.a * 2)} wide at the rim, ${f3(bowl.b)} deep`, -bowl.a, S.groundYOf(bowl) - 1.6, 11));
+    if (st.draw || st.editing) {
+      const gs = st.draw ? drawShift() : shift(st.sel);
+      drawShapeGrid(g, view2, gs.x, gs.y, st.snap, k, px);
+    }
     for (const r of layout.rows) {
       g.append(svg('line', { x1: r.x0, x2: r.x1, y1: r.y, y2: r.y, stroke: '#8a7a5c', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke' }));
     }
@@ -586,8 +648,8 @@ function shapeStudio(view, api) {
         }
       }
     }
-    if (st.draw && st.sel) {
-      const sh = shift(st.sel);
+    if (st.draw) {
+      const sh = drawShift();
       const dr = st.draw;
       const all = dr.cur ? [...dr.pts, dr.cur] : dr.pts;
       const dg = svg('g', { transform: `translate(${sh.x} ${sh.y})`, 'pointer-events': 'none' });
@@ -704,6 +766,59 @@ function shapeStudio(view, api) {
     }
     toOrigin();
   }
+  /** Scales every subshape (and circle position) from the shape's 0,0; a circle stays round (diameter by the geometric mean when X and Y differ). */
+  const scaleBy = (kx, ky = kx) => {
+    if (!(kx > 0 && ky > 0)) return fail('A scale must be a number above 0.');
+    const def = D().shapes[st.sel];
+    for (const p of def) {
+      if (p.type === 'circle') { const c = circleOf(p); p.diameter *= Math.sqrt(kx * ky); p.x = c.x * kx; p.y = c.y * ky; } else p.points = ptsStr(parsePts(p.points).map(([x, y]) => [x * kx, y * ky]));
+    }
+    toOrigin();
+    return undefined;
+  };
+  /** The transform menu for the whole shape: scale X / Y (linked by default) with the resulting size shown. */
+  function transformMenu() {
+    const def = D().shapes[st.sel];
+    const b = boxOf(def);
+    const w0 = b[2] - b[0];
+    const h0 = b[3] - b[1];
+    const t = st.tf;
+    const info = h('span', { class: 'bb-dbg-note' });
+    const upd = () => { info.textContent = `${f3(w0)} × ${f3(h0)}  →  ${f3(w0 * t.x)} × ${f3(h0 * t.y)}`; };
+    const num = (label, key) => {
+      const inp = h('input', { type: 'number', step: 'any', min: 0, value: t[key], style: 'width:72px' });
+      inp.addEventListener('input', () => {
+        const v = parseFloat(inp.value);
+        if (!(v > 0)) return;
+        t[key] = v;
+        if (t.lock) { t.x = v; t.y = v; const o = inp.closest('details')?.querySelectorAll('input[type=number]'); o?.forEach((e) => { if (e !== inp) e.value = v; }); }
+        upd();
+      });
+      return h('label', { class: 'bb-st-mini' }, label, inp);
+    };
+    const lock = h('input', { type: 'checkbox', checked: t.lock });
+    lock.addEventListener('change', () => { t.lock = lock.checked; if (t.lock) { t.y = t.x; renderInspector(); } });
+    upd();
+    return h('details', { class: 'bb-st-tf', open: st.tfOpen ? '' : null, ontoggle: (e) => { st.tfOpen = e.currentTarget.open; } },
+      h('summary', {}, 'Transform whole shape (scale)'),
+      h('div', { class: 'bb-st-row' }, num('scale X', 'x'), num('scale Y', 'y'), h('label', { class: 'bb-st-mini', title: 'Keep X and Y the same (no stretching)' }, lock, 'link')),
+      h('div', { class: 'bb-st-row' }, info),
+      h('div', { class: 'bb-st-row' },
+        btn('Apply', () => scaleBy(t.x, t.y), 'bb-dbg-go'),
+        ...[0.5, 0.75, 1.5, 2].map((k) => btn(`×${k}`, () => scaleBy(k)))),
+      h('p', { class: 'bb-dbg-note' }, 'Scales every subshape, circles and drawing-only outlines together, around the shape\'s 0,0 corner. Unlink X and Y to stretch (circles stay round).'));
+  }
+  /** Doubles the points of one polygon: a new corner in the middle of every edge (the outline does not change). */
+  function doublePoints(i) {
+    const p = D().shapes[st.sel]?.[i];
+    if (!p || p.type === 'circle') return;
+    const pts = parsePts(p.points);
+    const out = [];
+    pts.forEach((q, j) => { const n = pts[(j + 1) % pts.length]; out.push(q, [(q[0] + n[0]) / 2, (q[1] + n[1]) / 2]); });
+    p.points = ptsStr(out);
+    renderInspector();
+    edited();
+  }
   function toOrigin() {
     const def = D().shapes[st.sel];
     const b = boxOf(def);
@@ -737,16 +852,60 @@ function shapeStudio(view, api) {
     }));
     const nameIn = h('input', { type: 'text', placeholder: 'new shape name', value: st.newName });
     nameIn.addEventListener('input', () => { st.newName = nameIn.value; });
-    nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') addShape(nameIn.value.trim(), [{ type: 'poly', points: '0,0 4,0 4,1 0,1' }]); });
+    nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') startNew(nameIn.value); });
     put(listHead,
-      h('div', { class: 'bb-st-row' }, nameIn, btn('New', () => addShape(nameIn.value.trim(), [{ type: 'poly', points: '0,0 4,0 4,1 0,1' }]))),
+      h('div', { class: 'bb-st-row' }, nameIn, btn('New (draw polygon)', () => startNew(nameIn.value))),
       st.sel ? h('div', { class: 'bb-st-row' },
         btn('Duplicate', () => { let n = `${st.sel}_copy`; for (let i = 2; D().shapes[n]; i++) n = `${st.sel}_copy${i}`; addShape(n, clone(D().shapes[st.sel])); }),
         btn('Delete', () => removeShape(st.sel), 'bb-dbg-danger')) : null,
+      st.sel ? h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'export'),
+        btn('Copy', (e) => copyText(shapeSource(st.sel), e.currentTarget), '', 'Copy as a line for the shapes table in definitions.js'),
+        btn('JSON', (e) => copyText(JSON.stringify({ [st.sel]: D().shapes[st.sel] }, null, 1), e.currentTarget), '', 'Copy as JSON (can be imported again below)'),
+        btn('Download', () => saveText(JSON.stringify({ [st.sel]: D().shapes[st.sel] }, null, 1), `${st.sel}.json`, 'application/json'), '', `Download ${st.sel}.json`)) : null,
+      h('div', { class: 'bb-st-row' }, importIn, btn('Import', () => { if (importShape(importIn.value) === undefined && !st.msg) importIn.value = ''; })),
       st.msg ? h('div', { class: 'bb-dbg-err' }, st.msg) : null);
   }
 
-  const btn = (text, fn, cls = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, onclick: fn }, text);
+  // ── export / import of ONE shape ──
+  const shapeSource = (key) => `${/^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key)}: ${S.toSource(D().shapes[key])},\n`;
+  function copyText(t, b) {
+    const done = () => { const old = b.textContent; b.textContent = 'Copied ✓'; setTimeout(() => (b.textContent = old), 1200); };
+    const fallback = () => {
+      const ta = h('textarea', { class: 'bb-dbg-offscreen' }, t);
+      document.body.append(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch { window.prompt('Copy this:', t); }
+      ta.remove();
+    };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(done, fallback); else fallback();
+  }
+  function saveText(t, name, mime) {
+    const url = URL.createObjectURL(new Blob([t], { type: mime }));
+    const a = h('a', { href: url, download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  /** Imports {"name": [subshapes]} (what Export JSON writes), or a bare [subshapes] array named by the name field. */
+  function importShape(text) {
+    let v;
+    try { v = JSON.parse(text); } catch (e) { return fail(`Not valid JSON: ${e.message}`); }
+    const entries = Array.isArray(v) ? [[st.newName.trim(), v]] : Object.entries(v ?? {});
+    if (!entries.length || entries.some(([k, d]) => !Array.isArray(d) || !d.length)) return fail('Expected {"name": [subshapes]} or an array of subshapes.');
+    const probs = [];
+    for (const [k, d] of entries) {
+      if (!KEY.test(k)) probs.push(Array.isArray(v) ? 'Type a name for the shape in the name field first.' : `"${k}" is not a valid shape name.`);
+      else if (D().shapes[k]) probs.push(`"${k}" already exists.`);
+      else { try { S.buildShape(d, k); } catch (e) { probs.push(`${k}: ${e.message}`); } }
+    }
+    if (probs.length) return fail(probs.join(' '));
+    for (const [k, d] of entries) addShape(k, d);
+    return undefined;
+  }
+  const importIn = h('textarea', { rows: 3, spellcheck: 'false', class: 'bb-st-pts', placeholder: 'Paste an exported shape (JSON) here' });
+
+  const btn = (text, fn, cls = '', title = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, title, onclick: fn }, text);
 
   function renderInfo() {
     const def = D().shapes[st.sel];
@@ -795,6 +954,7 @@ function shapeStudio(view, api) {
         };
         body = h('div', { class: 'bb-st-row' }, mk('diameter', () => p.diameter, (v) => { p.diameter = v; }), mk('x', () => circleOf(p).x, (v) => { p.x = v; }), mk('y', () => circleOf(p).y, (v) => { p.y = v; }));
       } else {
+        head.append(btn('Points ×2', () => doublePoints(i), '', 'Add a corner in the middle of every edge'));
         const ta = h('input', { type: 'text', value: p.points, spellcheck: 'false', class: 'bb-st-pts' });
         ta.addEventListener('input', () => { p.points = ta.value; api.touch('shapes'); scheduleDraw(); renderInfo(); });
         ta.addEventListener('change', () => edited());
@@ -814,7 +974,9 @@ function shapeStudio(view, api) {
         btn('Mirror ↔', () => transform(([x, y]) => [-x, y])),
         btn('Mirror ↕', () => transform(([x, y]) => [x, -y])),
         btn('Rotate 90°', () => transform(([x, y]) => [-y, x])),
+
         btn('To 0,0', toOrigin)),
+      transformMenu(),
       h('p', { class: 'bb-dbg-note' }, 'Editing: drag a subshape to move it (all its points move together) · Delete removes the selected subshape · drag a corner to move it · click a small dot on an edge to insert a corner · right-click a corner to remove it. + polygon: click the board to put down points 1, 2, 3 …, then Enter, click the first point, or Done (Backspace removes the last point, Esc cancels). Shift-drag moves the whole shape on the board only. Every subshape must be convex: build an L or a plus from several subshapes and, if you like, add a "drawing only" outline for the looks.'));
     return undefined;
   }
