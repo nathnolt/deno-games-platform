@@ -63,7 +63,8 @@ export const VIEW = { w: 84, h: 46, cy: 10 };
 export let SHAPE_KEYS = Object.keys(shapes);
 export let MATERIAL_KEYS = Object.keys(materials);
 
-const cache = new Map();
+let cache = new Map(); // getShape() results of the live definitions
+const caches = new WeakMap(); // owner of a set of definitions -> its cache (a server with several rooms swaps between sets without rebuilding every shape)
 
 /** Recompute everything derived from the definitions. Called once on load and after every change to them. */
 export function syncDefinitions() {
@@ -655,7 +656,7 @@ export function cloneDefinitions() {
 }
 
 /** Replace the live definitions IN PLACE (every module keeps working with the same objects) and recompute what is derived from them. */
-export function applyDefinitions(next) {
+export function applyDefinitions(next, owner = null) {
   const copy = JSON.parse(JSON.stringify(next));
   for (const name of TABLES) {
     if (copy[name] === undefined) continue;
@@ -669,6 +670,10 @@ export function applyDefinitions(next) {
     }
   }
   syncDefinitions();
+  if (owner && typeof owner === 'object') { // (the server passes the room's own definitions: what was built from them before is still valid)
+    cache = caches.get(owner) ?? new Map();
+    caches.set(owner, cache);
+  }
 }
 
 function shadowErrors(s, where, err) {

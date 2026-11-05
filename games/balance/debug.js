@@ -18,7 +18,9 @@
 // (and is backed up in localStorage, so a reload does not lose it: "Discard saved edits" on the Export tab clears it).
 // "Apply to game" (header) sends the draft to the server, which applies it and shows it to every player. Play / Restart and the level
 // lab apply it too (they need the server to know it). "Auto-apply" in the header brings back the old behaviour: every valid edit is sent
-// after a short pause. Somebody else's applied changes never overwrite your draft: you get a notice and can take their version.
+// after a short pause. NOTHING in this menu is shared between players: the draft, the studios, their size, the notices all stay in your browser.
+// What you apply becomes part of the GAME of your room (that is gameplay, so everybody in the room plays it); other rooms never see it, and
+// somebody else's applied changes never touch your draft ("Reload from game" takes the game's version when you want it).
 // Changes that touch the physics (shapes, bowls, materials, tuning, levels) take effect when the level restarts (or switch on "auto-restart").
 
 import * as S from './shared.js';
@@ -55,7 +57,7 @@ export function createDebugMenu(view) {
   let draft = S.cloneDefinitions();
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
-    needsRestart: false, dirty: false, autoApply: false, remoteChanged: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, sentRev: 0,
+    needsRestart: false, dirty: false, autoApply: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, lastSend: 0, sentRev: 0,
     fxShadows: true, fxReflection: true, fxBlur: true,
   };
   let timer = 0;
@@ -105,6 +107,7 @@ export function createDebugMenu(view) {
     sendDefs(draft);
     state.dirty = false;
     state.sentAt = performance.now();
+    state.lastSend = state.sentAt;
     state.sentRev = view.defsRev;
     backup();
     if (state.autoRestart && !studio.current && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.ctx.sendInput({ restart: true });
@@ -125,12 +128,11 @@ export function createDebugMenu(view) {
   }
   const scheduleBackup = () => { clearTimeout(backupTimer); backupTimer = setTimeout(backup, 500); };
 
-  /** Replace the draft by what the game is running now (everything the other players applied). */
-  function adoptRemote() {
+  /** Replace the draft by what the game of this room is running now. Only YOU start this (button, or when you join a room that has changes): nothing here follows other players. */
+  function reloadFromGame() {
     clearTimeout(timer);
     timer = 0;
     draft = S.cloneDefinitions();
-    state.remoteChanged = false;
     state.dirty = false;
     validate();
     backup();
@@ -834,6 +836,19 @@ export function createDebugMenu(view) {
   };
   const applyBtn = btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go');
   applyBtn.title = 'Send your edits to the server: the game (for everybody in the room) then uses them. Nothing is sent before you do this.';
+  let reloadArmed = 0;
+  const reloadBtn = btn('Reload from game', () => {
+    if (state.dirty && !reloadArmed) { // unsent edits would be thrown away: ask by pressing it twice
+      reloadArmed = setTimeout(() => { reloadArmed = 0; reloadBtn.textContent = 'Reload from game'; }, 3000);
+      reloadBtn.textContent = 'Discard my edits?';
+      return;
+    }
+    clearTimeout(reloadArmed);
+    reloadArmed = 0;
+    reloadBtn.textContent = 'Reload from game';
+    reloadFromGame();
+  });
+  reloadBtn.title = 'Throw away your draft and take what the game of this room is running now (nothing is ever taken from other players unless you press this)';
   const header = h('div', { class: 'bb-dbg-head' },
     h('strong', {}, 'Debug'),
     helper('Free camera', 'freeCam', (on) => view.debugFreeCam(on)),
@@ -844,6 +859,7 @@ export function createDebugMenu(view) {
     helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
     helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
     h('span', { class: 'bb-dbg-grow' }),
+    reloadBtn,
     applyBtn,
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
@@ -923,11 +939,7 @@ export function createDebugMenu(view) {
         }, 'bb-dbg-danger')));
     }
     if (state.dirty && !state.problems.length) {
-      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Your edits are only in this editor (nothing is synchronised). ', btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go')));
-    }
-    if (state.remoteChanged) {
-      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Somebody else applied changes to the game while you have edits that are not applied yet. Your draft was not touched. ',
-        btn('Take their version (discard my draft)', adoptRemote), btn('Keep mine', () => { state.remoteChanged = false; renderStatus(); })));
+      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Your edits are only in this editor (nothing is shared with other players). ', btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go')));
     }
     if (state.levelsError) kids.push(h('div', { class: 'bb-dbg-err' }, state.levelsError));
     else if (state.levelsSavedAt && performance.now() - state.levelsSavedAt < 4000) kids.push(h('div', { class: 'bb-dbg-note' }, '✓ levels.js was saved by the server.'));
@@ -977,13 +989,17 @@ export function createDebugMenu(view) {
     if (!state.viewProblems.includes(msg)) state.viewProblems.push(msg);
     renderStatus();
   };
+  // Notices about what the server did with a change are for the player who made it (they come in every snapshot, so the others filter them out).
+  const mine = () => state.lastSend > 0 && performance.now() - state.lastSend < 8000;
   view.onLevelsSaved = ({ error }) => { // the server rewrote levels.js (or could not)
+    if (!mine()) return;
     state.levelsError = error;
     state.levelsSavedAt = error ? 0 : performance.now();
     renderStatus();
     if (!error) setTimeout(renderStatus, 4200);
   };
   view.onDefsError = (msg) => {
+    if (msg && !mine()) return;
     state.serverError = msg;
     renderStatus();
   };
@@ -1006,14 +1022,9 @@ export function createDebugMenu(view) {
   return {
     el: root,
     /** Somebody else applied changes to the game. */
-    onRemoteChange() {
-      // Nothing of yours is waiting to be sent: follow them, so the menu and an open studio show what everybody is playing.
-      // You have unsent edits: nothing is overwritten, you choose (banner).
-      if (!state.dirty && !timer) adoptRemote();
-      else {
-        state.remoteChanged = true;
-        renderStatus();
-      }
+    /** You came into a room whose game already has changes: start from them (once; after that nothing follows the other players). */
+    onRoomDefs() {
+      if (!state.dirty && !timer) reloadFromGame();
     },
     dispose() {
       window.removeEventListener('keydown', onKey);

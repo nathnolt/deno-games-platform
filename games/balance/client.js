@@ -1,9 +1,12 @@
 import * as THREE from 'three'; // resolved by the import map in client/index.html
 import { el } from '../../client/dom.js';
 import {
-  applyDefinitions, backgroundKeyOf, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
+  applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
   HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
+
+// The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
+const PRISTINE = DEBUG ? cloneDefinitions() : null;
 import { flatNormals, parseObj } from './obj.js';
 import { SHADOW_GLSL, shaders, transparentShaders, vertexShader } from './shaders.js';
 
@@ -243,6 +246,8 @@ class BalanceView {
   dropHelper = null; //      debug: wireframe of the drop zone
   defsRev = 0; //            debug: which version of the definitions we have
   defsAsk = 0;
+  firstDrev = undefined;
+  gotRoomDefs = false;
   onLevelsSaved = null; //  debug: called with ({ saves, error }) when the server wrote levels.js (or could not)
   lastSaves = -1;
   lastLsave = '';
@@ -280,6 +285,7 @@ class BalanceView {
   plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -PLAY_Z);
 
   constructor(ctx) {
+    if (PRISTINE) applyDefinitions(PRISTINE); // a new game (another room) starts from the files again: edits made in a room stay in that room
     this.ctx = ctx; // ctx.me.slot is -1 for spectators: they watch the same physics, no input
     this.spectator = ctx.me.slot < 0;
     loadStyles();
@@ -447,12 +453,17 @@ class BalanceView {
       this.lastLsave = s.lsave ?? '';
       if (!first || this.lastLsave) this.onLevelsSaved?.({ saves: s.lsaves, error: this.lastLsave });
     }
+    if (s.drev !== undefined) this.firstDrev ??= s.drev; // (which version of the room's definitions we met when we came in)
     if (s.drev === undefined || s.drev === this.defsRev) return;
     if (s.defs) { // the server applied somebody's change (maybe ours): everybody takes over its version, at the same snapshot
       applyDefinitions(s.defs);
       this.defsRev = s.drev;
       this.debugRefresh();
-      if (s.dfrom !== this.ctx.me.id) this.debug?.onRemoteChange?.(); // our own draft in the menu is already what we sent
+      // Gameplay is shared (the room's game now uses this version, and everybody sees it), the debug menus are not: another player's
+      // applied changes never touch your draft. The one exception is joining a room that already has changes: the draft starts from them.
+      const joining = this.firstDrev > 0 && !this.gotRoomDefs;
+      this.gotRoomDefs = true;
+      if (joining) this.debug?.onRoomDefs?.();
     } else if (performance.now() - this.defsAsk > 1500) { // the server has newer definitions and has not sent them (we just joined)
       this.defsAsk = performance.now();
       this.ctx.sendInput({ defsRequest: true });

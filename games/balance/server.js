@@ -11,6 +11,18 @@ import {
 
 const { Vec2 } = planck;
 
+// ── Rooms have their own definitions ──
+// shared.js keeps ONE live set of definitions (tuning, shapes, levels ...) per process, and every room of this server is a BalanceGame in the same
+// process. A room that has never changed anything shares BASE (the files as they were when the server started). The debug menu's "Apply to game"
+// gives that room a set of its own; before a room does anything (input, tick, snapshot) its set is made the live one, so rooms never see each other's edits.
+const BASE = cloneDefinitions();
+let active = BASE; // whose definitions are live right now
+function activate(defs) {
+  if (!DEBUG || active === defs) return;
+  applyDefinitions(defs, defs);
+  active = defs;
+}
+
 const STEP = 1 / 120; //          fixed physics step (the platform ticks at 30 Hz, so ~4 physics steps per snapshot)
 const MAX_STEPS = 12; //          never do more than this per tick (protects the server if it falls behind)
 const WIN_HOLD = 0.8; //          seconds the third green dot stays lit (the countdown has run out, everything still has to stand) before the level counts as cleared
@@ -67,6 +79,8 @@ export function clipBelow(pts, y0) {
 class BalanceGame {
   constructor(ctx) {
     this.ctx = ctx;
+    this.defs = BASE; //          debug: this room's definitions (BASE until somebody applies a change here)
+    activate(this.defs);
     this.players = new Map(); //  playerId -> { slot, held: null | { item, rec, tx, ty, trot } }
     this.phase = PHASE.MENU;
     this.levelIdx = -1;
@@ -97,10 +111,12 @@ class BalanceGame {
 
   // ── GameInstance ──
   onJoin({ id, slot }) {
+    activate(this.defs);
     if (!this.players.has(id)) this.players.set(id, { slot, held: null });
   }
 
   onLeave(id) {
+    activate(this.defs);
     const p = this.players.get(id);
     if (!p) return;
     this.#putBack(p);
@@ -112,6 +128,7 @@ class BalanceGame {
   }
 
   onInput(id, data) {
+    activate(this.defs);
     const p = this.players.get(id); // spectators are not in the map: ignored
     if (!p || typeof data !== 'object' || data === null) return;
     try {
@@ -122,6 +139,7 @@ class BalanceGame {
   }
 
   update(dt) {
+    activate(this.defs);
     if (this.defsBurst > 0) this.defsBurst -= dt;
     try {
       this.#update(dt);
@@ -132,6 +150,7 @@ class BalanceGame {
   }
 
   snapshot() {
+    activate(this.defs);
     const b = [];
     for (const r of this.recs.values()) {
       const pos = r.body.getPosition();
@@ -218,6 +237,9 @@ class BalanceGame {
     const keys = () => `${SHAPE_KEYS.join()}|${MATERIAL_KEYS.join()}`;
     const before = keys();
     applyDefinitions(defs);
+    this.defs = cloneDefinitions(); // from now on this room has definitions of its own (the other rooms keep theirs)
+    applyDefinitions(this.defs, this.defs);
+    active = this.defs;
     this.defsCache = null;
     this.defsRev++;
     this.defsFrom = id;
@@ -237,7 +259,7 @@ class BalanceGame {
 
   async #writeLevels() {
     if (typeof Deno === 'undefined' || typeof Deno.writeTextFile !== 'function') return;
-    const text = serializeLevels(levels);
+    const text = serializeLevels(this.defs.levels); // (this room's levels: the timer may fire while another room's definitions are live)
     if (text === this.levelsText) return;
     try {
       await Deno.writeTextFile(new URL('./levels.js', import.meta.url), text);

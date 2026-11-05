@@ -56,6 +56,8 @@ export const materials = {
   stone: { friction: 14, weight: 20, shader: 'stone1' },
   static: { static: true, friction: 12, shader: 'stone2' },
   floatBlock: { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
+  floatierBlock: { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.9 },
+  floatBlockHeavy: { float: true, friction: 8, weight: 30, shader: 'float', floatLevel: 0.5 },
 };
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
