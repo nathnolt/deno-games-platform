@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PREVIEW_COUNT, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
@@ -38,6 +38,34 @@ const rawColor = (hex) => {
   return new THREE.Color().setRGB(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
 };
 const STORE = 'balance.done'; // localStorage: indexes of completed levels
+const copyOf = (v) => JSON.parse(JSON.stringify(v));
+
+/**
+ * planck (the physics library) for the debug menu's local game. The server loads it from npm; a browser needs a URL. Best: put it in the
+ * import map of client/index.html next to three ("planck": "https://esm.sh/planck@1"), then the first address below finds it. If it is not
+ * there, the CDNs after it are tried.
+ */
+const PLANCK_FROM = ['planck', 'https://esm.sh/planck@1', 'https://cdn.jsdelivr.net/npm/planck@1/+esm'];
+let planckLoading = null;
+function loadPlanck() {
+  if (!planckLoading) {
+    planckLoading = (async () => {
+      let last = null;
+      for (const url of PLANCK_FROM) {
+        try {
+          const m = await import(url);
+          const planck = m.World ? m : m.default?.World ? m.default : null;
+          if (planck) return planck;
+        } catch (e) {
+          last = e;
+        }
+      }
+      throw new Error(`the physics library (planck) could not be loaded in the browser (${last?.message ?? last}). Add "planck": "https://esm.sh/planck@1" to the import map in client/index.html.`);
+    })();
+    planckLoading.catch(() => { planckLoading = null; }); // (a failed load may be tried again)
+  }
+  return planckLoading;
+}
 
 const loadDone = () => {
   try {
@@ -155,6 +183,47 @@ function chamferedPrism(outline, depth, c, holes = []) {
 }
 
 /**
+ * A flat strip (in the xy plane, z = 0) that follows an outline on its OUTSIDE: `width` wide, so the shape itself stays free of it. For loops that keep the solid
+ * on their left (outer = counter-clockwise, holes = clockwise: what shapeOutlines gives). uv = (distance along the line, 0 inner edge .. 1 outer edge).
+ * This is the chalk outline of the blocks that are still to come.
+ */
+function outlineRibbon(outline, holes, width) {
+  const pos = [];
+  const uvs = [];
+  const idx = [];
+  for (const pts of [outline, ...holes]) {
+    const N = pts.length;
+    if (N < 3) continue;
+    const P = pts.map(([x, y]) => new THREE.Vector2(x, y));
+    const edgeN = P.map((p, k) => {
+      const q = P[(k + 1) % N];
+      return new THREE.Vector2(q.y - p.y, p.x - q.x).normalize();
+    });
+    const base = pos.length / 3;
+    let arc = 0;
+    for (let k = 0; k <= N; k++) { // (N + 1 columns: the last one is the first again, so the texture does not jump)
+      const p = P[k % N];
+      const n1 = edgeN[(k + N - 1) % N];
+      const n2 = edgeN[k % N];
+      const m = n1.clone().add(n2).multiplyScalar(1 / Math.max(0.35, 1 + n1.dot(n2))); // mitred corner (capped at sharp corners)
+      pos.push(p.x, p.y, 0, p.x + m.x * width, p.y + m.y * width, 0);
+      uvs.push(arc, 0, arc, 1);
+      if (k < N) arc += p.distanceTo(P[(k + 1) % N]);
+    }
+    for (let k = 0; k < N; k++) {
+      const a = base + k * 2;
+      idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(new Array(pos.length / 3 * 3).fill(0).map((_, k) => (k % 3 === 2 ? 1 : 0)), 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(idx);
+  return geo;
+}
+
+/**
  * The meshes of one shape: one chamfered prism per part, or (merge on, the default) the parts joined in 2D first and extruded once,
  * so there are no seams between touching parts. Collision never changes: it always uses the separate parts. A shape with a drawing-only
  * outline uses that outline as it is.
@@ -248,6 +317,13 @@ class BalanceView {
   defsAsk = 0;
   firstDrev = undefined;
   gotRoomDefs = false;
+  // The debug menu's LOCAL GAME ("sandbox"): a private BalanceGame (sim.js) that this page runs on its own copy of the definitions and shows
+  // INSTEAD of the room's game. Nothing of it is sent anywhere. The room's game goes on without us: we only keep track of what it does.
+  roomCtx = null; //         the platform's ctx (this.ctx is swapped for the local game's one while the local game is shown)
+  roomSnap = null; //        the room's latest snapshot
+  roomDefs = null; //        the definitions the room's game runs (null = the files as they were loaded, see PRISTINE)
+  sandbox = null; //         { game, queue, timer, last, defs, ready } while the local game is shown, else null
+  onSandbox = null; //       debug: called with (on, error) when the local game turns on or off
   onLevelsSaved = null; //  debug: called with ({ saves, error }) when the server wrote levels.js (or could not)
   lastSaves = -1;
   lastLsave = '';
@@ -263,6 +339,8 @@ class BalanceView {
   bodyViews = new Map(); //  blockId -> view of a block in the play area (static, floating, falling, or held by somebody)
   poseMem = new Map(); //    blockId -> last drawn pose of a removed view (a block picked up / put back moves from there)
   geoCache = new Map(); //   shape key -> [{ geo }]
+  ghosts = []; //           the outlines of the blocks still to come, lying on the table after the waiting ones: [{ group, geos, mat }]
+  ghostKey = ''; //         the shapes they show (so they are only rebuilt when the next blocks change)
   players = []; //           room players: { id, name, slot }
   snap = null;
   run = -1;
@@ -287,6 +365,7 @@ class BalanceView {
   constructor(ctx) {
     if (PRISTINE) applyDefinitions(PRISTINE); // a new game (another room) starts from the files again: edits made in a room stay in that room
     this.ctx = ctx; // ctx.me.slot is -1 for spectators: they watch the same physics, no input
+    this.roomCtx = ctx;
     this.spectator = ctx.me.slot < 0;
     loadStyles();
     const white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); // stands in until a pass has made a real texture
@@ -342,9 +421,21 @@ class BalanceView {
   }
 
   onSnapshot(s) {
+    if (DEBUG) {
+      this.roomSnap = s;
+      if (this.sandbox) { // the local game is shown: the room goes on without us, we only keep track of its definitions
+        this.#syncDefs(s);
+        return;
+      }
+    }
+    this.#applySnapshot(s, true);
+  }
+
+  /** Draw a snapshot: the room's (`fromRoom`) or the local game's. */
+  #applySnapshot(s, fromRoom) {
     this.snap = s;
     const now = performance.now();
-    if (DEBUG) this.#syncDefs(s);
+    if (DEBUG && fromRoom) this.#syncDefs(s);
 
     if (s.run !== this.run) { // new level, restart or back to the menu: rebuild everything from scratch
       this.#clearViews();
@@ -372,6 +463,7 @@ class BalanceView {
       v.slot = slot;
       v.n = s.n;
     }
+    this.#syncGhosts(s);
 
     // 3. blocks in the play area
     let mine = null;
@@ -402,6 +494,8 @@ class BalanceView {
 
   dispose() {
     cancelAnimationFrame(this.raf);
+    clearInterval(this.sandbox?.timer);
+    this.sandbox = null;
     this.observer.disconnect();
     const c = this.renderer.domElement;
     c.removeEventListener('pointerdown', this.#onDown);
@@ -456,9 +550,12 @@ class BalanceView {
     if (s.drev !== undefined) this.firstDrev ??= s.drev; // (which version of the room's definitions we met when we came in)
     if (s.drev === undefined || s.drev === this.defsRev) return;
     if (s.defs) { // the server applied somebody's change (maybe ours): everybody takes over its version, at the same snapshot
-      applyDefinitions(s.defs);
+      this.roomDefs = s.defs;
       this.defsRev = s.drev;
-      this.debugRefresh();
+      if (!this.sandbox) { // (with the local game on, the room's version waits: it is applied when you go back to the room)
+        applyDefinitions(s.defs);
+        this.debugRefresh();
+      }
       // Gameplay is shared (the room's game now uses this version, and everybody sees it), the debug menus are not: another player's
       // applied changes never touch your draft. The one exception is joining a room that already has changes: the draft starts from them.
       const joining = this.firstDrev > 0 && !this.gotRoomDefs;
@@ -466,7 +563,7 @@ class BalanceView {
       if (joining) this.debug?.onRoomDefs?.();
     } else if (performance.now() - this.defsAsk > 1500) { // the server has newer definitions and has not sent them (we just joined)
       this.defsAsk = performance.now();
-      this.ctx.sendInput({ defsRequest: true });
+      this.roomCtx.sendInput({ defsRequest: true });
     }
   }
 
@@ -487,6 +584,130 @@ class BalanceView {
     this.#buildCards();
     this.#setScene(levels[this.snap?.lv] ?? null, true);
     if (this.snap) this.#updateHud(this.snap);
+  }
+
+  // ── the local game (debug): a private copy of the game that only this page runs ──
+  /** Is the local game (and not the room's game) what this view shows? */
+  get sandboxOn() {
+    return !!this.sandbox;
+  }
+
+  /** The definitions the room's game runs right now (what "Reload from game" takes). */
+  debugRoomDefs() {
+    return this.roomDefs ?? PRISTINE;
+  }
+
+  /** The level the room's game is playing (-1 = its menu). */
+  debugRoomLevel() {
+    return this.roomSnap?.lv ?? -1;
+  }
+
+  /**
+   * Show a private copy of the game instead of the room's: the server's own physics (sim.js) runs in THIS page on a copy of `defs` (the
+   * debug menu's draft). Nothing goes to the server, nobody else sees or feels anything, and the room's game goes on without you.
+   * Everything the view sends (this.ctx.sendInput: pick, drop, start, restart, lab ...) now goes to the local game.
+   * @returns {Promise<boolean>} true when it runs; false when it could not start (the room's game is shown again, onSandbox got the reason)
+   */
+  debugSandboxOn(defs) {
+    if (!DEBUG || this.spectator) return Promise.resolve(false);
+    if (this.sandbox) {
+      this.sandbox.defs = defs;
+      return this.sandbox.ready;
+    }
+    const sb = { game: null, queue: [], timer: 0, last: performance.now(), defs, ready: null };
+    this.sandbox = sb;
+    const room = this.roomCtx;
+    if (this.snap?.b?.some((r) => (r[6] === BODY.HELD || r[6] === BODY.HELD_BAD) && r[7] === room.me.slot)) room.sendInput({ cancel: true }); // (a block in your hand goes back to the table: you are leaving the room's game for a while)
+    this.ctx = new Proxy({}, { get: (_, key) => (key === 'sendInput' ? this.#sandboxSend : Reflect.get(room, key, room)) }); // (the room's ctx, except that what the view sends goes to the local game)
+    this.mode = 'none';
+    this.onSandbox?.(true, '');
+    sb.ready = (async () => {
+      try {
+        const [sim, planck] = await Promise.all([import('./sim.js'), loadPlanck()]);
+        if (this.sandbox !== sb) return false; // switched off while it was loading
+        sim.usePlanck(planck);
+        sb.game = new sim.BalanceGame({ players: [{ id: room.me.id, slot: room.me.slot }], sandboxDefs: copyOf(sb.defs) });
+        this.snap = null; // (the room's picture goes: the first snapshot of the local game starts from scratch)
+        this.run = -1;
+        this.phase = -1;
+        this.debugRefresh(); // the definitions in this page are now the local game's: rebuild everything drawn from them
+        for (const d of sb.queue.splice(0)) sb.game.onInput(room.me.id, d);
+        sb.last = performance.now();
+        sb.timer = setInterval(() => this.#sandboxTick(), 1000 / meta.tickRate);
+        this.#sandboxTick();
+        return true;
+      } catch (e) {
+        console.error('balance: the local game could not start', e);
+        if (this.sandbox === sb) this.debugSandboxOff(`the local game could not start: ${e?.message ?? e}`);
+        return false;
+      }
+    })();
+    return sb.ready;
+  }
+
+  /** Back to the room's game, with the definitions it runs. (The local game is thrown away.) */
+  debugSandboxOff(error = '') {
+    const sb = this.sandbox;
+    if (!sb) return;
+    clearInterval(sb.timer);
+    this.sandbox = null;
+    this.ctx = this.roomCtx;
+    this.mode = 'none';
+    applyDefinitions(this.debugRoomDefs());
+    this.snap = this.roomSnap;
+    this.run = -1; // (the next snapshot rebuilds the views from the room's)
+    this.phase = -1;
+    this.debugRefresh();
+    if (this.roomSnap) this.#applySnapshot(this.roomSnap, true);
+    this.onSandbox?.(false, error);
+  }
+
+  /**
+   * The draft changed: give it to the local game. `full` = more than the levels changed (shapes, materials, bowls, tuning, backgrounds ...):
+   * then everything drawn is rebuilt too. A level that is running keeps running unless its block lists changed (see sim.js).
+   */
+  debugSandboxLoad(defs, full = true) {
+    const sb = this.sandbox;
+    if (!sb) return;
+    sb.defs = defs;
+    if (!sb.game) return; // still loading: it starts from the newest
+    try {
+      if (full) {
+        sb.game.loadDefinitions(defs);
+        this.debugRefresh();
+      } else {
+        sb.game.loadLevels(defs.levels);
+        this.#buildCards();
+      }
+    } catch (e) {
+      this.#report(`the local game could not take your edits: ${e?.message ?? e}`, e);
+    }
+  }
+
+  /** Send something to the LOCAL game, never to the room: the studios use this, so that a missing local game can never turn their lab commands into messages to the server. */
+  debugSend(d) {
+    if (this.sandbox) this.#sandboxSend(d);
+  }
+
+  #sandboxSend = (d) => {
+    const sb = this.sandbox;
+    if (!sb || typeof d !== 'object' || d === null || d.debugChunk || d.defsRequest) return; // (definitions are not sent anywhere from here)
+    if (sb.game) sb.game.onInput(this.roomCtx.me.id, d);
+    else if (d.lab || d.start !== undefined || d.restart || d.menu) sb.queue.push(d); // (still loading: commands wait, pointer moves do not)
+  };
+
+  #sandboxTick() {
+    const sb = this.sandbox;
+    if (!sb?.game) return;
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - sb.last) / 1000);
+    sb.last = now;
+    try {
+      sb.game.update(dt);
+      this.#applySnapshot(sb.game.snapshot(), false);
+    } catch (e) {
+      this.#report(`the local game failed: ${e?.message ?? e}`, e);
+    }
   }
 
   /** Forget the downloaded .obj files (after you changed one on disk) and redraw. */
@@ -871,6 +1092,7 @@ class BalanceView {
     this.scene = new THREE.Scene();
     this.frontScene = new THREE.Scene(); // blocks somebody is holding: drawn last, on top of everything, so the table never hides them
     this.camera = new THREE.PerspectiveCamera(tuning.camera.fov, 1, 1, 1200);
+    this.camera.layers.enable(1); // layer 1 = the outlines of the blocks to come: seen by the player, but not by the shadow or reflection cameras
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -1428,6 +1650,52 @@ void main() {
     return g;
   }
 
+  /**
+   * The blocks that have not appeared on the table yet: the next PREVIEW_COUNT of them are drawn as a chalk outline (the 'outline' shader) on the table,
+   * where the row of waiting blocks would continue. Only the SHAPE is known (the server does not tell the material). Called with every snapshot,
+   * but it only does something when the next shapes change (a block was dropped, or a new level started).
+   */
+  #syncGhosts(s) {
+    const want = (s.nx ?? []).filter((si) => SHAPE_KEYS[si] !== undefined);
+    const key = `${s.n}:${want.join(',')}`;
+    if (key === this.ghostKey) return;
+    this.#clearGhosts();
+    this.ghostKey = key;
+    want.forEach((si, k) => {
+      const shapeKey = SHAPE_KEYS[si];
+      const shape = getShape(shapeKey);
+      const mat = this.#blockMaterial('outline', (k * 0.37 + 0.1) % 1, THREE.DoubleSide);
+      Object.assign(mat, { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }); // (on top of the table, never flickering with it)
+      const group = new THREE.Group();
+      const geos = [];
+      const line = Math.min(0.35, Math.max(0.1, Math.min(shape.w, shape.h) * 0.08)); // width of the chalk line (a very small shape gets a thinner one)
+      // the outline of the shape as the block has it (all parts merged, holes included), just outside the block
+      for (const o of shapeOutlines(shape, tuning.mergeParts !== false)) {
+        const geo = outlineRibbon(o.pts, o.holes ?? [], line);
+        geos.push(geo);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.layers.set(1);
+        mesh.renderOrder = 2;
+        group.add(mesh);
+      }
+      const p = slotPos(s.n + k, s.n, shapeKey, this.groundY);
+      group.position.set(p.x, this.groundY + 0.05, FRONT_Z); // on the surface of the table, exactly where a block of this shape would lie
+      group.rotation.x = -Math.PI / 2; //                      (flat, the same way up as a waiting block)
+      this.scene.add(group);
+      this.ghosts.push({ group, geos, mat });
+    });
+  }
+
+  #clearGhosts() {
+    for (const g of this.ghosts) {
+      g.group.removeFromParent();
+      g.geos.forEach((geo) => geo.dispose());
+      g.mat.dispose();
+    }
+    this.ghosts = [];
+    this.ghostKey = '';
+  }
+
   /** @param {Map} map  @param opts `{table, slot, n}` for a block on the table, `{x, y, a, st, owner}` for one in the play area */
   #makeView(map, id, si, mi, opts) {
     const shapeKey = SHAPE_KEYS[si];
@@ -1523,6 +1791,7 @@ void main() {
 
   #clearViews() {
     this.#clearShards();
+    this.#clearGhosts();
     for (const v of this.bodyViews.values()) this.#dispose(v);
     for (const v of this.tableViews.values()) this.#dispose(v);
     this.bodyViews.clear();
@@ -1533,7 +1802,7 @@ void main() {
   #onPhase(ph, s) {
     this.phase = ph;
     if (ph !== PHASE.PLAY) this.mode = 'none';
-    if (ph === PHASE.WON && !this.spectator && s.lv >= 0) {
+    if (ph === PHASE.WON && !this.spectator && s.lv >= 0 && !this.sandbox) { // (a win in the local game is a test, not progress)
       this.done.add(s.lv);
       saveDone(this.done);
       this.#markDone();
@@ -1721,10 +1990,13 @@ void main() {
     const pitch = THREE.MathUtils.degToRad(cam.pitch);
     const target = new THREE.Vector3(0, cam.targetY, 0);
     const dir = new THREE.Vector3(0, Math.sin(pitch), Math.cos(pitch));
-    const slotX = ((Math.min(8, Math.max(1, this.currentLevel?.chooseShapes ?? 4)) - 1) / 2) * tuning.slotGap + 7;
+    const slots = Math.min(8, Math.max(1, this.currentLevel?.chooseShapes ?? 4));
+    const slotX = ((slots - 1) / 2) * tuning.slotGap + 7;
+    const ahead = Math.min(PREVIEW_COUNT, Math.max(0, (this.currentLevel?.shapes?.length ?? 0) - slots)); // outlines of the next blocks continue the row on the right
+    const slotR = slotX + ahead * tuning.slotGap;
     const key = [
       [-VIEW.w / 2, 10, 0], [VIEW.w / 2, 10, 0], [0, 30, 0], [-23, 28, 0], [23, 28, 0],
-      [-slotX, this.groundY, FRONT_Z + DEPTH / 2], [slotX, this.groundY, FRONT_Z + DEPTH / 2],
+      [-slotX, this.groundY, FRONT_Z + DEPTH / 2], [slotR, this.groundY, FRONT_Z + DEPTH / 2],
     ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
     const p = new THREE.Vector3();
     let dist = 40;

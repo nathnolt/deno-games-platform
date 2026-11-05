@@ -14,13 +14,16 @@
 //   Shape studio  every shape side by side at one scale next to the bowl, corner editing, and a 3D preview as it looks in the game
 //   Level studio  a blueprint of the level next to the running game, with a live test lab (spawn / grab blocks, freeze gravity, capture)
 //
-// How edits travel: you change a DRAFT copy of the definitions. NOTHING is synchronised while you edit: the draft stays in this browser
-// (and is backed up in localStorage, so a reload does not lose it: "Discard saved edits" on the Export tab clears it).
-// "Apply to game" (header) sends the draft to the server, which applies it and shows it to every player. Play / Restart and the level
-// lab apply it too (they need the server to know it). "Auto-apply" in the header brings back the old behaviour: every valid edit is sent
-// after a short pause. NOTHING in this menu is shared between players: the draft, the studios, their size, the notices all stay in your browser.
-// What you apply becomes part of the GAME of your room (that is gameplay, so everybody in the room plays it); other rooms never see it, and
-// somebody else's applied changes never touch your draft ("Reload from game" takes the game's version when you want it).
+// How edits travel: you change a DRAFT copy of the definitions. NOTHING in this menu is synchronised with anybody: the draft, the studios,
+// their size, the notices all stay in your browser (the draft is backed up in localStorage, so a reload does not lose it: "Discard saved
+// edits" on the Export tab clears it). Somebody else's applied changes never touch your draft ("Reload from game" takes the game's version).
+//
+// To SEE and TEST the draft there is the LOCAL GAME: a private copy of the game (the server's own physics, sim.js) that runs in this page.
+// The header checkbox "Local game" shows it instead of the room's game; the level and background studios switch it on while they are open;
+// "Play this level" plays in it. The room's game goes on without you, and nothing you do in the local game leaves this page.
+//
+// The one thing that reaches the room is the button "Apply to game" (header): it sends the draft to the server, which applies it for the
+// whole room (that is gameplay, so everybody in the room plays it; other rooms never see it) and rewrites levels.js. Nothing else sends it.
 // Changes that touch the physics (shapes, bowls, materials, tuning, levels) take effect when the level restarts (or switch on "auto-restart").
 
 import * as S from './shared.js';
@@ -57,10 +60,10 @@ export function createDebugMenu(view) {
   let draft = S.cloneDefinitions();
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
-    needsRestart: false, dirty: false, autoApply: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, lastSend: 0, sentRev: 0,
+    needsRestart: false, dirty: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, lastSend: 0, sentRev: 0,
     fxShadows: true, fxReflection: true, fxBlur: true,
+    local: false, localError: '', localBeforeStudio: false, // the local game: is it what the view shows, why it could not start, was it on before a studio opened
   };
-  let timer = 0;
   let infoToken = 0;
   let modelPrev = null; // the preview window of the Models tab
   const shaderNames = () => view.shaderNames;
@@ -77,17 +80,79 @@ export function createDebugMenu(view) {
     return state.problems.length === 0;
   }
 
-  /** Something in the draft changed. `kind` is the table. */
-  function touch(kind) {
+  /**
+   * Something in the draft changed. `kind` is the table. The local game (when it is on) follows after a moment; `quiet` = the view already
+   * shows this change by itself (dragging a background model), so the local game is not rebuilt for it.
+   * Nothing here ever reaches the room: that is the "Apply to game" button.
+   */
+  function touch(kind, quiet = false) {
     if (PHYSICS.has(kind)) state.needsRestart = true;
     state.dirty = true;
-    clearTimeout(timer);
-    timer = 0;
-    if (validate() && state.autoApply) timer = setTimeout(send, 300); // (only with Auto-apply: otherwise nothing leaves this browser until you apply)
+    validate();
     scheduleBackup();
     renderStatus();
     if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
+    if (!quiet) touchLocal(kind);
     studio.changed(kind); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
+  }
+
+  // ── the local game ──
+  const localKinds = new Set(); // what changed in the draft since the local game last got it
+  let localTimer = 0;
+  let localLast = 0;
+  const LOCAL_EVERY = 120; //      ms: the local game follows the draft at most this often (the last change always arrives)
+
+  function touchLocal(kind) {
+    localKinds.add(kind);
+    if (!state.local || localTimer) return;
+    localTimer = setTimeout(() => syncLocalNow(), Math.max(40, localLast + LOCAL_EVERY - performance.now()));
+  }
+
+  /** Give the draft to the local game now (only what changed: edits to levels alone are cheap, anything else rebuilds what is drawn). */
+  function syncLocalNow(force = false) {
+    clearTimeout(localTimer);
+    localTimer = 0;
+    if (!state.local || !localKinds.size || state.problems.length) return; // (a draft with problems is not given to the game: it keeps the last good one)
+    if (studio.current === 'shapes' && !force) return; // (the shape studio covers the game: it is brought up to date when the studio closes)
+    const full = [...localKinds].some((k) => k !== 'levels');
+    localKinds.clear();
+    localLast = performance.now();
+    view.debugSandboxLoad(draft, full);
+    if (state.autoRestart && !studio.current && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.debugSend({ restart: true });
+  }
+
+  /** Show the local game instead of the room's. `startRoomLevel`: start the level the room is playing (from the draft) in it. */
+  function enterLocal({ startRoomLevel = false } = {}) {
+    if (state.local) return;
+    const roomLevel = view.debugRoomLevel();
+    localKinds.clear();
+    clearTimeout(localTimer);
+    localTimer = 0;
+    state.localError = '';
+    state.local = true;
+    let base = draft;
+    if (state.problems.length) { // (a draft with problems cannot run: start from the room's version, the draft follows as soon as it is fixed)
+      base = clone(view.debugRoomDefs());
+      localKinds.add('all');
+    }
+    view.debugSandboxOn(base).then((ok) => {
+      if (!ok) { // (it could not start: the view says why through onSandbox; this covers a view that did not even try)
+        if (state.local && !view.sandboxOn) { state.local = false; syncHeader(); renderStatus(); }
+        return;
+      }
+      if (startRoomLevel && roomLevel >= 0 && roomLevel < base.levels.length) view.debugSend({ start: roomLevel });
+    });
+    syncHeader();
+    renderStatus();
+  }
+
+  /** Back to the room's game. */
+  function leaveLocal() {
+    if (!state.local) return;
+    clearTimeout(localTimer);
+    localTimer = 0;
+    localKinds.clear();
+    view.debugSandboxOff();
   }
 
   // The platform drops inbound messages over 4096 characters and the full definitions are far bigger, so they travel as
@@ -97,12 +162,11 @@ export function createDebugMenu(view) {
     const text = JSON.stringify(defs);
     const id = ++sendId;
     const n = Math.ceil(text.length / 1500);
-    for (let i = 0; i < n; i++) view.ctx.sendInput({ debugChunk: { id, i, n, s: text.slice(i * 1500, (i + 1) * 1500) } });
+    for (let i = 0; i < n; i++) view.roomCtx.sendInput({ debugChunk: { id, i, n, s: text.slice(i * 1500, (i + 1) * 1500) } }); // (the ROOM's ctx: the only place the debug menu ever sends anything to)
   }
 
+  /** "Apply to game": send the draft to the room's server (the one thing in this menu that is shared). */
   function send() {
-    clearTimeout(timer);
-    timer = 0;
     if (!validate()) return;
     sendDefs(draft);
     state.dirty = false;
@@ -110,7 +174,7 @@ export function createDebugMenu(view) {
     state.lastSend = state.sentAt;
     state.sentRev = view.defsRev;
     backup();
-    if (state.autoRestart && !studio.current && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.ctx.sendInput({ restart: true });
+    if (state.autoRestart && !studio.current && state.needsRestart && view.roomSnap && view.roomSnap.ph !== S.PHASE.MENU) view.roomCtx.sendInput({ restart: true });
     renderStatus();
   }
 
@@ -130,18 +194,17 @@ export function createDebugMenu(view) {
 
   /** Replace the draft by what the game of this room is running now. Only YOU start this (button, or when you join a room that has changes): nothing here follows other players. */
   function reloadFromGame() {
-    clearTimeout(timer);
-    timer = 0;
-    draft = S.cloneDefinitions();
+    draft = clone(view.debugRoomDefs()); // (not the definitions in this page: while the local game is on, those are the local game's)
     state.dirty = false;
     validate();
     backup();
+    touchLocal('all');
     render();
     studio.refresh();
   }
 
-  /** Called before a command that needs the server to know the draft (play, restart, the level lab): sends it when it has unsent changes. */
-  function flush() {
+  /** The button "Apply to game": send the draft to the room when it has unsent changes. */
+  function applyToRoom() {
     if (state.dirty && !state.problems.length) send();
   }
 
@@ -395,20 +458,18 @@ export function createDebugMenu(view) {
           L.push({ name: `Level ${L.length + 1}`, difficulty: 'easy', world: lv.world ?? keys('worlds')[0], bowl: keys('bowls')[0], background: keys('backgrounds')[0], initialBlocks: [], chooseShapes: 3, shapes: [{ shape: shapeOpts[0], material: matOpts[0] }] });
           state.sel.level = L.length - 1;
           touch('levels');
-          flush(); // a new level is written to levels.js at once
           render();
         }),
-        btn('Copy', () => { L.splice(idx + 1, 0, { ...clone(lv), name: `${lv.name} copy` }); state.sel.level = idx + 1; touch('levels'); flush(); render(); }),
+        btn('Copy', () => { L.splice(idx + 1, 0, { ...clone(lv), name: `${lv.name} copy` }); state.sel.level = idx + 1; touch('levels'); render(); }),
         btn('Delete', () => {
           if (L.length <= 1) return window.alert('There must be at least one level.');
           if (!window.confirm(`Delete level "${lv.name}"?`)) return;
           L.splice(idx, 1);
           touch('levels');
-          flush();
           render();
         }, 'bb-dbg-danger')),
       h('div', { class: 'bb-dbg-row' }, btn('↑ Earlier', () => move(-1)), btn('↓ Later', () => move(1)),
-        btn('▶ Play this level', () => { flush(); view.ctx.sendInput({ start: idx }); setOpen(false); }, 'bb-dbg-go')),
+        btn('▶ Play this level', () => { playLocal(idx); setOpen(false); }, 'bb-dbg-go')),
       section('Level',
         text('name', lv, 'name', 'levels'),
         select('difficulty', ['easy', 'medium', 'hard'], lv, 'difficulty', 'levels'),
@@ -834,8 +895,8 @@ export function createDebugMenu(view) {
     i.addEventListener('change', () => { state[key] = i.checked; apply?.(i.checked); });
     return h('label', { class: 'bb-dbg-chk' }, i, label);
   };
-  const applyBtn = btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go');
-  applyBtn.title = 'Send your edits to the server: the game (for everybody in the room) then uses them. Nothing is sent before you do this.';
+  const applyBtn = btn('Apply to game', () => { applyToRoom(); renderStatus(); }, 'bb-dbg-go');
+  applyBtn.title = 'Send your edits to the server: the game of the room (for everybody in it) then uses them, and levels.js is written. This is the only thing in the debug menu that is shared; nothing is sent before you press it.';
   let reloadArmed = 0;
   const reloadBtn = btn('Reload from game', () => {
     if (state.dirty && !reloadArmed) { // unsent edits would be thrown away: ask by pressing it twice
@@ -849,12 +910,17 @@ export function createDebugMenu(view) {
     reloadFromGame();
   });
   reloadBtn.title = 'Throw away your draft and take what the game of this room is running now (nothing is ever taken from other players unless you press this)';
+
+  // the local game: a private copy of the game that only this page runs (see the top of this file)
+  const localChk = h('input', { type: 'checkbox' });
+  localChk.addEventListener('change', () => (localChk.checked ? enterLocal({ startRoomLevel: true }) : leaveLocal()));
+  const localLabel = h('label', { class: 'bb-dbg-chk', title: 'Show and play your draft in a private copy of the game that runs in this page. Nobody else sees it and nothing is sent to the room; the room goes on without you.' }, localChk, 'Local game');
   const header = h('div', { class: 'bb-dbg-head' },
     h('strong', {}, 'Debug'),
     helper('Free camera', 'freeCam', (on) => view.debugFreeCam(on)),
     helper('Show drop zone', 'showDrop', (on) => view.debugShowDrop(on)),
     helper('Auto-restart', 'autoRestart'),
-    helper('Auto-apply', 'autoApply', (on) => { if (on) flush(); }),
+    localLabel,
     helper('Shadows', 'fxShadows', (on) => view.debugFx('shadows', on)),
     helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
     helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
@@ -869,7 +935,7 @@ export function createDebugMenu(view) {
       try { localStorage.removeItem(STORE); localStorage.removeItem('balance.done'); } catch { /* ignore */ }
       window.location.reload();
     }, 'bb-dbg-danger'),
-    btn('Restart', () => { flush(); view.ctx.sendInput({ restart: true }); }),
+    btn('Restart', () => { syncLocalNow(true); view.ctx.sendInput({ restart: true }); }),
     btn('Menu', () => view.ctx.sendInput({ menu: true })),
     btn('✕', () => setOpen(false)));
   const panel = h('div', { class: 'bb-dbg-panel' }, header, statusEl, tabsEl, bodyEl);
@@ -878,8 +944,7 @@ export function createDebugMenu(view) {
   const studio = createStudio(view, {
     draft: () => draft,
     touch,
-    flush,
-    autoApply: () => state.autoApply,
+    syncNow: () => syncLocalNow(true),
     problems: () => state.problems,
     showProblems(el) {
       const n = state.problems.length;
@@ -890,25 +955,47 @@ export function createDebugMenu(view) {
     w: { field, section, num, text, check, select, color, slider, btn, note },
     open: (name) => openStudio(name),
     close: () => closeStudio(),
-    /** Playtest: apply the draft, leave the studio and the menu, and start the level as an ordinary game. */
+    /** Playtest: leave the studio and the menu, and play the level as an ordinary game in the local game (it stays on until you go back to the room). */
     playtest(i) {
-      flush();
-      closeStudio();
+      closeStudio(true);
       setOpen(false);
-      view.ctx.sendInput({ lab: { play: i } });
+      playLocal(i);
     },
   });
-  const root = h('div', { class: 'bb-dbg' }, toggle, panel, studio.el);
+  // shown while the local game is what you see: it is not the room's game, so it says so (and takes you back)
+  const localPill = h('div', { class: 'bb-dbg-local' },
+    h('strong', {}, 'Local game'),
+    h('span', {}, 'only you see this; nothing is sent to the room'),
+    btn('Back to the room', () => { if (studio.current) closeStudio(); leaveLocal(); }, 'bb-dbg-go'));
+  const root = h('div', { class: 'bb-dbg' }, toggle, panel, studio.el, localPill);
 
+  /** Play a level of the draft in the local game (a private test with the real rules: nothing is sent to the room). */
+  function playLocal(i) {
+    enterLocal();
+    syncLocalNow(true);
+    view.debugSend({ start: i });
+  }
+
+  /** The level and background studios show and test the draft in the local game, so it is on while they are open; the shape studio has a view of its own. */
   function openStudio(name) {
+    if (!studio.current) state.localBeforeStudio = state.local;
     setOpen(false);
     root.classList.add('bb-st-open');
+    if (name !== 'shapes') enterLocal();
     studio.open(name);
   }
-  function closeStudio() {
+  /** `keepLocal`: stay in the local game after the studio (a playtest); otherwise it goes off again unless it was on before the studio opened. */
+  function closeStudio(keepLocal = false) {
     studio.close();
     root.classList.remove('bb-st-open');
+    syncLocalNow(true); // (what the shape studio kept back)
+    if (!keepLocal && !state.localBeforeStudio) leaveLocal();
     setOpen(true); // back to the debug menu
+  }
+
+  function syncHeader() {
+    localChk.checked = state.local;
+    localPill.classList.toggle('bb-show', state.local);
   }
 
   function setOpen(on) {
@@ -939,15 +1026,16 @@ export function createDebugMenu(view) {
         }, 'bb-dbg-danger')));
     }
     if (state.dirty && !state.problems.length) {
-      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Your edits are only in this editor (nothing is shared with other players). ', btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go')));
+      kids.push(h('div', { class: 'bb-dbg-warn' }, state.local ? 'The local game shows your edits; the room does not have them (nothing is shared until you press Apply to game). ' : 'Your edits stay in this browser (nothing is shared with the other players). Tick "Local game" to try them in a private copy of the game, or press Apply to game when the room should use them. ', btn('Apply to game', () => { applyToRoom(); renderStatus(); }, 'bb-dbg-go')));
     }
     if (state.levelsError) kids.push(h('div', { class: 'bb-dbg-err' }, state.levelsError));
     else if (state.levelsSavedAt && performance.now() - state.levelsSavedAt < 4000) kids.push(h('div', { class: 'bb-dbg-note' }, '✓ levels.js was saved by the server.'));
+    if (state.localError) kids.push(h('div', { class: 'bb-dbg-err' }, state.localError));
     if (state.serverError) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, 'The server refused your last change: '), state.serverError));
     if (state.unconfirmed) kids.push(h('div', { class: 'bb-dbg-warn' }, 'The server has not confirmed your last change. Is it running? After replacing server.js or shared.js the game server has to be restarted.'));
     for (const m of state.viewProblems) kids.push(h('div', { class: 'bb-dbg-err' }, m));
     if (state.problems.length) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, `${state.problems.length} problem${state.problems.length > 1 ? 's' : ''}, nothing is sent until fixed:`), '\n', state.problems.slice(0, 6).join('\n')));
-    if (state.needsRestart && !state.dirty && !state.problems.length) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Physics changes apply when the level restarts. ', btn('Restart now', () => { flush(); view.ctx.sendInput({ restart: true }); })));
+    if (state.needsRestart && (state.local || !state.dirty) && !state.problems.length) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Physics changes apply when the level restarts. ', btn('Restart now', () => { syncLocalNow(true); view.ctx.sendInput({ restart: true }); })));
     statusEl.replaceChildren(...kids);
   }
 
@@ -975,6 +1063,13 @@ export function createDebugMenu(view) {
 
   view.onRun = () => {
     state.needsRestart = false;
+    renderStatus();
+  };
+  view.onSandbox = (on, error) => { // the local game turned on or off (also by itself: it could not start, or the page has no planck)
+    state.local = on;
+    if (error) state.localError = error;
+    else if (on) state.localError = '';
+    syncHeader();
     renderStatus();
   };
 
@@ -1024,15 +1119,16 @@ export function createDebugMenu(view) {
     /** Somebody else applied changes to the game. */
     /** You came into a room whose game already has changes: start from them (once; after that nothing follows the other players). */
     onRoomDefs() {
-      if (!state.dirty && !timer) reloadFromGame();
+      if (!state.dirty) reloadFromGame();
     },
     dispose() {
       window.removeEventListener('keydown', onKey);
       studio.dispose();
       modelPrev?.dispose();
-      clearTimeout(timer);
+      clearTimeout(localTimer);
       clearTimeout(backupTimer);
       view.onRun = null;
+      view.onSandbox = null;
       view.onProblem = null;
       view.onDefsError = null;
       view.onLevelsSaved = null;

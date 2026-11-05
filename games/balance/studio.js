@@ -12,10 +12,11 @@
 //                   Layout     the game shows the start layout frozen; drag blocks in the blueprint to place them, Q / E turn them.
 //                   Live test  gravity is on and you can spawn any shape, grab and move any block (also the static ones), freeze
 //                              and unfreeze gravity, reset, and capture what you built as the new start layout.
-//                 While the studio is open nothing is won or lost (the server's "lab" mode).
+//                 While the studio is open nothing is won or lost (the "lab" mode of the local game).
 //
-// Both edit the same DRAFT as the rest of the debug menu (see debug.js), so everything is sent to the server, shared with the other
-// players and exported like any other edit.
+// All of them edit the same DRAFT as the rest of the debug menu (see debug.js), and NOTHING here is shared with the room. The level and
+// background studios show and test the draft in the LOCAL GAME: a private copy of the game that runs in this page (client.js, sim.js), so
+// nobody else is restarted and nothing goes over the network while you edit. Only "Apply to game" in the debug menu sends the draft to the room.
 
 import * as S from './shared.js';
 import { clone, h, svg } from './ui.js';
@@ -119,9 +120,15 @@ function thumb(def, color, w = 46, hgt = 34) {
   const k = Math.min((w - 4) / bw, (hgt - 4) / bh);
   const root = svg('svg', { width: w, height: hgt, viewBox: `0 0 ${w} ${hgt}`, class: 'bb-st-thumb' });
   const g = svg('g', { transform: `translate(${(w - bw * k) / 2 - b[0] * k} ${(hgt + bh * k) / 2 + b[1] * k}) scale(${k} ${-k})` });
-  for (const p of def) {
+  const common = { fill: color, stroke: '#1f2937', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' };
+  const bs = def.some((p) => p.cut || p.visual) ? built(def) : null; // (the result of the cuts)
+  const looks = bs?.visual ?? null; // the outline the block really has in the game: with its cuts (holes) taken out
+  if (looks) {
+    const loop = (pts) => `M${pts.map(([x, y]) => `${x + bs.ox} ${y + bs.oy}`).join('L')}Z`;
+    g.append(svg('path', { d: looks.map((v) => [v.pts, ...(v.holes ?? [])].map(loop).join('')).join(''), 'fill-rule': 'evenodd', ...common }));
+  }
+  for (const p of looks ? [] : def) {
     if (p.visual || p.cut) continue;
-    const common = { fill: color, stroke: '#1f2937', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' };
     if (p.type === 'circle') {
       const c = circleOf(p);
       g.append(svg('circle', { cx: c.x, cy: c.y, r: c.r, ...common }));
@@ -1133,7 +1140,7 @@ function levelStudio(view, api) {
 
   const D = () => api.draft();
   const L = () => D().levels[st.lvl];
-  const lab = (c) => view.ctx.sendInput({ lab: c });
+  const lab = (c) => view.debugSend({ lab: c }); // (the local game only: debugSend never reaches the room)
   const snapV = (v) => snapTo(v, st.snap);
   const btn = (text, fn, cls = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, onclick: fn }, text);
   const sel = (options, value, onchange, cls = '') => {
@@ -1144,34 +1151,34 @@ function levelStudio(view, api) {
   };
   const nonStatic = () => Object.keys(D().materials);
 
-  // ── talking to the lab on the server ──
-  /** Send pending edits, then restart the level so the game shows them (the lab stays on, and frozen in layout mode). */
+  // ── the lab of the local game (everything here stays in this page) ──
+  /** Give the draft to the local game, then restart the level in it so it shows the draft (the lab stays on, and frozen in layout mode). */
   function applyNow() {
     clearTimeout(applyTimer);
     applyTimer = 0;
     if (!st.open) return;
-    api.flush();
+    api.syncNow();
     if (api.problems().length || !L()) {
-      if (api.problems().length) { st.msg = `Not applied to the game until this is fixed: ${api.problems()[0]}`; renderBar(); }
+      if (api.problems().length) { st.msg = `Not shown in the test until this is fixed: ${api.problems()[0]}`; renderBar(); }
       return;
     }
-    if (st.msg.startsWith('Not applied')) { st.msg = ''; renderBar(); }
+    if (st.msg.startsWith('Not shown')) { st.msg = ''; renderBar(); }
     lab({ play: st.lvl });
     lab({ paused: st.mode === 'layout' });
   }
-  // A THROTTLE, not a debounce: while a block is being dragged the game follows every ~0.45 s (the first change goes out after 0.15 s), and the last position always arrives.
+  // A THROTTLE, not a debounce: while a block is being dragged the game follows about every 0.1 s (the first change after 0.04 s), and the last position always arrives.
   let lastSend = 0;
-  const SYNC_EVERY = 450;
-  const syncDelay = () => Math.max(150, lastSend + SYNC_EVERY - performance.now());
+  const SYNC_EVERY = 100;
+  const syncDelay = () => Math.max(40, lastSend + SYNC_EVERY - performance.now());
   function scheduleApply() {
     if (applyTimer) return; // one is already on its way: it will send the newest state
     applyTimer = setTimeout(() => { lastSend = performance.now(); applyNow(); }, syncDelay());
   }
-  /** Layout: send the draft and restart the frozen layout with it. Live test: only send it (the running test is not disturbed; levels.js is saved too). */
+  /** Layout: give the draft to the local game and restart the frozen layout with it. Live test: only give it (the running test is not disturbed). */
   function scheduleSync() {
     if (st.mode === 'layout') return scheduleApply();
     if (applyTimer) return undefined;
-    applyTimer = setTimeout(() => { applyTimer = 0; lastSend = performance.now(); if (st.open) api.flush(); }, syncDelay());
+    applyTimer = setTimeout(() => { applyTimer = 0; lastSend = performance.now(); if (st.open) api.syncNow(); }, syncDelay());
     return undefined;
   }
 
@@ -1280,12 +1287,12 @@ function levelStudio(view, api) {
       const now = performance.now();
       if (!force && now - live.last < 33) return;
       live.last = now;
-      view.ctx.sendInput({ x: Math.round(live.x * 100) / 100, y: Math.round(live.y * 100) / 100, rot: Math.round(live.rot * 10) / 10 });
+      view.debugSend({ x: Math.round(live.x * 100) / 100, y: Math.round(live.y * 100) / 100, rot: Math.round(live.rot * 10) / 10 });
     };
     live.send = send;
     return {
       move(q) { live.x = q.x - live.off.x; live.y = q.y - live.off.y; send(false); },
-      up(q) { if (q) { live.x = q.x - live.off.x; live.y = q.y - live.off.y; } send(true); view.ctx.sendInput({ drop: true }); live = null; },
+      up(q) { if (q) { live.x = q.x - live.off.x; live.y = q.y - live.off.y; } send(true); view.debugSend({ drop: true }); live = null; },
     };
   }
   /** A palette thumbnail was pressed. Live: a new block appears in your hand. Layout: drag = a block in the start layout, click = add to the blocks to place. */
@@ -1341,13 +1348,13 @@ function levelStudio(view, api) {
     });
     st.sel = -1;
     st.msg = `Captured ${bodies.length} block${bodies.length === 1 ? '' : 's'} as the start layout.`;
-    api.touch('levels'); // first the new layout goes to the server ...
+    api.touch('levels'); // first the new layout goes to the local game ...
     setMode('layout'); //   ... then the level restarts with it
   }
 
   function setMode(m) {
     st.mode = m;
-    if (live) { view.ctx.sendInput({ cancel: true }); live = null; }
+    if (live) { view.debugSend({ cancel: true }); live = null; }
     if (m === 'layout') applyNow(); // restart with the draft, frozen
     else applyNow(); // always restart from the layout as it is now (not only when an edit is still waiting), with gravity on
     renderAll();
@@ -1390,7 +1397,7 @@ function levelStudio(view, api) {
             (() => { const c = h('input', { type: 'checkbox', checked: st.rules }); c.addEventListener('change', () => { st.rules = c.checked; lab({ rules: st.rules }); }); return c; })(), 'fail enabled'),
           btn('⤓ Capture as start layout', capture, 'bb-dbg-go'),
         ]
-        : [btn('Apply to test', () => applyNow(), 'bb-dbg-go'), btn('Fit', () => board.fit(bounds()))],
+        : [btn('Restart test', () => applyNow(), 'bb-dbg-go'), btn('Fit', () => board.fit(bounds()))],
       h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
       h('div', { class: 'bb-st-hint' }, st.mode === 'live'
         ? 'Drag a shape from the palette into the bowl (or click it to drop it at the top). Drag any block to move it, Q / E or the wheel turn what you hold, Esc deletes it. Freeze gravity to place things precisely, then switch it on.'
@@ -1532,7 +1539,7 @@ function levelStudio(view, api) {
     const k = e.key.toLowerCase();
     const step = e.shiftKey ? 1 : 15;
     if (live) {
-      if (k === 'q' || k === 'e') { live.rot += (k === 'q' ? 1 : -1) * step; live.send(true); e.preventDefault(); } else if (k === 'escape') { view.ctx.sendInput({ cancel: true }); live = null; }
+      if (k === 'q' || k === 'e') { live.rot += (k === 'q' ? 1 : -1) * step; live.send(true); e.preventDefault(); } else if (k === 'escape') { view.debugSend({ cancel: true }); live = null; }
       return;
     }
     const b = st.mode === 'layout' ? L()?.initialBlocks[st.sel] : null;
@@ -1636,20 +1643,19 @@ function levelStudio(view, api) {
       if (!st.open) return;
       st.open = false;
       clearTimeout(applyTimer);
-      api.flush(); // an edit that was still waiting is sent before the studio closes
-      if (live) { view.ctx.sendInput({ cancel: true }); live = null; }
+      if (live) { view.debugSend({ cancel: true }); live = null; }
       root.classList.remove('bb-show');
       view.debugDock(0);
       view.onSnap = null;
       lab({ on: false });
-      lab({ reload: true }); // an ordinary level again
+      lab({ reload: true }); // an ordinary level again (in the local game)
     },
     changed(kind) {
       if (!st.open) return;
       api.showProblems(probEl);
       if (kind === 'levels' || kind === 'all') {
         st.lvl = Math.min(st.lvl, Math.max(0, D().levels.length - 1));
-        scheduleSync(); // the level studio is always in sync: every edit reaches the server and the test at once
+        scheduleSync(); // every edit reaches the local game (and so the test) at once; nothing leaves this page
         scheduleDraw();
       } else if (kind === 'shapes' || kind === 'materials' || kind === 'bowls' || kind === 'tuning') {
         renderPalette();
@@ -1686,7 +1692,7 @@ function backgroundStudio(view, api) {
 
   const D = () => api.draft();
   const L = () => D().levels[st.lvl];
-  const lab = (c) => view.ctx.sendInput({ lab: c });
+  const lab = (c) => view.debugSend({ lab: c }); // (the local game only: debugSend never reaches the room)
   const btn = (text, fn, cls = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, onclick: fn }, text);
   const sel = (options, value, onchange, cls = '') => {
     const s = h('select', { class: cls }, options.map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return h('option', { value: v }, l); }));
@@ -1720,7 +1726,7 @@ function backgroundStudio(view, api) {
     clearTimeout(applyTimer);
     applyTimer = 0;
     if (!st.open) return;
-    api.flush();
+    api.syncNow();
     if (api.problems().length || !L()) return;
     lab({ play: st.lvl });
   }
@@ -1728,7 +1734,7 @@ function backgroundStudio(view, api) {
   /** the numbers of one model changed: show it at once, tell the draft */
   function pushInst(i) {
     view.debugSetInstance(i, inst(i));
-    api.touch('backgrounds');
+    api.touch('backgrounds', true); // (quiet: the view already shows it, the local game is not rebuilt for every pixel of a drag)
   }
   function select(i, scroll = false) {
     st.sel = i;
@@ -1764,7 +1770,7 @@ function backgroundStudio(view, api) {
         h('span', { class: 'bb-st-mini' }, 'background'),
         sel(Object.keys(d.backgrounds), bgKey(), (v) => { L().background = v; st.sel = -1; openRows.clear(); api.touch('levels'); renderAll(); }, 'bb-dbg-grow')),
       h('div', { class: 'bb-st-row' },
-        btn('Apply to game', () => applyLevel(), 'bb-dbg-go'),
+        btn('Refresh view', () => applyLevel(), 'bb-dbg-go'),
         btn('⌖ Camera to game view', () => view.debugCameraHome(), 'bb-dbg-go'),
         h('span', { class: 'bb-st-mini' }, 'snap'),
         sel(SNAPS, String(st.snap), (v) => { st.snap = +v; }),
@@ -2100,8 +2106,8 @@ function backgroundStudio(view, api) {
 
 /**
  * @param view  the BalanceView
- * @param api   { draft(): the current draft, touch(kind), flush(), autoApply(): is Auto-apply on, playtest(levelIndex): apply + leave + start it, problems(): string[], w: the widget builders of the debug menu,
- *                statusEl, open(name), close() }
+ * @param api   { draft(): the current draft, touch(kind, quiet?), syncNow(): give the draft to the local game now, playtest(levelIndex): leave the studio and play it in the local game,
+ *                problems(): string[], showProblems(el), w: the widget builders of the debug menu, open(name), close() }
  */
 export function createStudio(view, api) {
   const shapesS = shapeStudio(view, api);

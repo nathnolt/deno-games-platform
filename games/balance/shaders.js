@@ -263,6 +263,19 @@ void main() {
   gl_FragColor = finish(c, 0.8);
 }`),
 
+  // A CHALK OUTLINE, like the one the police draw round a body on the floor: a white line with a slightly rough edge and some chalk dust,
+  // nothing else. It is meant for a flat strip lying on a surface (the game draws the outline of a block that is still to come on the table
+  // with it): vP.x = distance along the line, vP.y = 0 on the inside of the line .. 1 on the outside. Not lit, no shadow.
+  outline: frag(/* glsl */ `
+void main() {
+  vec2 p = vP + uSeed * 17.0;
+  float across = smoothstep(0.0, 0.3, vP.y) * smoothstep(1.0, 0.7, vP.y); // soft edges on both sides of the line
+  float rough = 0.55 + 0.45 * fbm(vec2(p.x * 2.2, vP.y * 2.5));             // the chalk is thicker and thinner along the line
+  float dust = step(0.82, hash(floor(vec2(p.x * 9.0, vP.y * 4.0)))) * 0.25; // grains
+  float a = clamp(across * (rough - dust) * 1.15, 0.0, 1.0) * 0.92;
+  gl_FragColor = vec4(vec3(0.97, 0.97, 0.94), a);
+}`),
+
   stone1: frag(/* glsl */ `
 void main() {
   vec2 p = vP + uSeed * 11.0;
@@ -373,4 +386,4 @@ void main() {
 };
 
 /** Shaders whose blocks are see-through (drawn after the opaque ones, no depth writes). */
-export const transparentShaders = new Set(['glass']);
+export const transparentShaders = new Set(['glass', 'outline']);

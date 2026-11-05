@@ -27,7 +27,7 @@ export const tuning = {
 
   frontZ: 17, //           z of the blocks waiting on the table (in front of the bowl)
   hoverZ: 4.5, //          z of a block you hold: it floats in front of everything
-  slotGap: 17, //          the waiting blocks lie in a row this far apart (centre to centre)
+  slotGap: 10, //          the waiting blocks lie in a row this far apart (centre to centre); the widest shape is 7 wide, so 10 leaves a gap of 3
   mergeParts: true,
   maxHoldX: 120, //         how far sideways a held block may be carried
   maxHoldY: 60, //         how high above the water

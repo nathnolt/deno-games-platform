@@ -47,6 +47,8 @@ export let GRAVITY = 30;
 export let WATER_DENSITY = 1;
 export let DEPTH = 2.4;
 export let FRONT_Z = 17;
+/** How many of the blocks that are still to come (after the ones on the table) are shown as an outline on the table. Server and client agree on it. */
+export const PREVIEW_COUNT = 2;
 export let HOVER_Z = 4.5;
 export let SLOT_GAP = 17;
 export let MAX_HOLD_X = 120;
