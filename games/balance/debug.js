@@ -14,11 +14,12 @@
 //   Shape studio  every shape side by side at one scale next to the bowl, corner editing, and a 3D preview as it looks in the game
 //   Level studio  a blueprint of the level next to the running game, with a live test lab (spawn / grab blocks, freeze gravity, capture)
 //
-// How edits travel: you change a DRAFT copy of the definitions. When it is valid it is sent to the server (after a short pause),
-// the server applies it and sends it back to every player, and each client redraws. So the server and every client always see
-// the same definitions at the same moment. Changes that touch the physics (shapes, bowls, materials, tuning, levels) apply to the
-// level that is running when it restarts (or switch on "auto-restart").
-// Your draft is also kept in this browser (localStorage) so a reload does not lose it: "Discard saved edits" on the Export tab clears it.
+// How edits travel: you change a DRAFT copy of the definitions. NOTHING is synchronised while you edit: the draft stays in this browser
+// (and is backed up in localStorage, so a reload does not lose it: "Discard saved edits" on the Export tab clears it).
+// "Apply to game" (header) sends the draft to the server, which applies it and shows it to every player. Play / Restart and the level
+// lab apply it too (they need the server to know it). "Auto-apply" in the header brings back the old behaviour: every valid edit is sent
+// after a short pause. Somebody else's applied changes never overwrite your draft: you get a notice and can take their version.
+// Changes that touch the physics (shapes, bowls, materials, tuning, levels) take effect when the level restarts (or switch on "auto-restart").
 
 import * as S from './shared.js';
 import { createStudio } from './studio.js';
@@ -54,7 +55,7 @@ export function createDebugMenu(view) {
   let draft = S.cloneDefinitions();
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
-    needsRestart: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, sentRev: 0,
+    needsRestart: false, dirty: false, autoApply: false, remoteChanged: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, sentRev: 0,
     fxShadows: true, fxReflection: true, fxBlur: true,
   };
   let timer = 0;
@@ -77,8 +78,12 @@ export function createDebugMenu(view) {
   /** Something in the draft changed. `kind` is the table. */
   function touch(kind) {
     if (PHYSICS.has(kind)) state.needsRestart = true;
+    state.dirty = true;
     clearTimeout(timer);
-    if (validate()) timer = setTimeout(send, 300);
+    timer = 0;
+    if (validate() && state.autoApply) timer = setTimeout(send, 300); // (only with Auto-apply: otherwise nothing leaves this browser until you apply)
+    scheduleBackup();
+    renderStatus();
     if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
     studio.changed(kind); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
   }
@@ -98,21 +103,31 @@ export function createDebugMenu(view) {
     timer = 0;
     if (!validate()) return;
     sendDefs(draft);
+    state.dirty = false;
     state.sentAt = performance.now();
     state.sentRev = view.defsRev;
+    backup();
+    if (state.autoRestart && !studio.current && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.ctx.sendInput({ restart: true });
+    renderStatus();
+  }
+
+  /** Local backup of the draft (so a reload does not lose it). Nothing leaves the browser. */
+  let backupTimer = 0;
+  function backup() {
+    clearTimeout(backupTimer);
+    backupTimer = 0;
     try {
       if (!state.pending) { // (while an old backup waits for your decision it is not overwritten)
         localStorage.setItem(STORE, JSON.stringify(draft));
         state.restored = true;
       }
     } catch { /* private mode */ }
-    if (state.autoRestart && !studio.current && state.needsRestart && view.snap && view.snap.ph !== S.PHASE.MENU) view.ctx.sendInput({ restart: true });
-    renderStatus();
   }
+  const scheduleBackup = () => { clearTimeout(backupTimer); backupTimer = setTimeout(backup, 500); };
 
-  /** Send anything that is waiting, so a following command (play, restart) is handled with the new definitions. */
+  /** Called before a command that needs the server to know the draft (play, restart, the level lab): sends it when it has unsent changes. */
   function flush() {
-    if (timer) send();
+    if (state.dirty && !state.problems.length) send();
   }
 
   // ── small widgets ────────────────────────────────────────────────────────────────────────────────────────
@@ -797,15 +812,19 @@ export function createDebugMenu(view) {
     i.addEventListener('change', () => { state[key] = i.checked; apply?.(i.checked); });
     return h('label', { class: 'bb-dbg-chk' }, i, label);
   };
+  const applyBtn = btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go');
+  applyBtn.title = 'Send your edits to the server: the game (for everybody in the room) then uses them. Nothing is sent before you do this.';
   const header = h('div', { class: 'bb-dbg-head' },
     h('strong', {}, 'Debug'),
     helper('Free camera', 'freeCam', (on) => view.debugFreeCam(on)),
     helper('Show drop zone', 'showDrop', (on) => view.debugShowDrop(on)),
     helper('Auto-restart', 'autoRestart'),
+    helper('Auto-apply', 'autoApply', (on) => { if (on) flush(); }),
     helper('Shadows', 'fxShadows', (on) => view.debugFx('shadows', on)),
     helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
     helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
     h('span', { class: 'bb-dbg-grow' }),
+    applyBtn,
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
     btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
@@ -824,6 +843,7 @@ export function createDebugMenu(view) {
     draft: () => draft,
     touch,
     flush,
+    autoApply: () => state.autoApply,
     problems: () => state.problems,
     showProblems(el) {
       const n = state.problems.length;
@@ -839,12 +859,10 @@ export function createDebugMenu(view) {
 
   function openStudio(name) {
     setOpen(false);
-    flush();
     root.classList.add('bb-st-open');
     studio.open(name);
   }
   function closeStudio() {
-    flush();
     studio.close();
     root.classList.remove('bb-st-open');
     setOpen(true); // back to the debug menu
@@ -877,11 +895,26 @@ export function createDebugMenu(view) {
           renderStatus();
         }, 'bb-dbg-danger')));
     }
+    if (state.dirty && !state.problems.length) {
+      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Your edits are only in this editor (nothing is synchronised). ', btn('Apply to game', () => { flush(); renderStatus(); }, 'bb-dbg-go')));
+    }
+    if (state.remoteChanged) {
+      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Somebody else applied changes to the game. Your draft was not touched. ',
+        btn('Take their version (discard my draft)', () => {
+          draft = S.cloneDefinitions();
+          state.remoteChanged = false;
+          state.dirty = false;
+          validate();
+          backup();
+          render();
+          studio.refresh();
+        }), btn('Keep mine', () => { state.remoteChanged = false; renderStatus(); })));
+    }
     if (state.serverError) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, 'The server refused your last change: '), state.serverError));
     if (state.unconfirmed) kids.push(h('div', { class: 'bb-dbg-warn' }, 'The server has not confirmed your last change. Is it running? After replacing server.js or shared.js the game server has to be restarted.'));
     for (const m of state.viewProblems) kids.push(h('div', { class: 'bb-dbg-err' }, m));
     if (state.problems.length) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, `${state.problems.length} problem${state.problems.length > 1 ? 's' : ''}, nothing is sent until fixed:`), '\n', state.problems.slice(0, 6).join('\n')));
-    if (state.needsRestart && !state.problems.length) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Physics changes apply when the level restarts. ', btn('Restart now', () => { flush(); view.ctx.sendInput({ restart: true }); })));
+    if (state.needsRestart && !state.dirty && !state.problems.length) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Physics changes apply when the level restarts. ', btn('Restart now', () => { flush(); view.ctx.sendInput({ restart: true }); })));
     statusEl.replaceChildren(...kids);
   }
 
@@ -945,18 +978,17 @@ export function createDebugMenu(view) {
 
   return {
     el: root,
-    /** Somebody else changed the definitions: their version is now the draft. */
-    onRemoteChange() {
-      draft = S.cloneDefinitions();
-      validate();
-      render();
-      studio.refresh();
+    /** Somebody else applied changes to the game. */
+    onRemoteChange() { // (the game now uses their version, but your draft is yours: nothing is overwritten)
+      state.remoteChanged = true;
+      renderStatus();
     },
     dispose() {
       window.removeEventListener('keydown', onKey);
       studio.dispose();
       modelPrev?.dispose();
       clearTimeout(timer);
+      clearTimeout(backupTimer);
       view.onRun = null;
       view.onProblem = null;
       view.onDefsError = null;

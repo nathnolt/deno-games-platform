@@ -672,7 +672,7 @@ function shapeStudio(view, api) {
   function edited(live = false) {
     const cur = D().shapes[st.sel];
     if (cur) st.part = Math.max(0, Math.min(st.part, cur.length - 1));
-    api.touch('shapes'); // validates + sends after a short pause, and calls changed() below
+    api.touch('shapes'); // validates (nothing is sent: see "Apply to game") and calls changed() below
     scheduleDraw();
     if (!live) renderInspector();
     else renderInfo();
@@ -1358,7 +1358,7 @@ function levelStudio(view, api) {
             (() => { const c = h('input', { type: 'checkbox', checked: st.rules }); c.addEventListener('change', () => { st.rules = c.checked; lab({ rules: st.rules }); }); return c; })(), 'fail enabled'),
           btn('⤓ Capture as start layout', capture, 'bb-dbg-go'),
         ]
-        : [btn('Fit', () => board.fit(bounds()))],
+        : [btn('Apply to test', () => applyNow(), 'bb-dbg-go'), btn('Fit', () => board.fit(bounds()))],
       h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
       h('div', { class: 'bb-st-hint' }, st.mode === 'live'
         ? 'Drag a shape from the palette into the bowl (or click it to drop it at the top). Drag any block to move it, Q / E or the wheel turn what you hold, Esc deletes it. Freeze gravity to place things precisely, then switch it on.'
@@ -1602,7 +1602,7 @@ function levelStudio(view, api) {
       api.showProblems(probEl);
       if (kind === 'levels' || kind === 'all') {
         st.lvl = Math.min(st.lvl, Math.max(0, D().levels.length - 1));
-        if (st.mode === 'layout') scheduleApply();
+        if (api.autoApply()) { if (st.mode === 'layout') scheduleApply(); } else if (!st.msg) { st.msg = 'Not applied to the test yet (nothing is synchronised): press Apply.'; renderBar(); }
         scheduleDraw();
       } else if (kind === 'shapes' || kind === 'materials' || kind === 'bowls' || kind === 'tuning') {
         renderPalette();
@@ -1712,6 +1712,7 @@ function backgroundStudio(view, api) {
         h('span', { class: 'bb-st-mini' }, 'background'),
         sel(Object.keys(d.backgrounds), bgKey(), (v) => { L().background = v; st.sel = -1; openRows.clear(); api.touch('levels'); renderAll(); }, 'bb-dbg-grow')),
       h('div', { class: 'bb-st-row' },
+        btn('Apply to game', () => applyLevel(), 'bb-dbg-go'),
         btn('⌖ Camera to game view', () => view.debugCameraHome(), 'bb-dbg-go'),
         h('span', { class: 'bb-st-mini' }, 'snap'),
         sel(SNAPS, String(st.snap), (v) => { st.snap = +v; }),
@@ -2046,7 +2047,7 @@ function backgroundStudio(view, api) {
 
 /**
  * @param view  the BalanceView
- * @param api   { draft(): the current draft, touch(kind), flush(), problems(): string[], w: the widget builders of the debug menu,
+ * @param api   { draft(): the current draft, touch(kind), flush(), autoApply(): is Auto-apply on, problems(): string[], w: the widget builders of the debug menu,
  *                statusEl, open(name), close() }
  */
 export function createStudio(view, api) {

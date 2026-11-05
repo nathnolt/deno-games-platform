@@ -13,7 +13,7 @@ export { backgrounds, bowls, levels, materials, models, shapes, tuning, worlds }
  * Debug menu switch. true = the in-game debug menu is available (the ` key or the button at the bottom left) and the server
  * accepts definition changes from the players. Leave it false for a real game: anybody in the room could change the rules.
  */
-export const DEBUG = false;
+export const DEBUG = true;
 
 /** @type {import('../../shared/settings.js').GameMeta} */
 export const meta = {

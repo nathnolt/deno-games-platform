@@ -71,12 +71,14 @@ export const shapes = {
     { type: 'circle', diameter: 3, x: 3.621, y: 3.1815 },
     { type: 'circle', diameter: 3, x: 1.5, y: 3.1815 },
   ],
-  L: [{ type: 'poly', points: '0,7 2,7 2,2 4,2 4,0 0,0' }],
-  S: [{ type: 'poly', points: '0,4 0,2 4,2 4,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
+  L:  [{ type: 'poly', points: '0,0 0,7 2,7 2,0' }, { type: 'poly', points: '0,2 4,2 4,0 0,0' }],
+  L2: [{ type: 'poly', points: '4,0 4,7 2,7 2,0' }, { type: 'poly', points: '4,2 0,2 0,0 4,0' }],
+  S:  [{ type: 'poly', points: '0,4 0,2 4,2 4,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
   S2: [{ type: 'poly', points: '4,4 4,2 8,2 8,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
-  T: [{ type: 'poly', points: '0,0 0,2 6,2 6,0 0,0' }, { type: 'poly', points: '2,0 2,4 4,4 4,0' }],
-  triangle: [{ type: 'poly', points: '0,0 6,6 6,0' },
+  T:  [{ type: 'poly', points: '0,0 0,2 6,2 6,0 0,0' }, { type: 'poly', points: '2,0 2,4 4,4 4,0' }],
+  triangle: [{ type: 'poly', points: '0,0 6,6 6,0' }],
   plus: [{ type: 'poly', points: '3,0 3,6 5,6 5,0' }, { type: 'poly', points: '1,4 7,4 7,2 1,2' }],
+  arrow: [{ type: 'poly', points: '-4,1 1,1 1,-1 -4,-1' }, { type: 'poly', points: '0,2.828 2.828,0 0,-2.828' }],
 };
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────
