@@ -380,22 +380,24 @@ export function createDebugMenu(view) {
           L.push({ name: `Level ${L.length + 1}`, difficulty: 'easy', world: lv.world ?? keys('worlds')[0], bowl: keys('bowls')[0], background: keys('backgrounds')[0], initialBlocks: [], chooseShapes: 3, shapes: [{ shape: shapeOpts[0], material: matOpts[0] }] });
           state.sel.level = L.length - 1;
           touch('levels');
+          flush(); // a new level is written to levels.js at once
           render();
         }),
-        btn('Copy', () => { L.splice(idx + 1, 0, { ...clone(lv), name: `${lv.name} copy` }); state.sel.level = idx + 1; touch('levels'); render(); }),
+        btn('Copy', () => { L.splice(idx + 1, 0, { ...clone(lv), name: `${lv.name} copy` }); state.sel.level = idx + 1; touch('levels'); flush(); render(); }),
         btn('Delete', () => {
           if (L.length <= 1) return window.alert('There must be at least one level.');
           if (!window.confirm(`Delete level "${lv.name}"?`)) return;
           L.splice(idx, 1);
           touch('levels');
+          flush();
           render();
         }, 'bb-dbg-danger')),
       h('div', { class: 'bb-dbg-row' }, btn('↑ Earlier', () => move(-1)), btn('↓ Later', () => move(1)),
-        btn('▶ Play this level', () => { flush(); view.ctx.sendInput({ start: idx }); }, 'bb-dbg-go')),
+        btn('▶ Play this level', () => { flush(); view.ctx.sendInput({ start: idx }); setOpen(false); }, 'bb-dbg-go')),
       section('Level',
         text('name', lv, 'name', 'levels'),
         select('difficulty', ['easy', 'medium', 'hard'], lv, 'difficulty', 'levels'),
-        select('world', keys('worlds'), lv, 'world', 'levels'),
+        select('world', worldOptions(), lv, 'world', 'levels'),
         select('bowl', keys('bowls'), lv, 'bowl', 'levels'),
         select('background', keys('backgrounds'), lv, 'background', 'levels'),
         num('time of day override (hour, empty = the background\'s)', lv, 'time', 'levels', { optional: true, min: 0, max: 24, step: 0.25 }),
@@ -412,6 +414,9 @@ export function createDebugMenu(view) {
     ];
     return out;
   }
+
+  /** The worlds for a level's world field ('' = the first world). */
+  const worldOptions = () => [['', `(first world: ${draft.worlds[keys('worlds')[0]]?.name ?? ''})`], ...keys('worlds').map((k) => [k, `${draft.worlds[k].name} (${k})`])];
 
   /** The checkbox + fields of an optional rectangle (zone / drop) of a level. */
   function customRect(lv, key, fields, label) {
@@ -764,6 +769,8 @@ export function createDebugMenu(view) {
       state.problems.length ? err('The definitions have problems (see the red box). They are exported anyway.') : null,
       section('Whole file', note('Replace games/balance/definitions.js with this. (Comments in the file are not kept.)'),
         h('div', { class: 'bb-dbg-row' }, save('Download definitions.js', 'definitions.js', () => S.serializeDefinitions(draft)), copy('Copy', () => S.serializeDefinitions(draft)))),
+      section('Levels file', note('The levels are a file of their own: games/balance/levels.js. With the right permission in deno.json the server writes it for you when you press "Apply to game" (see the note at the top of levels.js); this is the manual way.'),
+        h('div', { class: 'bb-dbg-row' }, save('Download levels.js', 'levels.js', () => S.serializeLevels(draft.levels)), copy('Copy', () => S.serializeLevels(draft.levels)))),
       section('One table at a time', note('Paste into definitions.js over the same `export const ...`.'),
         ...S.DEFINITION_TABLES.map((t) => h('div', { class: 'bb-dbg-row' }, h('span', { class: 'bb-dbg-grow' }, t),
           copy('Copy', () => S.serializeTable(t, draft[t])), save('Download', `${t}.js`, () => S.serializeTable(t, draft[t]))))),
@@ -854,6 +861,13 @@ export function createDebugMenu(view) {
     w: { field, section, num, text, check, select, color, slider, btn, note },
     open: (name) => openStudio(name),
     close: () => closeStudio(),
+    /** Playtest: apply the draft, leave the studio and the menu, and start the level as an ordinary game. */
+    playtest(i) {
+      flush();
+      closeStudio();
+      setOpen(false);
+      view.ctx.sendInput({ lab: { play: i } });
+    },
   });
   const root = h('div', { class: 'bb-dbg' }, toggle, panel, studio.el);
 
@@ -910,6 +924,8 @@ export function createDebugMenu(view) {
           studio.refresh();
         }), btn('Keep mine', () => { state.remoteChanged = false; renderStatus(); })));
     }
+    if (state.levelsError) kids.push(h('div', { class: 'bb-dbg-err' }, state.levelsError));
+    else if (state.levelsSavedAt && performance.now() - state.levelsSavedAt < 4000) kids.push(h('div', { class: 'bb-dbg-note' }, '✓ levels.js was saved by the server.'));
     if (state.serverError) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, 'The server refused your last change: '), state.serverError));
     if (state.unconfirmed) kids.push(h('div', { class: 'bb-dbg-warn' }, 'The server has not confirmed your last change. Is it running? After replacing server.js or shared.js the game server has to be restarted.'));
     for (const m of state.viewProblems) kids.push(h('div', { class: 'bb-dbg-err' }, m));
@@ -956,6 +972,12 @@ export function createDebugMenu(view) {
     if (!state.viewProblems.includes(msg)) state.viewProblems.push(msg);
     renderStatus();
   };
+  view.onLevelsSaved = ({ error }) => { // the server rewrote levels.js (or could not)
+    state.levelsError = error;
+    state.levelsSavedAt = error ? 0 : performance.now();
+    renderStatus();
+    if (!error) setTimeout(renderStatus, 4200);
+  };
   view.onDefsError = (msg) => {
     state.serverError = msg;
     renderStatus();
@@ -992,6 +1014,7 @@ export function createDebugMenu(view) {
       view.onRun = null;
       view.onProblem = null;
       view.onDefsError = null;
+      view.onLevelsSaved = null;
       clearInterval(watchdog);
       view.debugFreeCam(false);
       view.debugShowDrop(false);

@@ -888,7 +888,34 @@ export function serializeTable(name, value) {
   return `export const ${name} = ${toSource(value)};\n`;
 }
 
-/** The whole definitions.js file for the given definitions. */
+/** The header comment of levels.js (what a level is made of). */
+const LEVELS_HEAD = [
+  '// Runs on BOTH server and browser. Pure data: the LEVELS of Balance. definitions.js re-exports them, so nothing else changes.',
+  '//',
+  '// With `DEBUG = true` the debug menu / level studio edit this file for you: when a level is made, copied, deleted or changed and you',
+  '// press "Apply to game", the game server rewrites THIS file (comments are not kept). That needs write permission for the file:',
+  '//   deno.json:  --allow-write=games/balance/levels.js     (on the "start" and "dev" tasks)',
+  '// (`deno task dev` watches the files and restarts the server after every save: use `deno task start` while you edit levels.)',
+  '//',
+  '// name, difficulty     shown in the menu (easy | medium | hard)',
+  '// world                key of `worlds` (definitions.js): the world this level is part of (the first world when left out)',
+  '// bowl, background     keys of `bowls` / `backgrounds` (the first one of each when left out)',
+  '// time                 optional hour of the day (0-24): overrides the background',
+  '// initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)',
+  "//                      'static' material = fixed to the world. Anything else is a normal physics body.",
+  '// chooseShapes         how many blocks lie on the table at once = how many can be held at the same time (4 = all four players)',
+  '// shapes               the ordered list of blocks you must place: { shape, material }. Rotate with Q / E while holding.',
+  '// zone (optional)      { x0, x1 }: sideways limits (default tuning.zone). Leaving it, or touching the water/bowl, loses the level.',
+  '// drop (optional)      { x0, x1, y0, y1 }: the drop zone rectangle (default tuning.drop)',
+  '',
+].join('\n');
+
+/** The whole levels.js file for a list of levels. */
+export function serializeLevels(list) {
+  return `${LEVELS_HEAD}\n${serializeTable('levels', list)}`;
+}
+
+/** The whole definitions.js file for the given definitions (the levels are written to levels.js, see serializeLevels). */
 export function serializeDefinitions(defs) {
   const head = [
     '// Runs on BOTH server and browser. Pure data, no code: everything that defines the CONTENT of Balance lives in this file.',
@@ -901,10 +928,11 @@ export function serializeDefinitions(defs) {
     '//   models        .obj files in ./models and the shader of each part',
     '//   backgrounds   the scenery around the table',
     '//   worlds        the groups the levels are shown in (a level names its world)',
-    '//   levels        what to build, in which bowl, in front of which background',
+    '//   levels        (in their own file, levels.js)',
     '',
   ];
-  return `${head.join('\n')}\n${TABLES.map((n) => serializeTable(n, defs[n])).join('\n')}`;
+  const tables = TABLES.filter((n) => n !== 'levels').map((n) => serializeTable(n, defs[n])).join('\n');
+  return `${head.join('\n')}\n${tables}\n// ── Levels: in ./levels.js (the debug menu rewrites that file when you make or change levels) ──\nexport { levels } from './levels.js';\n`;
 }
 
 syncDefinitions();

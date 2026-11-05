@@ -120,6 +120,18 @@ export const bowls = {
     shader: 'ceramic',
     water: { color: '#6cc3d5', opacity: 0.45, reflect: 0.6 },
   },
+  canoe: {
+    a: 40,
+    b: 7,
+    t: 0.8,
+    rimY: 3.3,
+    r: 3.9,
+    zscale: 0.11,
+    square: 2,
+    squareBottom: 2,
+    shader: 'wood2',
+    water: { color: '#647b8e', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
+  },
 };
 
 
@@ -222,38 +234,5 @@ export const worlds = {
 };
 
 // ── Levels ───────────────────────────────────────────────────────────────────────────────────────────────────
-// name, difficulty     shown in the menu (easy | medium | hard)
-// world                key of `worlds`: the world this level is part of
-// bowl, background     keys of `bowls` / `backgrounds` (the first one of each when left out)
-// initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)
-//                      'static' material = fixed to the world. Anything else is a normal physics body.
-// chooseShapes         how many blocks lie on the table at once = how many can be held at the same time (4 = all four players)
-// shapes               the ordered list of blocks you must place: { shape, material }. Rotate with Q / E while holding.
-// zone (optional)      { x0, x1 }: sideways limits (default tuning.zone). Leaving it, or touching the water/bowl, loses the level.
-// drop (optional)      { x0, x1, y0, y1 }: the drop zone rectangle (default tuning.drop)
-//
-export const levels = [
-  {
-    name: 'Level 1',
-    world: 'world1',
-    difficulty: 'easy',
-    bowl: 'bowl1',
-    background: 'zen1',
-    // two columns of two static squares: their tops are at y = 1.6, just above the water
-    initialBlocks: [
-      { shape: 'square1', material: 'static', rot: 0, x: -5, y: -4.4 },
-      { shape: 'square1', material: 'static', rot: 0, x: -5, y: -0.4 },
-      { shape: 'square1', material: 'static', rot: 0, x: 5, y: -4.4 },
-      { shape: 'square1', material: 'static', rot: 0, x: 5, y: -0.4 },
-    ],
-    chooseShapes: 3,
-    shapes: [
-      { shape: 'square1', material: 'wood' },
-      { shape: 'square1', material: 'glass' },
-      { shape: 'square1', material: 'wood' },
-      { shape: 'square1', material: 'wood' },
-      { shape: 'square1', material: 'stone' },
-      { shape: 'square1', material: 'wood' },
-    ],
-  },
-];
+// The levels live in their own file: ./levels.js (the debug menu rewrites it when you make or change levels).
+export { levels } from './levels.js';

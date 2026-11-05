@@ -1336,6 +1336,7 @@ function levelStudio(view, api) {
       h('strong', {}, 'Level studio'),
       sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; fitSoon(); applyNow(); renderAll(); }, 'bb-dbg-grow'),
       btn('New', newLevel), btn('Copy', copyLevel),
+      btn('▶ Playtest', () => api.playtest(st.lvl), 'bb-dbg-go'),
       btn('Export ⧉', (e) => copyText(`${S.toSource(d.levels[st.lvl])},\n`, e.currentTarget), '', 'Copy this level as a source entry for the levels list in definitions.js'),
       btn('Export ⤓', () => saveText(JSON.stringify(d.levels[st.lvl], null, 1), `level-${st.lvl + 1}.json`, 'application/json'), '', 'Download this level as JSON'),
       btn(st.armDelete ? 'Really?' : 'Delete', deleteLevel, 'bb-dbg-danger'),
@@ -1394,6 +1395,7 @@ function levelStudio(view, api) {
     const dropOn = !!l.drop;
     out.push(w.section('Level',
       w.text('name', l, 'name', 'levels'),
+      w.select('world', [['', `(first world: ${d.worlds[Object.keys(d.worlds)[0]]?.name ?? ''})`], ...Object.keys(d.worlds).map((k) => [k, `${d.worlds[k].name} (${k})`])], l, 'world', 'levels'),
       w.select('difficulty', ['easy', 'medium', 'hard'], l, 'difficulty', 'levels'),
       w.select('bowl', Object.keys(d.bowls), l, 'bowl', 'levels', renderAll),
       w.select('background', Object.keys(d.backgrounds), l, 'background', 'levels'),
@@ -1457,7 +1459,7 @@ function levelStudio(view, api) {
   function newLevel() {
     const d = D();
     const shape = Object.keys(d.shapes)[0];
-    d.levels.push({ name: 'New level', difficulty: 'easy', bowl: Object.keys(d.bowls)[0], background: Object.keys(d.backgrounds)[0], initialBlocks: [], chooseShapes: 3, shapes: [{ shape, material: Object.keys(d.materials).find((m) => !d.materials[m].static) ?? 'wood' }] });
+    d.levels.push({ name: 'New level', difficulty: 'easy', ...(L()?.world ? { world: L().world } : {}), bowl: Object.keys(d.bowls)[0], background: Object.keys(d.backgrounds)[0], initialBlocks: [], chooseShapes: 3, shapes: [{ shape, material: Object.keys(d.materials).find((m) => !d.materials[m].static) ?? 'wood' }] });
     st.lvl = d.levels.length - 1;
     afterLevelChange();
   }
@@ -2047,7 +2049,7 @@ function backgroundStudio(view, api) {
 
 /**
  * @param view  the BalanceView
- * @param api   { draft(): the current draft, touch(kind), flush(), autoApply(): is Auto-apply on, problems(): string[], w: the widget builders of the debug menu,
+ * @param api   { draft(): the current draft, touch(kind), flush(), autoApply(): is Auto-apply on, playtest(levelIndex): apply + leave + start it, problems(): string[], w: the widget builders of the debug menu,
  *                statusEl, open(name), close() }
  */
 export function createStudio(view, api) {

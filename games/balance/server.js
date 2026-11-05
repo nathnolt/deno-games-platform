@@ -6,7 +6,7 @@
 import * as planck from 'npm:planck@1';
 import {
   applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, inDrop, levels, LOSE,
-  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, meta, MIN_HOLD_Y, PHASE, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
+  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, meta, MIN_HOLD_Y, PHASE, serializeLevels, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 const { Vec2 } = planck;
@@ -86,6 +86,9 @@ class BalanceGame {
     this.defsFrom = null; //      debug: who made the last change
     this.defsError = ''; //       debug: why the last change was refused ('' = it was not)
     this.defsBurst = 0; //        debug: > 0 while the definitions are attached to the snapshots
+    this.levelsText = DEBUG ? serializeLevels(levels) : ''; // debug: the levels as last written to levels.js (compared as data, so an unchanged level list never rewrites the file)
+    this.levelsSaveError = ''; // debug: why levels.js could not be written ('' = fine)
+    this.levelsSaves = 0; //      debug: how many times levels.js was written
     this.lab = { on: false, paused: false, rules: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
     this.labId = LAB_ID_START;
     for (const p of ctx.players) this.onJoin(p);
@@ -150,7 +153,7 @@ class BalanceGame {
       total: this.total,
       why: this.why,
       still: round2(clamp(this.settle / (tuning.countdown ?? 3), 0, 1)), // progress of the countdown after the last block (0 = not running)
-      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, dfrom: this.defsFrom, derr: this.defsError, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
+      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, dfrom: this.defsFrom, derr: this.defsError, lsave: this.levelsSaveError, lsaves: this.levelsSaves, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
   }
 
@@ -219,9 +222,29 @@ class BalanceGame {
     this.defsFrom = id;
     this.defsBurst = DEFS_BURST;
     if (this.world) this.world.setGravity(new Vec2(0, -GRAVITY));
+    this.#saveLevels(); // the levels are a file of their own (levels.js): a new or changed level is written to it
     // blocks are sent as indexes into the shape / material lists, and a level may have been deleted: start over when that changed
     if (this.levelIdx >= levels.length) this.#toMenu();
     else if (this.levelIdx >= 0 && keys() !== before) this.#startLevel(this.levelIdx);
+  }
+
+  /** Debug: write the levels to levels.js (only when they changed). Needs `--allow-write=games/balance/levels.js` in deno.json; without it the error is shown in the debug menu. */
+  async #saveLevels() {
+    if (typeof Deno === 'undefined' || typeof Deno.writeTextFile !== 'function') return;
+    const text = serializeLevels(levels);
+    if (text === this.levelsText) return;
+    try {
+      await Deno.writeTextFile(new URL('./levels.js', import.meta.url), text);
+      this.levelsText = text;
+      this.levelsSaveError = '';
+      this.levelsSaves++;
+    } catch (e) {
+      const denied = /permission|capable|--allow-write|requires write/i.test(`${e?.name} ${e?.message}`);
+      this.levelsSaveError = denied
+        ? 'levels.js could not be written: Deno has no write permission. Add --allow-write=games/balance/levels.js to the "start" (and "dev") task in deno.json, then restart the server.'
+        : `levels.js could not be written: ${e?.message ?? e}`;
+      console.warn(`balance: ${this.levelsSaveError}`);
+    }
   }
 
   /**
