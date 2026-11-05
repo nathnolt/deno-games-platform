@@ -100,8 +100,8 @@ export class BalanceGame {
     this.world = null;
     this.recs = new Map(); //     blockId -> block record (everything drawn in the play area: statics, floats, placed, held)
     this.recOf = new Map(); //    planck Body -> record (blocks and the bowl)
-    this.table = []; //           blocks lying on the table: a fixed row of slots, each an item or null
-    this.queue = []; //           blocks that have not appeared on the table yet, in order
+    this.table = []; //           the row of places on the table: each an item (a block that waits), or null (empty, or the outline of a block that is still to come)
+    this.queue = []; //           blocks that have not appeared on the table yet, in order; the first PREVIEW_COUNT of them show as an outline on a place of the row (item.slot)
     this.floaters = [];
     this.total = 0;
     this.settle = 0;
@@ -176,7 +176,7 @@ export class BalanceGame {
     this.table.forEach((item, i) => {
       if (item) tbl.push([item.id, SHAPE_KEYS.indexOf(item.shape), MATERIAL_KEYS.indexOf(item.material), i, item.heldBy ? (this.players.get(item.heldBy)?.slot ?? -1) : -1]);
     });
-    const nx = this.queue.slice(0, PREVIEW_COUNT).map((item) => [item.id, SHAPE_KEYS.indexOf(item.shape)]); // the next blocks to appear on the table: their id and SHAPE only (not the material)
+    const nx = this.queue.slice(0, PREVIEW_COUNT).map((item) => [item.id, SHAPE_KEYS.indexOf(item.shape), item.slot]); // the next blocks to appear: id, SHAPE (not the material) and the place of the row where they show as an outline
     return {
       run: this.run,
       ph: this.phase,
@@ -463,8 +463,13 @@ export class BalanceGame {
     p.held = null;
     this.#makeBlock(item, pos.x, pos.y, angle, false); // same id, now a normal falling body
     if (!item.lab) { // (blocks made in the level lab were never on the table)
-      this.table[item.slot] = this.queue.shift() ?? null; // only now does a new block appear in the empty slot
-      if (this.table[item.slot]) this.table[item.slot].slot = item.slot;
+      // Nothing on the table moves. The next block appears where its OUTLINE was (the outline turns into the block), the place that was just
+      // freed stays empty, unless there is another block to come into view: it gets its outline there.
+      const free = item.slot;
+      this.table[free] = null;
+      const next = this.queue.shift() ?? null;
+      if (next) this.table[next.slot] = next;
+      for (const q of this.queue.slice(0, PREVIEW_COUNT)) if (q.slot < 0) q.slot = free;
     }
     this.settle = 0;
   }
@@ -501,13 +506,14 @@ export class BalanceGame {
     const items = level.shapes.map((s) => ({ id: nextId++, shape: s.shape, material: s.material, heldBy: null, slot: -1 }));
     this.total = items.length;
     const n = Math.max(1, Math.min(level.chooseShapes, items.length));
-    this.table = Array.from({ length: n }, (_, k) => {
-      const item = items[k] ?? null;
+    this.rowSize = n + Math.min(PREVIEW_COUNT, items.length - n); // places of the row: the waiting blocks, then the outlines of the next ones (centred on all of it, fixed for the level)
+    this.table = Array.from({ length: this.rowSize }, (_, k) => {
+      const item = k < n ? items[k] : null;
       if (item) item.slot = k;
       return item;
     });
     this.queue = items.slice(n);
-    this.rowSize = n + Math.min(PREVIEW_COUNT, items.length - n); // (the row is centred on all of it, and stays like that while blocks are used up)
+    this.queue.forEach((item, k) => { item.slot = k < this.rowSize - n ? n + k : -1; }); // the next ones show as an outline on the places after the blocks
     for (const p of this.players.values()) p.held = null;
   }
 

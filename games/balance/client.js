@@ -473,7 +473,7 @@ class BalanceView {
       let v = this.tableViews.get(id);
       if (!v) {
         const ghost = this.ghosts.find((g) => g.id === id);
-        if (ghost && !this.poseMem.has(id)) { // this block was an outline: it comes out of it, and slides from there to its place
+        if (ghost && !this.poseMem.has(id)) { // this block was an outline: it comes out of it, right there (its outline was on its place)
           this.poseMem.set(id, { x: ghost.group.position.x, y: this.groundY + DEPTH / 2, z: FRONT_Z, s: 1, a: 0, tl: 0 });
         }
         v = this.#makeView(this.tableViews, id, si, mi, { table: true, slot, n: s.w ?? s.n });
@@ -1675,10 +1675,10 @@ void main() {
   /**
    * The blocks that have not appeared on the table yet: the next PREVIEW_COUNT of them are drawn as a chalk outline (the 'outline' shader) on the table,
    * in the places after the waiting blocks. Only the SHAPE is known (the server does not tell the material). The places never move:
-   *  - when a block is used, the outline of the block that takes its place (the first of them) fades away while the real block dissolves in out of it
-   *    and slides to its place (see #applySnapshot), and the place the outline had is free for the next outline (which fades in, a moment later);
-   *  - the outlines that stay where they are do not move at all.
-   * `s.nx` = [[id, shape], ...] in the order they will come, `s.w` = places in the row, `s.n` = of which for blocks.
+   *  - when a block is used, the next block appears where ITS outline is: the outline fades away while the real block dissolves in out of it (see
+   *    #applySnapshot). The place that was just freed stays empty, or gets the outline of the block that now comes into view (it fades in);
+   *  - nothing that is on the table moves at all.
+   * `s.nx` = [[id, shape, place], ...] in the order they will come (each on its own place of the row), `s.w` = places in the row.
    */
   #syncGhosts(s) {
     const first = this.ghostFirst;
@@ -1693,12 +1693,8 @@ void main() {
         g.t = 0;
       }
     }
-    for (const [id, si] of want) {
-      if (this.ghosts.some((g) => g.id === id)) continue;
-      const busy = new Set(this.ghosts.filter((g) => !g.out).map((g) => g.spot));
-      let spot = -1;
-      for (let i = s.n; i < w; i++) if (!busy.has(i)) { spot = i; break; }
-      if (spot < 0) continue; // (no place left: cannot happen with the server's numbers)
+    for (const [id, si, spot] of want) {
+      if (this.ghosts.some((g) => g.id === id) || !(spot >= 0)) continue;
       const shapeKey = SHAPE_KEYS[si];
       const shape = getShape(shapeKey);
       const mat = this.#blockMaterial('outline', (id * 0.37 + 0.1) % 1, THREE.DoubleSide);
