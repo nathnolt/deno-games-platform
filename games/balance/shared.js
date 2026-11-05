@@ -13,7 +13,7 @@ export { backgrounds, bowls, levels, materials, models, shapes, tuning, worlds }
  * Debug menu switch. true = the in-game debug menu is available (the ` key or the button at the bottom left) and the server
  * accepts definition changes from the players. Leave it false for a real game: anybody in the room could change the rules.
  */
-export const DEBUG = true;
+export const DEBUG = false;
 
 /** @type {import('../../shared/settings.js').GameMeta} */
 export const meta = {
@@ -102,7 +102,7 @@ export function buildShape(def, key = '?') {
     if (p.type === 'circle') {
       const r = p.diameter / 2;
       if (!(r > 0)) throw new Error(`bad diameter in shape "${key}"`);
-      return { type: 'circle', cx: p.x ?? r, cy: p.y ?? r, r };
+      return { type: 'circle', cx: p.x ?? r, cy: p.y ?? r, r, cut: !!p.cut };
     }
     let pts = String(p.points ?? '').trim().split(/\s+/).map((pair) => pair.split(',').map(Number));
     if (pts.length < 3 || pts.some((q) => q.length !== 2 || q.some((n) => !Number.isFinite(n)))) throw new Error(`bad points in shape "${key}"`);
@@ -113,11 +113,32 @@ export function buildShape(def, key = '?') {
       area += x1 * y2 - x2 * y1;
     }
     if (area < 0) pts = pts.reverse(); // counter-clockwise
-    return { type: 'poly', pts, visual: !!p.visual };
+    return { type: 'poly', pts, visual: !!p.visual, cut: !!p.cut };
   });
-  const raw = all.filter((p) => !p.visual);
+  const cutters = all.filter((p) => p.cut && !p.visual);
+  const raw0 = all.filter((p) => !p.visual && !p.cut);
+  const raw = raw0;
   const vis = all.filter((p) => p.visual);
-  if (raw.length === 0) throw new Error(`shape "${key}" has only visual parts`);
+  if (raw.length === 0) throw new Error(`shape "${key}" has only visual or cutting parts`);
+
+  // CSG: parts marked `cut` are taken away from the others. The collision becomes convex pieces of what is left; the looks use the exact outline.
+  let cutVisual = null;
+  if (cutters.length) {
+    const outline = (n) => (p) => (p.type === 'circle' ? Array.from({ length: n }, (_, k) => [p.cx + Math.cos((k / n) * Math.PI * 2) * p.r, p.cy + Math.sin((k / n) * Math.PI * 2) * p.r]) : p.pts);
+    // the looks use a fine outline (64 sides per circle); the collision a coarser one, because every corner of a hole costs one convex piece
+    const fine = differenceOutlines(raw.map(outline(64)), cutters.map(outline(64)));
+    if (!fine) throw new Error(`the cut removes the whole shape "${key}"`);
+    const coarse = differenceOutlines(raw.map(outline(24)), cutters.map(outline(24))) ?? fine;
+    const pieces = [];
+    for (const r of coarse) {
+      const cp = convexPieces(r);
+      if (!cp) throw new Error(`shape "${key}": the cut could not be split into convex pieces (try a simpler cut)`);
+      pieces.push(...cp);
+    }
+    raw.length = 0;
+    raw.push(...pieces.map((pts) => ({ type: 'poly', pts })));
+    cutVisual = fine;
+  }
 
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const p of raw) {
@@ -142,8 +163,375 @@ export function buildShape(def, key = '?') {
     });
     return { type: 'poly', pts };
   });
-  const visual = vis.length ? vis.map((p) => ({ pts: p.pts.map(([x, y]) => [x - mx, y - my]) })) : null;
-  return { parts, visual, w: x1 - x0, h: y1 - y0, radius };
+  const shiftPts = (pts) => pts.map(([x, y]) => [x - mx, y - my]);
+  const visual = vis.length ? vis.map((p) => ({ pts: shiftPts(p.pts), holes: [] }))
+    : cutVisual ? cutVisual.map((r) => ({ pts: shiftPts(r.outer), holes: r.holes.map(shiftPts) })) : null;
+  return { parts, visual, w: x1 - x0, h: y1 - y0, radius, ox: mx, oy: my };
+}
+
+/**
+ * The union of several counter-clockwise polygons (convex parts, circles as many-sided polygons), as outlines for ONE extruded mesh.
+ * Every edge is cut where other polygons' edges cross it, and a piece is kept when it lies on the outside of all the other polygons
+ * (pieces shared by two touching parts cancel out). The kept pieces are chained into loops: solid on the left, so an outer outline is
+ * counter-clockwise and a hole clockwise.
+ * @param {number[][][]} polys
+ * @returns {{outer:number[][], holes:number[][][]}[]|null}  null when something goes wrong (the caller then uses one mesh per part)
+ */
+export function unionOutlines(polys) {
+  let size = 0;
+  for (const p of polys) for (const [x, y] of p) size = Math.max(size, Math.abs(x), Math.abs(y));
+  const eps = Math.max(1e-9, size * 1e-7);
+  const key = ([x, y]) => `${Math.round(x / eps / 10)},${Math.round(y / eps / 10)}`;
+  const onSeg = (p, a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const L2 = dx * dx + dy * dy;
+    if (L2 === 0) return false;
+    const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2;
+    if (t < -1e-9 || t > 1 + 1e-9) return false;
+    return Math.hypot(a[0] + dx * t - p[0], a[1] + dy * t - p[1]) < eps * 10;
+  };
+  const inside = (pt, poly) => { // strictly-inside test by crossing number (callers check the boundary first)
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i];
+      const [xj, yj] = poly[j];
+      if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  };
+  const kept = [];
+  polys.forEach((P, i) => {
+    for (let e = 0; e < P.length; e++) {
+      const a = P[e];
+      const b = P[(e + 1) % P.length];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const L2 = dx * dx + dy * dy;
+      if (L2 < eps * eps) continue;
+      const ts = [0, 1];
+      polys.forEach((Q, j) => {
+        if (j === i) return;
+        for (let f = 0; f < Q.length; f++) {
+          const c = Q[f];
+          const d = Q[(f + 1) % Q.length];
+          if (onSeg(c, a, b)) ts.push(((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / L2);
+          const ex = d[0] - c[0], ey = d[1] - c[1];
+          const den = dx * ey - dy * ex;
+          if (Math.abs(den) < 1e-12) continue;
+          const t = ((c[0] - a[0]) * ey - (c[1] - a[1]) * ex) / den;
+          const u = ((c[0] - a[0]) * dy - (c[1] - a[1]) * dx) / den;
+          if (t > 0 && t < 1 && u >= 0 && u <= 1) ts.push(t);
+        }
+      });
+      ts.sort((m, n) => m - n);
+      for (let k = 0; k + 1 < ts.length; k++) {
+        if (ts[k + 1] - ts[k] < 1e-9) continue;
+        const p0 = [a[0] + dx * ts[k], a[1] + dy * ts[k]];
+        const p1 = [a[0] + dx * ts[k + 1], a[1] + dy * ts[k + 1]];
+        const mid = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
+        let keep = true;
+        for (let j = 0; j < polys.length && keep; j++) {
+          if (j === i) continue;
+          const Q = polys[j];
+          let shared = null;
+          for (let f = 0; f < Q.length; f++) {
+            const c = Q[f];
+            const d = Q[(f + 1) % Q.length];
+            if (onSeg(mid, c, d)) { shared = [d[0] - c[0], d[1] - c[1]]; break; }
+          }
+          if (shared) { // lies along an edge of part j: the same direction = overlapping parts (keep one copy), opposite = they touch (both are inside)
+            if (shared[0] * dx + shared[1] * dy < 0 || j < i) keep = false;
+          } else if (inside(mid, Q)) keep = false;
+        }
+        if (keep) kept.push([p0, p1]);
+      }
+    }
+  });
+  return assembleRegions(kept, eps);
+}
+
+function pointInPoly(pt, poly) { // crossing-number test (callers check the boundary first)
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i];
+    const [xj, yj] = poly[j];
+    if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+
+/** Parameters along the edge a→b where the edges of the loops `others` cross it or touch it (for cutting it into pieces). */
+function edgeCuts(a, b, others, eps) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const L2 = dx * dx + dy * dy;
+  const ts = [0, 1];
+  for (const Q of others) {
+    for (let f = 0; f < Q.length; f++) {
+      const c = Q[f];
+      const d = Q[(f + 1) % Q.length];
+      const tc = ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / L2;
+      if (tc > 0 && tc < 1 && Math.hypot(a[0] + dx * tc - c[0], a[1] + dy * tc - c[1]) < eps * 10) ts.push(tc);
+      const ex = d[0] - c[0], ey = d[1] - c[1];
+      const den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-12) continue;
+      const t = ((c[0] - a[0]) * ey - (c[1] - a[1]) * ex) / den;
+      const u = ((c[0] - a[0]) * dy - (c[1] - a[1]) * dx) / den;
+      if (t > 0 && t < 1 && u >= 0 && u <= 1) ts.push(t);
+    }
+  }
+  return ts.sort((m, n) => m - n);
+}
+
+/** Is the point on an edge of one of the loops? Returns that edge's direction, or null. */
+function edgeAt(pt, loops, eps) {
+  for (const Q of loops) {
+    for (let f = 0; f < Q.length; f++) {
+      const c = Q[f];
+      const d = Q[(f + 1) % Q.length];
+      const dx = d[0] - c[0], dy = d[1] - c[1];
+      const L2 = dx * dx + dy * dy;
+      if (L2 === 0) continue;
+      const t = ((pt[0] - c[0]) * dx + (pt[1] - c[1]) * dy) / L2;
+      if (t < -1e-9 || t > 1 + 1e-9) continue;
+      if (Math.hypot(c[0] + dx * t - pt[0], c[1] + dy * t - pt[1]) < eps * 10) return [dx, dy];
+    }
+  }
+  return null;
+}
+
+const inLoops = (pt, loops) => loops.reduce((odd, L) => (pointInPoly(pt, L) ? !odd : odd), false); // outlines and holes together: even-odd
+
+/**
+ * `solids` minus `cuts` (both lists of counter-clockwise polygons; each list is joined first). Same result format as unionOutlines.
+ */
+export function differenceOutlines(solids, cuts) {
+  const A = unionOutlines(solids);
+  if (!A) return null;
+  if (!cuts.length) return A;
+  const B = unionOutlines(cuts);
+  if (!B) return A;
+  const loopsA = A.flatMap((r) => [r.outer, ...r.holes]);
+  const loopsB = B.flatMap((r) => [r.outer, ...r.holes]);
+  let size = 0;
+  for (const L of [...loopsA, ...loopsB]) for (const [x, y] of L) size = Math.max(size, Math.abs(x), Math.abs(y));
+  const eps = Math.max(1e-9, size * 1e-7);
+  const kept = [];
+  const walk = (mine, other, rule) => {
+    for (const L of mine) {
+      for (let e = 0; e < L.length; e++) {
+        const a = L[e];
+        const b = L[(e + 1) % L.length];
+        const ts = edgeCuts(a, b, other, eps);
+        for (let k = 0; k + 1 < ts.length; k++) {
+          if (ts[k + 1] - ts[k] < 1e-9) continue;
+          const p0 = [a[0] + (b[0] - a[0]) * ts[k], a[1] + (b[1] - a[1]) * ts[k]];
+          const p1 = [a[0] + (b[0] - a[0]) * ts[k + 1], a[1] + (b[1] - a[1]) * ts[k + 1]];
+          const mid = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
+          const along = edgeAt(mid, other, eps);
+          const out = rule(along, [b[0] - a[0], b[1] - a[1]], inLoops(mid, other));
+          if (out === 1) kept.push([p0, p1]);
+          else if (out === -1) kept.push([p1, p0]); // the edge of a cut becomes an edge of the result, walked the other way
+        }
+      }
+    }
+  };
+  // a piece of the solid stays when it is outside every cut (or runs along a cut that only touches it from outside)
+  walk(loopsA, loopsB, (along, dir, inside) => (along ? (along[0] * dir[0] + along[1] * dir[1] < 0 ? 1 : 0) : inside ? 0 : 1));
+  // a piece of a cut stays (reversed) when it is inside the solid
+  walk(loopsB, loopsA, (along, dir, inside) => (!along && inside ? -1 : 0));
+  if (!kept.length) return null;
+  return assembleRegions(kept, eps);
+}
+
+/** Is the polygon convex (counter-clockwise, collinear points allowed)? */
+function convexLoop(pts, tol = 1e-9) {
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length], c = pts[(i + 2) % pts.length];
+    if ((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]) < -tol) return false;
+  }
+  return true;
+}
+
+/**
+ * Splits one region (an outline with holes) into convex polygons of at most `maxV` corners, for the collision of a shape with a cut.
+ * Holes are joined to the outline by a bridge, the result is cut into triangles (ear clipping) and neighbouring triangles are merged
+ * back together as long as they stay convex (Hertel-Mehlhorn). Returns null when it does not work out.
+ */
+export function convexPieces(region, maxV = 8) {
+  const all = [region.outer, ...region.holes];
+  let size = 0;
+  for (const L of all) for (const [x, y] of L) size = Math.max(size, Math.abs(x), Math.abs(y));
+  const eps = Math.max(1e-9, size * 1e-9);
+  const same = (p, q) => Math.abs(p[0] - q[0]) < eps * 100 && Math.abs(p[1] - q[1]) < eps * 100;
+  const cross = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  const crosses = (p, q, r, t) => { // do p-q and r-t cross properly (not just touch at ends)?
+    if (same(p, r) || same(p, t) || same(q, r) || same(q, t)) return false;
+    const d1 = cross(p, q, r), d2 = cross(p, q, t), d3 = cross(r, t, p), d4 = cross(r, t, q);
+    return ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps)) && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps));
+  };
+  // 1. bridges from the holes (right-most hole first) to the outline
+  let poly = region.outer.map((p) => p.slice());
+  const holes = region.holes.map((hl) => hl.map((p) => p.slice())).sort((m, n) => Math.max(...n.map((q) => q[0])) - Math.max(...m.map((q) => q[0])));
+  for (const hole of holes) {
+    let iM = 0;
+    hole.forEach((q, i) => { if (q[0] > hole[iM][0]) iM = i; });
+    const M = hole[iM];
+    const order = poly.map((q, i) => i).sort((m, n) => Math.hypot(poly[m][0] - M[0], poly[m][1] - M[1]) - Math.hypot(poly[n][0] - M[0], poly[n][1] - M[1]));
+    let found = -1;
+    for (const iV of order) {
+      const V = poly[iV];
+      let ok = true;
+      for (const L of [poly, ...holes]) {
+        for (let f = 0; f < L.length && ok; f++) if (crosses(M, V, L[f], L[(f + 1) % L.length])) ok = false;
+      }
+      const mid = [(M[0] + V[0]) / 2, (M[1] + V[1]) / 2];
+      if (ok && inLoops(mid, [region.outer, ...region.holes])) { found = iV; break; }
+    }
+    if (found < 0) return null;
+    const V = poly[found];
+    poly = [...poly.slice(0, found + 1), M, ...hole.slice(iM + 1), ...hole.slice(0, iM), M.slice(), V.slice(), ...poly.slice(found + 1)];
+  }
+  // 2. ear clipping
+  const idx = poly.map((q, i) => i);
+  const tris = [];
+  let guard = 0;
+  while (idx.length > 3 && guard++ < 20000) {
+    let clipped = false;
+    for (let k = 0; k < idx.length; k++) {
+      const a = poly[idx[(k + idx.length - 1) % idx.length]], b = poly[idx[k]], c = poly[idx[(k + 1) % idx.length]];
+      if (cross(a, b, c) <= eps) continue;
+      let ear = true;
+      for (const m of idx) {
+        const q = poly[m];
+        if (same(q, a) || same(q, b) || same(q, c)) continue;
+        if (cross(a, b, q) >= -eps && cross(b, c, q) >= -eps && cross(c, a, q) >= -eps) { ear = false; break; }
+      }
+      if (!ear) continue;
+      tris.push([a, b, c]);
+      idx.splice(k, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) { // only flat pieces are left: drop a collinear corner and go on
+      const k = idx.findIndex((m, n) => Math.abs(cross(poly[idx[(n + idx.length - 1) % idx.length]], poly[m], poly[idx[(n + 1) % idx.length]])) <= eps);
+      if (k < 0) return null;
+      idx.splice(k, 1);
+    }
+  }
+  if (idx.length === 3) {
+    const [a, b, c] = idx.map((m) => poly[m]);
+    if (cross(a, b, c) > eps) tris.push([a, b, c]);
+  }
+  if (!tris.length) return null;
+  // 3. merge triangles back into convex pieces
+  let pieces = tris;
+  for (let merged = true; merged;) {
+    merged = false;
+    outer: for (let i = 0; i < pieces.length; i++) {
+      for (let j = i + 1; j < pieces.length; j++) {
+        const P = pieces[i], Q = pieces[j];
+        for (let ia = 0; ia < P.length; ia++) {
+          const a = P[ia], b = P[(ia + 1) % P.length];
+          const jb = Q.findIndex((q, n) => same(q, b) && same(Q[(n + 1) % Q.length], a));
+          if (jb < 0) continue;
+          const m = [];
+          for (let n = 1; n <= P.length; n++) m.push(P[(ia + n) % P.length]); // b ... a
+          for (let n = 2; n < Q.length; n++) m.push(Q[(jb + n) % Q.length]); // the corners of Q between a and b
+          const clean = m.filter((q, n) => Math.abs(cross(m[(n + m.length - 1) % m.length], q, m[(n + 1) % m.length])) > eps);
+          if (clean.length > maxV || clean.length < 3 || !convexLoop(clean, eps)) continue;
+          pieces = pieces.filter((_, n) => n !== i && n !== j);
+          pieces.push(clean);
+          merged = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return pieces;
+}
+
+/** Chains kept edge pieces (solid on their left) into closed loops: outer outlines counter-clockwise, holes clockwise, holes given to their outline. */
+function assembleRegions(kept, eps) {
+  const key = ([x, y]) => `${Math.round(x / eps / 10)},${Math.round(y / eps / 10)}`;
+  const inside = pointInPoly;
+  if (!kept.length) return null;
+  const from = new Map();
+  kept.forEach((sg, n) => {
+    const k = key(sg[0]);
+    if (!from.has(k)) from.set(k, []);
+    from.get(k).push(n);
+  });
+  const used = new Array(kept.length).fill(false);
+  const loops = [];
+  for (let n0 = 0; n0 < kept.length; n0++) {
+    if (used[n0]) continue;
+    const loop = [];
+    let n = n0;
+    for (let guard = 0; guard < kept.length + 2; guard++) {
+      used[n] = true;
+      loop.push(kept[n][0]);
+      const endKey = key(kept[n][1]);
+      if (endKey === key(kept[n0][0])) break;
+      const cand = (from.get(endKey) ?? []).filter((m) => !used[m]);
+      if (!cand.length) return null;
+      let best = cand[0];
+      if (cand.length > 1) { // a pinch point: take the rightmost turn so each lobe stays its own simple loop
+        const ix = kept[n][1][0] - kept[n][0][0], iy = kept[n][1][1] - kept[n][0][1];
+        let bestA = Infinity;
+        for (const m of cand) {
+          const ox = kept[m][1][0] - kept[m][0][0], oy = kept[m][1][1] - kept[m][0][1];
+          const ang = Math.atan2(ix * oy - iy * ox, ix * ox + iy * oy); // left turn > 0
+          if (ang < bestA) { bestA = ang; best = m; }
+        }
+      }
+      n = best;
+      if (guard === kept.length + 1) return null;
+    }
+    if (key(kept[n][1]) !== key(kept[n0][0])) return null;
+    // a loop that passes the same point twice (two parts touching at a corner) is cut into separate simple loops
+    const stack = [];
+    const seen = new Map();
+    for (const pt of loop) {
+      const k = key(pt);
+      if (seen.has(k)) {
+        const at = seen.get(k);
+        const piece = stack.splice(at);
+        for (const q of piece) seen.delete(key(q));
+        loops.push(piece);
+      }
+      seen.set(k, stack.length);
+      stack.push(pt);
+    }
+    if (stack.length) loops.push(stack);
+  }
+  const clean = loops.map((loop) => { // drop the corners that are only where two parts met on a straight line
+    let pts = loop;
+    for (let changed = true; changed && pts.length > 3;) {
+      changed = false;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[(i + pts.length - 1) % pts.length], b = pts[i], c = pts[(i + 1) % pts.length];
+        const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+        const dt = (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]);
+        if (Math.abs(cr) < 1e-9 * (1 + Math.abs(dt)) && dt > 0) { pts = pts.filter((_, m) => m !== i); changed = true; break; }
+      }
+    }
+    return pts;
+  });
+  const area = (pts) => pts.reduce((sum, p, i) => { const q = pts[(i + 1) % pts.length]; return sum + (p[0] * q[1] - q[0] * p[1]); }, 0) / 2;
+  const outers = [];
+  const holes = [];
+  for (const pts of clean) {
+    const A = area(pts);
+    if (Math.abs(A) < eps * eps * 10 || pts.length < 3) continue;
+    (A > 0 ? outers : holes).push(pts);
+  }
+  if (!outers.length) return null;
+  const result = outers.map((outer) => ({ outer, holes: [] }));
+  for (const hole of holes) {
+    const owner = result.find((r) => inside(hole[0], r.outer) || hole.some((p) => inside(p, r.outer)));
+    if (!owner) return null;
+    owner.holes.push(hole);
+  }
+  return result;
 }
 
 export function getShape(key) {
@@ -329,6 +717,7 @@ export function validateDefinitions(defs, extra = {}) {
   for (const k of ['gravity', 'waterDensity', 'follow', 'depth', 'chamfer', 'frontZ', 'hoverZ', 'slotGap', 'maxHoldX', 'maxHoldY', 'minHoldY']) {
     if (!isNum(t[k])) err(`tuning.${k}: not a number`);
   }
+  if (t.mergeParts !== undefined && typeof t.mergeParts !== 'boolean') err('tuning.mergeParts must be true or false');
   if (t.countdown !== undefined && !(isNum(t.countdown) && t.countdown >= 0.5 && t.countdown <= 60)) err('tuning.countdown must be from 0.5 to 60 seconds');
   if (isNum(t.gravity) && t.gravity <= 0) err('tuning.gravity must be above 0');
   if (isNum(t.depth) && t.depth < 0.3) err('tuning.depth must be at least 0.3');

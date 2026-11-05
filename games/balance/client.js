@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 import { flatNormals, parseObj } from './obj.js';
 import { SHADOW_GLSL, shaders, transparentShaders, vertexShader } from './shaders.js';
@@ -56,31 +56,10 @@ const saveDone = (set) => {
  * texture runs along the edge instead of being smeared through the block. Normals are smooth along gentle curves (circles) and
  * crisp at corners.
  */
-function chamferedPrism(outline, depth, c) {
-  const N = outline.length;
+function chamferedPrism(outline, depth, c, holes = []) {
   const h = depth / 2;
-  const P = outline.map(([x, y]) => new THREE.Vector2(x, y));
-  const edgeN = P.map((p, i) => {
-    const q = P[(i + 1) % N];
-    return new THREE.Vector2(q.y - p.y, p.x - q.x).normalize(); // outward for a counter-clockwise outline
-  });
-  const Q = P.map((p, i) => { // the outline moved inwards by c (mitred corners)
-    const n1 = edgeN[(i + N - 1) % N];
-    const n2 = edgeN[i];
-    const m = n1.clone().add(n2).multiplyScalar(1 / Math.max(0.25, 1 + n1.dot(n2)));
-    return p.clone().addScaledVector(m, -c);
-  });
-  const arc = [0];
-  for (let i = 0; i < N; i++) arc.push(arc[i] + P[i].distanceTo(P[(i + 1) % N]));
-
-  // normal of edge e as seen from one of its ends: smoothed with the neighbouring edge when the corner is gentle
+  const R = Math.SQRT1_2;
   const SMOOTH = Math.cos(THREE.MathUtils.degToRad(35));
-  const normalAt = (e, atEnd) => {
-    const own = edgeN[e];
-    const other = edgeN[(e + (atEnd ? 1 : N - 1)) % N];
-    return own.dot(other) > SMOOTH ? own.clone().add(other).normalize() : own;
-  };
-
   const pos = [];
   const nor = [];
   const uvs = [];
@@ -104,36 +83,63 @@ function chamferedPrism(outline, depth, c) {
     else idx.push(a, d, b);
   };
 
-  // caps
+  // every loop keeps the solid on its left: the outline counter-clockwise, holes clockwise (so "outward" is always away from the solid)
+  const loops = [outline, ...holes].map((pts) => {
+    const N = pts.length;
+    const P = pts.map(([x, y]) => new THREE.Vector2(x, y));
+    const edgeN = P.map((p, i) => {
+      const q = P[(i + 1) % N];
+      return new THREE.Vector2(q.y - p.y, p.x - q.x).normalize();
+    });
+    const Q = P.map((p, i) => { // the loop moved into the solid by c (mitred corners)
+      const n1 = edgeN[(i + N - 1) % N];
+      const n2 = edgeN[i];
+      const m = n1.clone().add(n2).multiplyScalar(1 / Math.max(0.25, 1 + n1.dot(n2)));
+      return p.clone().addScaledVector(m, -c);
+    });
+    const arc = [0];
+    for (let i = 0; i < N; i++) arc.push(arc[i] + P[i].distanceTo(P[(i + 1) % N]));
+    return { N, P, edgeN, Q, arc };
+  });
+
+  // caps (with the holes cut out)
   for (const sign of [1, -1]) {
     const base = pos.length / 3;
-    Q.forEach((q) => vert(q.x, q.y, sign * h, 0, 0, sign, q.x, q.y));
-    for (const [a, b, d] of THREE.ShapeUtils.triangulateShape(Q.map((q) => q.clone()), [])) tri(base + a, base + b, base + d, [0, 0, sign]);
+    for (const L of loops) L.Q.forEach((q) => vert(q.x, q.y, sign * h, 0, 0, sign, q.x, q.y));
+    const faces = THREE.ShapeUtils.triangulateShape(loops[0].Q.map((q) => q.clone()), loops.slice(1).map((L) => L.Q.map((q) => q.clone())));
+    for (const [a, b, d] of faces) tri(base + a, base + b, base + d, [0, 0, sign]);
   }
 
   // chamfers and the side wall, edge by edge
-  const R = Math.SQRT1_2;
-  for (let e = 0; e < N; e++) {
-    const f = (e + 1) % N;
-    const n0 = normalAt(e, false);
-    const n1 = normalAt(e, true);
-    const own = edgeN[e];
-    const zs = h - c;
-    // side wall: z from -zs to +zs
-    const w0 = vert(P[e].x, P[e].y, -zs, n0.x, n0.y, 0, arc[e], -zs);
-    const w1 = vert(P[f].x, P[f].y, -zs, n1.x, n1.y, 0, arc[e + 1], -zs);
-    const w2 = vert(P[f].x, P[f].y, zs, n1.x, n1.y, 0, arc[e + 1], zs);
-    const w3 = vert(P[e].x, P[e].y, zs, n0.x, n0.y, 0, arc[e], zs);
-    tri(w0, w1, w2, [own.x, own.y, 0]);
-    tri(w0, w2, w3, [own.x, own.y, 0]);
-    // chamfer strips: from the wall edge (z = ±zs) inwards to the cap edge (z = ±h)
-    for (const sign of [1, -1]) {
-      const a = vert(P[e].x, P[e].y, sign * zs, n0.x * R, n0.y * R, sign * R, arc[e], sign * zs);
-      const b = vert(P[f].x, P[f].y, sign * zs, n1.x * R, n1.y * R, sign * R, arc[e + 1], sign * zs);
-      const d = vert(Q[f].x, Q[f].y, sign * h, n1.x * R, n1.y * R, sign * R, arc[e + 1], sign * h);
-      const g = vert(Q[e].x, Q[e].y, sign * h, n0.x * R, n0.y * R, sign * R, arc[e], sign * h);
-      tri(a, b, d, [own.x * R, own.y * R, sign * R]);
-      tri(a, d, g, [own.x * R, own.y * R, sign * R]);
+  for (const { N, P, edgeN, Q, arc } of loops) {
+    // normal of edge e as seen from one of its ends: smoothed with the neighbouring edge when the corner is gentle
+    const normalAt = (e, atEnd) => {
+      const own = edgeN[e];
+      const other = edgeN[(e + (atEnd ? 1 : N - 1)) % N];
+      return own.dot(other) > SMOOTH ? own.clone().add(other).normalize() : own;
+    };
+    for (let e = 0; e < N; e++) {
+      const f = (e + 1) % N;
+      const n0 = normalAt(e, false);
+      const n1 = normalAt(e, true);
+      const own = edgeN[e];
+      const zs = h - c;
+      // side wall: z from -zs to +zs
+      const w0 = vert(P[e].x, P[e].y, -zs, n0.x, n0.y, 0, arc[e], -zs);
+      const w1 = vert(P[f].x, P[f].y, -zs, n1.x, n1.y, 0, arc[e + 1], -zs);
+      const w2 = vert(P[f].x, P[f].y, zs, n1.x, n1.y, 0, arc[e + 1], zs);
+      const w3 = vert(P[e].x, P[e].y, zs, n0.x, n0.y, 0, arc[e], zs);
+      tri(w0, w1, w2, [own.x, own.y, 0]);
+      tri(w0, w2, w3, [own.x, own.y, 0]);
+      // chamfer strips: from the wall edge (z = ±zs) inwards to the cap edge (z = ±h)
+      for (const sign of [1, -1]) {
+        const a = vert(P[e].x, P[e].y, sign * zs, n0.x * R, n0.y * R, sign * R, arc[e], sign * zs);
+        const b = vert(P[f].x, P[f].y, sign * zs, n1.x * R, n1.y * R, sign * R, arc[e + 1], sign * zs);
+        const d = vert(Q[f].x, Q[f].y, sign * h, n1.x * R, n1.y * R, sign * R, arc[e + 1], sign * h);
+        const g = vert(Q[e].x, Q[e].y, sign * h, n0.x * R, n0.y * R, sign * R, arc[e], sign * h);
+        tri(a, b, d, [own.x * R, own.y * R, sign * R]);
+        tri(a, d, g, [own.x * R, own.y * R, sign * R]);
+      }
     }
   }
 
@@ -143,6 +149,22 @@ function chamferedPrism(outline, depth, c) {
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(idx);
   return geo;
+}
+
+/**
+ * The meshes of one shape: one chamfered prism per part, or (merge on, the default) the parts joined in 2D first and extruded once,
+ * so there are no seams between touching parts. Collision never changes: it always uses the separate parts. A shape with a drawing-only
+ * outline uses that outline as it is.
+ * @returns {{pts:number[][], holes:number[][][]}[]}
+ */
+function shapeOutlines(shape, merge) {
+  if (shape.visual) return shape.visual.map((v) => ({ pts: v.pts, holes: v.holes ?? [] }));
+  const own = shape.parts.map((q) => (q.type === 'circle' ? circleOutline(q) : q.pts));
+  if (merge && own.length > 1) {
+    const u = unionOutlines(own);
+    if (u) return u.map((r) => ({ pts: r.outer, holes: r.holes }));
+  }
+  return own.map((pts) => ({ pts, holes: [] }));
 }
 
 /** Outline of a circle part as a counter-clockwise point list. */
@@ -722,7 +744,7 @@ class BalanceView {
     canvas.addEventListener('dblclick', fit);
 
     const api = {
-      set: ({ items, bowl, depth, chamfer }) => {
+      set: ({ items, bowl, depth, chamfer, merge = true }) => {
         if (content) {
           content.removeFromParent();
           this.#disposeTree(content);
@@ -759,8 +781,7 @@ class BalanceView {
         for (const it of built) {
           const group = new THREE.Group();
           const mat = this.#blockMaterial(it.shader, (x * 0.13 + 1) % 1, THREE.FrontSide, null, true);
-          const outlines = it.shape.visual ? it.shape.visual.map((v) => v.pts) : it.shape.parts.map((q) => (q.type === 'circle' ? circleOutline(q) : q.pts));
-          for (const pts of outlines) group.add(new THREE.Mesh(chamferedPrism(pts, depth, chamfer), mat));
+          for (const o of shapeOutlines(it.shape, merge)) group.add(new THREE.Mesh(chamferedPrism(o.pts, depth, chamfer, o.holes), mat));
           group.position.set(x + it.shape.w / 2, groundY + it.shape.h / 2, FRONT_Z);
           content.add(group);
           top = Math.max(top, groundY + it.shape.h);
@@ -1382,8 +1403,7 @@ void main() {
     let g = this.geoCache.get(key);
     if (g) return g;
     const shape = getShape(key);
-    const outlines = shape.visual ? shape.visual.map((v) => v.pts) : shape.parts.map((p) => (p.type === 'circle' ? circleOutline(p) : p.pts));
-    g = outlines.map((pts) => ({ geo: chamferedPrism(pts, DEPTH, tuning.chamfer) }));
+    g = shapeOutlines(shape, tuning.mergeParts !== false).map((o) => ({ geo: chamferedPrism(o.pts, DEPTH, tuning.chamfer, o.holes) }));
     this.geoCache.set(key, g);
     return g;
   }

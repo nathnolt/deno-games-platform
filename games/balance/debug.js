@@ -35,6 +35,7 @@ const TUNING_HELP = {
   follow: 'How fast a held block chases the pointer.',
   depth: 'Thickness of every block (z).',
   chamfer: 'Size of the 45° bevel on every block edge.',
+  mergeParts: 'On: the parts of a shape are joined in 2D and extruded as one block (no seams between parts). Collision always uses the separate parts. Off: every part is its own mesh.',
   frontZ: 'z of the waiting blocks on the table.',
   hoverZ: 'z of the block you hold.',
   slotGap: 'Distance between the waiting blocks.',
@@ -325,6 +326,9 @@ export function createDebugMenu(view) {
     for (const [k, v] of Object.entries(t)) {
       if (typeof v === 'number') plain.append(num(k, t, k, 'tuning'), h('p', { class: 'bb-dbg-hint' }, TUNING_HELP[k] ?? ''));
     }
+    const merge = h('input', { type: 'checkbox', checked: t.mergeParts !== false });
+    merge.addEventListener('change', () => { t.mergeParts = merge.checked; touch('tuning'); });
+    plain.append(field('mergeParts', merge), h('p', { class: 'bb-dbg-hint' }, TUNING_HELP.mergeParts));
     out.push(section('Numbers', plain));
     t.shadows ??= { ...S.SHADOW_DEFAULTS };
     out.push(section('Shadows (all backgrounds, unless a background has its own)', ...shadowFields(t.shadows, 'tuning')));

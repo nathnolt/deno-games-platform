@@ -66,6 +66,17 @@ export const materials = {
 // Origin and orientation do not matter: every shape is re-centred on the middle of its bounding box when it is used.
 export const shapes = {
   square1: [{ type: 'poly', points: '0,0 4,0 4,4 0,4' }],
+  heart: [
+    { type: 'poly', points: '4.682,2.121 2.561,4.242 0.44,2.121 2.561,0' },
+    { type: 'circle', diameter: 3, x: 3.621, y: 3.1815 },
+    { type: 'circle', diameter: 3, x: 1.5, y: 3.1815 },
+  ],
+  L: [{ type: 'poly', points: '0,7 2,7 2,2 4,2 4,0 0,0' }],
+  S: [{ type: 'poly', points: '0,4 0,2 4,2 4,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
+  S2: [{ type: 'poly', points: '4,4 4,2 8,2 8,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
+  T: [{ type: 'poly', points: '0,0 0,2 6,2 6,0 0,0' }, { type: 'poly', points: '2,0 2,4 4,4 4,0' }],
+  triangle: [{ type: 'poly', points: '0,0 6,6 6,0' },
+  plus: [{ type: 'poly', points: '3,0 3,6 5,6 5,0' }, { type: 'poly', points: '1,4 7,4 7,2 1,2' }],
 };
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────

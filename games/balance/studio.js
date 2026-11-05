@@ -64,7 +64,7 @@ const circleOf = (p) => ({ x: p.x ?? p.diameter / 2, y: p.y ?? p.diameter / 2, r
 function boxOf(def) {
   let b = [Infinity, Infinity, -Infinity, -Infinity];
   for (const p of def) {
-    if (p.visual) continue;
+    if (p.visual || p.cut) continue;
     if (p.type === 'circle') {
       const c = circleOf(p);
       b = [Math.min(b[0], c.x - c.r), Math.min(b[1], c.y - c.r), Math.max(b[2], c.x + c.r), Math.max(b[3], c.y + c.r)];
@@ -100,7 +100,7 @@ function thumb(def, color, w = 46, hgt = 34) {
   const root = svg('svg', { width: w, height: hgt, viewBox: `0 0 ${w} ${hgt}`, class: 'bb-st-thumb' });
   const g = svg('g', { transform: `translate(${(w - bw * k) / 2 - b[0] * k} ${(hgt + bh * k) / 2 + b[1] * k}) scale(${k} ${-k})` });
   for (const p of def) {
-    if (p.visual) continue;
+    if (p.visual || p.cut) continue;
     const common = { fill: color, stroke: '#1f2937', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' };
     if (p.type === 'circle') {
       const c = circleOf(p);
@@ -256,6 +256,27 @@ function drawShapeGrid(g, view, ox, oy, snap, k, px) {
   g.append(line(lines, 'rgba(250,204,21,.16)'), line(major, 'rgba(250,204,21,.34)'), line(axes, 'rgba(251,146,60,.85)', 1.5), ...nums);
 }
 
+/** Copy text to the clipboard (button b shows 'Copied ✓'). */
+function copyText(t, b) {
+  const done = () => { const old = b.textContent; b.textContent = 'Copied ✓'; setTimeout(() => (b.textContent = old), 1200); };
+  const fallback = () => {
+    const ta = h('textarea', { class: 'bb-dbg-offscreen' }, t);
+    document.body.append(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch { window.prompt('Copy this:', t); }
+    ta.remove();
+  };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(done, fallback); else fallback();
+}
+function saveText(t, name, mime) {
+  const url = URL.createObjectURL(new Blob([t], { type: mime }));
+  const a = h('a', { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 let clipId = 0;
 /** The bowl: wood, water inside up to the water line, and the table top under it. */
 function drawBowl(g, bowl) {
@@ -272,15 +293,16 @@ function drawBowl(g, bowl) {
   );
 }
 
+const CUT_STYLE = { fill: 'rgba(239,68,68,.22)', stroke: '#ef4444', 'stroke-dasharray': '5 3' };
 function drawParts(def, fill, stroke, extra = {}) {
   const out = [];
   for (const p of def) {
     const common = { fill, stroke, 'stroke-width': 1.2, 'vector-effect': 'non-scaling-stroke', ...extra };
     if (p.type === 'circle') {
       const c = circleOf(p);
-      out.push(svg('circle', { cx: c.x, cy: c.y, r: c.r, ...common, ...(p.visual ? { 'stroke-dasharray': '3 3', fill: 'none' } : {}) }));
+      out.push(svg('circle', { cx: c.x, cy: c.y, r: c.r, ...common, ...(p.visual ? { 'stroke-dasharray': '3 3', fill: 'none' } : {}), ...(p.cut ? CUT_STYLE : {}) }));
     } else {
-      out.push(svg('polygon', { points: p.points, ...common, ...(p.visual ? { 'stroke-dasharray': '3 3', fill: 'none' } : {}) }));
+      out.push(svg('polygon', { points: p.points, ...common, ...(p.visual ? { 'stroke-dasharray': '3 3', fill: 'none' } : {}), ...(p.cut ? CUT_STYLE : {}) }));
     }
   }
   return out;
@@ -468,27 +490,12 @@ function shapeStudio(view, api) {
   }
 
   // ── drawing a new polygon, point by point ──
-  // A new shape starts empty: nothing is created until its first polygon is finished (newKey), so there is no starting rectangle to delete.
-  const drawShift = () => (st.draw?.newKey ? st.draw.origin : shift(st.sel));
-  function startNew(raw) {
-    const key = raw.trim();
-    if (!KEY.test(key)) return fail('A shape name starts with a letter and uses letters, digits, _ and - only.');
-    if (D().shapes[key]) return fail(`"${key}" already exists.`);
-    startDraw(key);
-    return undefined;
-  }
-  function startDraw(newKey) {
-    if (typeof newKey !== 'string') newKey = null;
-    if (!newKey && !st.sel) return;
+  const drawShift = () => shift(st.sel);
+  function startDraw() {
+    if (!st.sel) return;
     st.editing = true;
-    st.draw = { pts: [], cur: null, newKey };
-    if (newKey) {
-      // a new shape is drawn on a fresh grid in the middle of the view, zoomed in so a normal block (a few units) is comfortable to place
-      const vw = board.view();
-      const origin = { x: Math.round((vw.x0 + vw.x1) / 2 - 4), y: Math.round((vw.y0 + vw.y1) / 2 - 3) };
-      st.draw.origin = origin;
-      board.fit([origin.x - 3, origin.y - 3, origin.x + 12, origin.y + 9]);
-    } else if (st.sel) focus();
+    st.draw = { pts: [], cur: null };
+    focus();
     st.msg = '';
     board.el.classList.add('bb-st-drawing');
     renderHead();
@@ -507,18 +514,6 @@ function shapeStudio(view, api) {
     const dr = st.draw;
     if (!dr) return;
     if (dr.pts.length < 3) return fail('A polygon needs at least 3 points: click the board to put them down.');
-    if (dr.newKey) {
-      const key = dr.newKey;
-      const pts = ptsStr(dr.pts);
-      cancelDraw();
-      addShape(key, [{ type: 'poly', points: pts }]);
-      st.editing = true;
-      st.part = 0;
-      toOrigin();
-      renderAll();
-      requestAnimationFrame(() => requestAnimationFrame(() => focus(key)));
-      return undefined;
-    }
     const def = D().shapes[st.sel];
     def.push({ type: 'poly', points: ptsStr(dr.pts) });
     st.part = def.length - 1;
@@ -587,12 +582,13 @@ function shapeStudio(view, api) {
     const px = 1 / k;
     const bowl = bowlFull(d, layout.bowlKey);
     const view2 = board.view();
-    drawGrid(g, view2, k > 12 ? 1 : 5, px);
+    const ownGrid = (st.draw || st.editing) && st.sel;
+    if (!ownGrid) drawGrid(g, view2, k > 12 ? 1 : 5, px); // (editing a shape shows its own grid instead: two grids through each other were confusing)
     drawBowl(g, bowl);
     const label = (text, x, y, size, fill = '#cbd5e1', anchor = 'start') => svg('text', { transform: `translate(${x} ${y}) scale(1 -1)`, 'font-size': size * px, fill, 'text-anchor': anchor, 'font-family': 'system-ui, sans-serif' }, text);
     g.append(label(`bowl "${layout.bowlKey}"  ${f3(bowl.a * 2)} wide at the rim, ${f3(bowl.b)} deep`, -bowl.a, S.groundYOf(bowl) - 1.6, 11));
-    if (st.draw || st.editing) {
-      const gs = st.draw ? drawShift() : shift(st.sel);
+    if (ownGrid) {
+      const gs = shift(st.sel);
       drawShapeGrid(g, view2, gs.x, gs.y, st.snap, k, px);
     }
     for (const r of layout.rows) {
@@ -617,8 +613,17 @@ function shapeStudio(view, api) {
         }
       });
       grp.append(...kids);
+      if (def.some((q) => q.cut)) { // the result of the cuts: the outline the block really has (dark), and how it is split for collision (thin lines)
+        try {
+          const built = S.buildShape(def, key);
+          const cx = built.ox, cy = built.oy;
+          const shiftBack = (pts) => pts.map(([x, y]) => `${x + cx},${y + cy}`).join(' ');
+          for (const q of built.parts) grp.append(svg('polygon', { points: shiftBack(q.pts), fill: 'none', stroke: 'rgba(15,23,42,.2)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
+          for (const v of built.visual ?? []) for (const loop of [v.pts, ...(v.holes ?? [])]) grp.append(svg('polygon', { points: shiftBack(loop), fill: 'none', stroke: '#0f172a', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
+        } catch { /* the problem is shown under the shape (renderInfo) */ }
+      }
       for (const [pi, p] of def.entries()) { // a part that is not convex cannot be a collision shape
-        if (p.type !== 'circle' && !p.visual && !isConvex(parsePts(p.points))) grp.append(svg('polygon', { points: p.points, fill: 'none', stroke: '#ef4444', 'stroke-width': 3, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
+        if (p.type !== 'circle' && !p.visual && !p.cut && !isConvex(parsePts(p.points))) grp.append(svg('polygon', { points: p.points, fill: 'none', stroke: '#ef4444', 'stroke-width': 3, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
         void pi;
       }
       g.append(grp);
@@ -715,6 +720,17 @@ function shapeStudio(view, api) {
     renderAll();
     fitSoon();
     return undefined;
+  }
+  /** An empty shape: no starting outline. It is invalid (and not sent anywhere) until you add a polygon or circle. */
+  function newEmpty(raw) {
+    const key = raw.trim();
+    addShape(key, []);
+    if (st.sel === key) {
+      st.editing = true;
+      st.part = 0;
+      renderAll();
+      requestAnimationFrame(() => requestAnimationFrame(() => focus(key)));
+    }
   }
   function rename(from, to) {
     const d = D();
@@ -852,9 +868,9 @@ function shapeStudio(view, api) {
     }));
     const nameIn = h('input', { type: 'text', placeholder: 'new shape name', value: st.newName });
     nameIn.addEventListener('input', () => { st.newName = nameIn.value; });
-    nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') startNew(nameIn.value); });
+    nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') newEmpty(nameIn.value); });
     put(listHead,
-      h('div', { class: 'bb-st-row' }, nameIn, btn('New (draw polygon)', () => startNew(nameIn.value))),
+      h('div', { class: 'bb-st-row' }, nameIn, btn('New (empty)', () => newEmpty(nameIn.value))),
       st.sel ? h('div', { class: 'bb-st-row' },
         btn('Duplicate', () => { let n = `${st.sel}_copy`; for (let i = 2; D().shapes[n]; i++) n = `${st.sel}_copy${i}`; addShape(n, clone(D().shapes[st.sel])); }),
         btn('Delete', () => removeShape(st.sel), 'bb-dbg-danger')) : null,
@@ -868,25 +884,6 @@ function shapeStudio(view, api) {
 
   // ── export / import of ONE shape ──
   const shapeSource = (key) => `${/^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key)}: ${S.toSource(D().shapes[key])},\n`;
-  function copyText(t, b) {
-    const done = () => { const old = b.textContent; b.textContent = 'Copied ✓'; setTimeout(() => (b.textContent = old), 1200); };
-    const fallback = () => {
-      const ta = h('textarea', { class: 'bb-dbg-offscreen' }, t);
-      document.body.append(ta);
-      ta.select();
-      try { document.execCommand('copy'); done(); } catch { window.prompt('Copy this:', t); }
-      ta.remove();
-    };
-    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(done, fallback); else fallback();
-  }
-  function saveText(t, name, mime) {
-    const url = URL.createObjectURL(new Blob([t], { type: mime }));
-    const a = h('a', { href: url, download: name });
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
   /** Imports {"name": [subshapes]} (what Export JSON writes), or a bare [subshapes] array named by the name field. */
   function importShape(text) {
     let v;
@@ -914,11 +911,15 @@ function shapeStudio(view, api) {
     let area = 0;
     for (const p of def) {
       if (p.visual) continue;
-      area += p.type === 'circle' ? Math.PI * (p.diameter / 2) ** 2 : polyArea(parsePts(p.points));
+      if (p.cut) continue;
+      area += (p.cut ? -1 : 1) * (p.type === 'circle' ? Math.PI * (p.diameter / 2) ** 2 : polyArea(parsePts(p.points)));
     }
-    const concave = def.some((p) => p.type !== 'circle' && !p.visual && !isConvex(parsePts(p.points)));
+    const concave = def.some((p) => p.type !== 'circle' && !p.visual && !p.cut && !isConvex(parsePts(p.points)));
     const n = usage(st.sel);
+    let cutErr = null;
+    if (def.some((p) => p.cut)) { try { S.buildShape(def, st.sel); } catch (e) { cutErr = String(e.message); } }
     put(infoEl,
+      cutErr ? h('div', { class: 'bb-dbg-err' }, cutErr) : null,
       h('div', {}, `size ${f3(b[2] - b[0])} × ${f3(b[3] - b[1])} · area ${f3(area)} · used in ${n} level${n === 1 ? '' : 's'}`),
       concave ? h('div', { class: 'bb-dbg-err' }, 'A part is not convex (a corner points inwards). Split it into several convex parts, or fix the corner.') : null);
   }
@@ -938,9 +939,12 @@ function shapeStudio(view, api) {
     }
     const rows = def.map((p, i) => {
       const head = h('div', { class: 'bb-st-row' }, h('strong', {}, `subshape ${i + 1}`), h('span', { class: 'bb-dbg-note' }, p.type === 'circle' ? 'circle' : `polygon, ${parsePts(p.points).length} points`), h('span', { class: 'bb-dbg-grow' }));
+      const cutBox = h('input', { type: 'checkbox', checked: !!p.cut });
+      cutBox.addEventListener('change', () => { if (cutBox.checked) { p.cut = true; delete p.visual; } else delete p.cut; edited(); renderInspector(); });
+      head.append(h('label', { class: 'bb-dbg-chk', title: 'CSG: this subshape is cut away from the other subshapes (a rectangle out of a circle, a hole in a plate). The collision becomes convex pieces of what is left.' }, cutBox, 'cut'));
       if (p.type !== 'circle') {
         const vis = h('input', { type: 'checkbox', checked: !!p.visual });
-        vis.addEventListener('change', () => { if (vis.checked) p.visual = true; else delete p.visual; edited(); });
+        vis.addEventListener('change', () => { if (vis.checked) { p.visual = true; delete p.cut; } else delete p.visual; edited(); renderInspector(); });
         head.append(h('label', { class: 'bb-dbg-chk', title: 'A drawing-only outline: it replaces the other subshapes when the block is drawn (collision stays as it is)' }, vis, 'drawing only'));
       }
       head.append(btn('✕', () => removeSubshape(i), 'bb-dbg-danger'));
@@ -990,13 +994,13 @@ function shapeStudio(view, api) {
       if (!preview) return;
       const d = D();
       const mats = Object.keys(d.materials).filter((m) => !d.materials[m].static);
-      const items = keys().map((key, i) => ({
+      const items = keys().filter((key) => d.shapes[key].length).map((key, i) => ({
         def: d.shapes[key],
         shader: d.materials[st.mat === '(mixed)' ? mats[i % mats.length] : st.mat]?.shader ?? 'wood',
         selected: key === st.sel,
       }));
       try {
-        preview.set({ items, bowl: bowlFull(d, bowlKey()), depth: d.tuning.depth, chamfer: d.tuning.chamfer });
+        preview.set({ items, bowl: bowlFull(d, bowlKey()), depth: d.tuning.depth, chamfer: d.tuning.chamfer, merge: d.tuning.mergeParts !== false });
       } catch (e) {
         console.error('balance: shape preview failed', e);
       }
@@ -1021,6 +1025,8 @@ function shapeStudio(view, api) {
       st.draw ? btn('Done ⏎', finishDraw, 'bb-dbg-go') : btn('+ Polygon', startDraw, 'bb-dbg-go'),
       st.draw ? btn('Cancel', cancelDraw) : null,
       h('label', { class: 'bb-st-mini', title: 'Clicking the first point again closes the polygon and finishes it' }, h('input', { type: 'checkbox', checked: st.closeOnFirst, onchange: (e) => { st.closeOnFirst = e.target.checked; scheduleDraw(); } }), 'click first point to finish'),
+      h('label', { class: 'bb-st-mini', title: 'On (default): the subshapes are joined in 2D and extruded as one block, without seams. Collision always uses the separate parts. (Same as Settings → mergeParts)' },
+        h('input', { type: 'checkbox', checked: d.tuning.mergeParts !== false, onchange: (e) => { d.tuning.mergeParts = e.target.checked; api.touch('tuning'); } }), 'merge parts'),
       h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
       h('label', { class: 'bb-st-mini' }, 'preview material', sel(['(mixed)', ...Object.keys(d.materials)], st.mat, (v) => { st.mat = v; renderList(); scheduleDraw(); updatePreview(); })),
       h('label', { class: 'bb-st-mini' }, 'bowl', sel(Object.keys(d.bowls), bowlKey(), (v) => { st.bowl = v; layout = null; scheduleDraw(); updatePreview(); })),
@@ -1330,6 +1336,8 @@ function levelStudio(view, api) {
       h('strong', {}, 'Level studio'),
       sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; fitSoon(); applyNow(); renderAll(); }, 'bb-dbg-grow'),
       btn('New', newLevel), btn('Copy', copyLevel),
+      btn('Export ⧉', (e) => copyText(`${S.toSource(d.levels[st.lvl])},\n`, e.currentTarget), '', 'Copy this level as a source entry for the levels list in definitions.js'),
+      btn('Export ⤓', () => saveText(JSON.stringify(d.levels[st.lvl], null, 1), `level-${st.lvl + 1}.json`, 'application/json'), '', 'Download this level as JSON'),
       btn(st.armDelete ? 'Really?' : 'Delete', deleteLevel, 'bb-dbg-danger'),
       probEl,
       btn('Shapes', () => api.open('shapes')),
