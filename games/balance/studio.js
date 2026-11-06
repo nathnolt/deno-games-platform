@@ -43,7 +43,7 @@ function dockGrip(root, view) {
   });
   root.append(g);
 }
-const SHADER_COLOR = { wood: '#c99a62', wood2: '#dcc294', glass: '#9fd3e6', stone1: '#8f9298', stone2: '#6d717a', float: '#86b0d6' };
+const SHADER_COLOR = { wood: '#c99a62', wood2: '#dcc294', glass: '#9fd3e6', crackedGlass: '#b9dcee', stone1: '#8f9298', stone2: '#6d717a', float: '#86b0d6' };
 const LIGHT0 = 1000; // the viewport number of the first light (models are 0, 1, 2 ... see client.js)
 const BLUR_CHOICES = [['none', 'sharp (none)'], ['light', 'light blur'], ['heavy', 'heavy blur']];
 const SNAPS = [['0', 'free'], ['0.1', '0.1'], ['0.25', '0.25'], ['0.5', '0.5'], ['1', '1']];

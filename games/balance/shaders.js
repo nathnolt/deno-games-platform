@@ -193,6 +193,26 @@ vec4 finish(vec3 c, float a) {
 const frag = (body) => prelude + body;
 
 /** name -> fragment shader source. */
+// What glass needs to bend the picture behind it. uRefr = a copy of the picture drawn so far (see #refractPass in client.js), uRefrOn = 0 when there is none.
+const REFRACT_GLSL = /* glsl */ `
+uniform sampler2D uRefr;
+uniform float uRefrOn;
+uniform vec2 uRefrRes;
+// rgb = what the glass shows: the picture behind it, bent (a little more at the edges and by waves in the glass), tinted, with a bit of the glass's own colour (keep).
+vec4 glassOut(vec3 own, vec2 p, float keep, vec2 piece) { // piece: extra bend for this part of the glass (a shard of cracked glass)
+  if (uRefrOn < 0.5) return vec4(own, 0.2 + keep * 0.6); // no picture to look through: a pale pane
+  vec2 warp = vec2(fbm(p * 0.9), fbm(p * 0.9 + 4.3)) - 0.5;
+  vec2 off = warp * 0.05 + normalize(vN).xy * 0.035 + piece;
+  vec2 uv = gl_FragCoord.xy / uRefrRes;
+  vec3 bg = vec3(
+    texture2D(uRefr, clamp(uv + off * 0.9, 0.002, 0.998)).r, // (the three colours bend a tiny bit differently)
+    texture2D(uRefr, clamp(uv + off, 0.002, 0.998)).g,
+    texture2D(uRefr, clamp(uv + off * 1.1, 0.002, 0.998)).b);
+  bg *= vec3(0.9, 0.97, 1.0);
+  return vec4(mix(bg, own, clamp(keep, 0.0, 1.0)), 1.0);
+}
+`;
+
 export const shaders = {
   wood: frag(/* glsl */ `
 void main() {
@@ -263,13 +283,63 @@ void main() {
   gl_FragColor = finish(c, 1.0);
 }`),
 
-  glass: frag(/* glsl */ `
+  // GLASS: mostly see-through, and what is behind it is BENT (the client copies the picture drawn so far to uRefr and draws the glass blocks after it).
+  // Where the copy is not available (uRefrOn = 0: a little preview window, a reflection) it is simply a pale transparent pane.
+  glass: frag(/* glsl */ `${REFRACT_GLSL}
 void main() {
   vec2 p = vP + uSeed * 5.0;
   vec3 c = mix(vec3(0.55, 0.80, 0.93), vec3(0.82, 0.95, 1.0), 0.5 + 0.5 * sin(p.x * 0.7 + p.y * 0.5));
   float streak = smoothstep(0.0, 0.35, sin((p.x - p.y) * 1.2 + 1.0));
   c += streak * 0.16;
-  gl_FragColor = finish(c, 0.8);
+  vec4 f = finish(c, 1.0);
+  float rim = pow(1.0 - abs(normalize(vN).z), 2.0); // the bevelled edges catch more light and are less clear
+  gl_FragColor = glassOut(f.rgb, p, 0.1 + 0.4 * rim + streak * 0.06, vec2(0.0));
+}`),
+
+  // CRACKED GLASS: the glass has been hit at one point. Cracks run out from it and are joined by cracks in rings, so the glass falls apart in shards that
+  // are narrow near the hit and bigger further away. The cracks are thin and black. Every shard is tilted a little differently, so each one bends the picture
+  // behind it in its own direction (that is what makes it look broken), and a few of the outer shards are missing.
+  crackedGlass: frag(/* glsl */ `${REFRACT_GLSL}
+vec3 cells(vec2 p, float per) { // nearest and second nearest point of a jittered grid (sideways it repeats after per cells), and a random number for the nearest cell
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float d1 = 8.0;
+  float d2 = 8.0;
+  float id = 0.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 g = vec2(float(x), float(y));
+      vec2 k = vec2(mod(i.x + g.x + per, per), i.y + g.y);
+      vec2 o = vec2(hash(k), hash(k + 17.3));
+      float d = length(g + o - f);
+      if (d < d1) { d2 = d1; d1 = d; id = hash(k + 31.7); } else if (d < d2) { d2 = d; }
+    }
+  }
+  return vec3(d1, d2, id);
+}
+void main() {
+  vec2 p = vP + uSeed * 13.0;
+  vec2 hit = (vec2(hash(vec2(uSeed, 1.0)), hash(vec2(uSeed, 2.0))) - 0.5) * 2.4; // where it was hit
+  vec2 v = vP - hit;
+  vec2 w = v + 0.35 * vec2(fbm(v * 1.1 + uSeed), fbm(v * 1.1 + 6.0 + uSeed)); // crooked cracks
+  float r = length(w) + 0.001;
+  float ang = atan(w.y, w.x) * 14.0 / 6.2831853; // 14 cracks run out from the hit
+  vec3 big = cells(vec2(ang, r * 0.55), 14.0);        // shards: narrow at the hit, longer further out
+  vec3 fine = cells(vec2(ang * 2.0, r * 1.1 + 3.0), 28.0); // smaller cracks inside the shards
+  float edge = big.y - big.x;
+  float crack = 1.0 - smoothstep(0.0, 0.05, edge); // thin lines
+  float hair = (1.0 - smoothstep(0.0, 0.03, fine.y - fine.x)) * step(0.45, hash(vec2(fine.z * 7.0, big.z))); // some of the small ones, not all
+  if (big.z > 0.94 && r > 2.8 && edge > 0.06) discard; // a missing shard, only away from the hit
+  vec2 q = vP + uSeed * 5.0;
+  vec3 c = mix(vec3(0.55, 0.80, 0.93), vec3(0.82, 0.95, 1.0), 0.5 + 0.5 * sin(q.x * 0.7 + q.y * 0.5));
+  c *= 0.94 + 0.12 * big.z;                                   // every shard is a little lighter or darker
+  c += smoothstep(0.16, 0.06, edge) * (1.0 - crack) * 0.12;    // the rim of a shard catches light, next to the crack
+  vec4 f = finish(c, 1.0);
+  float line = clamp(max(crack, hair * 0.7), 0.0, 1.0);
+  vec3 own = mix(f.rgb, vec3(0.02, 0.03, 0.05), line);         // the cracks are black
+  vec2 tilt = (vec2(hash(vec2(big.z, 3.7)), hash(vec2(big.z, 8.1))) - 0.5) * 0.09; // each shard bends the light its own way
+  float rim = pow(1.0 - abs(normalize(vN).z), 2.0);
+  gl_FragColor = glassOut(own, p * 1.7, max(0.1 + 0.4 * rim, line * 0.95), tilt);
 }`),
 
   // A CHALK OUTLINE, like the one the police draw round a body on the floor: a white line with a slightly rough edge and some chalk dust,
@@ -395,4 +465,6 @@ void main() {
 };
 
 /** Shaders whose blocks are see-through (drawn after the opaque ones, no depth writes). */
-export const transparentShaders = new Set(['glass', 'outline']);
+export const transparentShaders = new Set(['glass', 'crackedGlass', 'outline']);
+/** Shaders that look through to a copy of the picture behind them (the client draws them last, on their own layer). */
+export const refractShaders = new Set(['glass', 'crackedGlass']);

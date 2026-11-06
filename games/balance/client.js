@@ -8,7 +8,7 @@ import {
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
 const PRISTINE = DEBUG ? cloneDefinitions() : null;
 import { flatNormals, parseObj } from './obj.js';
-import { SHADOW_GLSL, shaders, transparentShaders, vertexShader } from './shaders.js';
+import { SHADOW_GLSL, refractShaders, shaders, transparentShaders, vertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
 function loadStyles() {
@@ -262,6 +262,11 @@ class BalanceView {
   shards = []; //            pieces of a block that just broke: { mesh, vx, vy, vz, spin, life }
   // visual effects (see #renderAll): shadows from a light, a blurred background, a reflective water surface. A pass that throws is switched off.
   fx = { off: new Set(), shadowRT: null, shadowCam: null, depthMat: null, reflRT: null, reflCam: null, kawase: null };
+  refrU = { //                       glass looks through to a copy of the picture drawn so far (see #refractPass)
+    uRefr: { value: null },
+    uRefrOn: { value: 0 },
+    uRefrRes: { value: new THREE.Vector2(1, 1) },
+  };
   shadowU = {
     uShadowMap: { value: null },
     uShadowMat: { value: new THREE.Matrix4() },
@@ -367,7 +372,7 @@ class BalanceView {
   raf = 0;
   lastFrame = performance.now();
   uTime = { value: 0 };
-  ray = new THREE.Raycaster();
+  ray = Object.assign(new THREE.Raycaster(), { layers: Object.assign(new THREE.Layers(), { mask: 0b101 }) }); // (layer 0 and the glass of layer 2)
   ndc = new THREE.Vector2();
   hit = new THREE.Vector3();
   plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -PLAY_Z);
@@ -860,7 +865,7 @@ class BalanceView {
     };
   }
 
-  /** Debug: switch one visual effect ('shadows', 'reflection', 'blur') off or on (it also comes back on after it had failed). */
+  /** Debug: switch one visual effect ('shadows', 'reflection', 'blur', 'refraction') off or on (it also comes back on after it had failed). */
   debugFx(name, on) {
     if (on) this.fx.off.delete(name);
     else this.fx.off.add(name);
@@ -1654,7 +1659,7 @@ void main() {
         uReveal: { value: 1 }, //     below 1 the block dissolves in (see finish() in shaders.js)
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
         uFog: fog?.uFog ?? { value: new THREE.Vector2(1e6, 2e6) }, // blocks never fade; background models do
-        ...(plain ? this.#plainLight() : this.shadowU), // (the little preview windows are other WebGL contexts: no shared textures)
+        ...(plain ? { ...this.#plainLight(), uRefr: { value: null }, uRefrOn: { value: 0 }, uRefrRes: { value: new THREE.Vector2(1, 1) } } : { ...this.shadowU, ...this.refrU }), // (the little preview windows are other WebGL contexts: no shared textures)
       },
       transparent,
       depthWrite: !transparent,
@@ -1763,6 +1768,7 @@ void main() {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.userData.id = id;
       if (transparentShaders.has(shaderName)) mesh.renderOrder = 3;
+      if (refractShaders.has(shaderName)) mesh.layers.set(2); // layer 2 = glass: drawn in a pass of its own, after a copy of the picture has been made (#renderAll)
       group.add(mesh);
     }
     this.scene.add(group);
@@ -1770,7 +1776,7 @@ void main() {
     // blocks with a stack limit (glass) carry a lamp: green = nothing on it, orange = something, red = at the limit (one more breaks it)
     const limit = materials[MATERIAL_KEYS[mi]].stackLimit;
     let dot = null;
-    if (limit !== undefined) {
+    if (limit !== undefined && !materials[MATERIAL_KEYS[mi]].noLamp) {
       const sh = getShape(shapeKey);
       const r = THREE.MathUtils.clamp(Math.min(sh.w, sh.h) * 0.16, 0.3, 1.1);
       dot = new THREE.Mesh(this.dotGeo, new THREE.MeshBasicMaterial({ color: LAMP[0] }));
@@ -1781,7 +1787,8 @@ void main() {
     }
 
     const v = {
-      dot, limit, load: -1,
+      glass: refractShaders.has(shaderName),
+      dot, limit, load: -1, // (limit also marks a block that shatters, with or without a lamp)
       id, group, mats: [mat], marker: null, size: getShape(shapeKey), shapeKey,
       table: !!opts.table, slot: opts.slot ?? 0, n: opts.n ?? 4,
       tx: opts.x ?? 0, ty: opts.y ?? 0, ta: opts.a ?? 0, st: opts.st ?? BODY.NORMAL, owner: opts.owner ?? -1,
@@ -2223,8 +2230,54 @@ void main() {
       r.clear();
       r.render(this.scene, this.camera);
     }
+    // glass (layer 2): copy what has been drawn, then draw the glass on top of it, bending that copy
+    const cam = this.camera;
+    const normalMask = cam.layers.mask;
+    const hasGlass = [...this.bodyViews.values(), ...this.tableViews.values()].some((v) => v.glass);
+    this.refrU.uRefrOn.value = 0;
+    if (hasGlass && guard('refraction', () => this.#refractPass())) this.refrU.uRefrOn.value = 1;
+    if (hasGlass) {
+      const autoClear = r.autoClear;
+      const bgSave = this.scene.background;
+      r.autoClear = false; // (the picture and its depth stay: the glass hides behind what is in front of it)
+      this.scene.background = null;
+      cam.layers.mask = 0b100;
+      try {
+        r.render(this.scene, cam);
+      } finally {
+        cam.layers.mask = normalMask;
+        this.scene.background = bgSave;
+        r.autoClear = autoClear;
+      }
+    }
     r.clearDepth();
-    r.render(this.frontScene, this.camera);
+    cam.layers.mask = normalMask | 0b100; // (the glass you hold is in the other scene)
+    try {
+      r.render(this.frontScene, cam);
+    } finally {
+      cam.layers.mask = normalMask;
+    }
+  }
+
+  /** Copy the picture drawn so far into a texture for the glass to look through. Returns false when that is not possible. */
+  #refractPass() {
+    const r = this.renderer;
+    const fx = this.fx;
+    const size = r.getDrawingBufferSize(new THREE.Vector2());
+    const w = Math.max(2, Math.round(size.x));
+    const h = Math.max(2, Math.round(size.y));
+    if (!fx.refrTex || fx.refrW !== w || fx.refrH !== h) {
+      fx.refrTex?.dispose();
+      fx.refrTex = new THREE.FramebufferTexture(w, h);
+      fx.refrW = w;
+      fx.refrH = h;
+      this.refrU.uRefr.value = fx.refrTex;
+    }
+    const origin = new THREE.Vector2(0, 0);
+    if (r.copyFramebufferToTexture.length >= 2) r.copyFramebufferToTexture(origin, fx.refrTex); // (older three.js: position first)
+    else r.copyFramebufferToTexture(fx.refrTex, origin);
+    this.refrU.uRefrRes.value.set(w, h);
+    return true;
   }
 
   #showAll() {
@@ -2261,7 +2314,10 @@ void main() {
       });
     }
     if (!fx.depthMat) fx.depthMat = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4 }); // (the usual hardware slope bias: occluders are stored a little further away)
-    if (!fx.shadowCam) fx.shadowCam = new THREE.OrthographicCamera(-half, half, half, -half, SHADOW_NEAR, SHADOW_FAR);
+    if (!fx.shadowCam) {
+      fx.shadowCam = new THREE.OrthographicCamera(-half, half, half, -half, SHADOW_NEAR, SHADOW_FAR);
+      fx.shadowCam.layers.enable(2); // (glass casts a shadow too)
+    }
     if (fx.shadowCam.right !== half) {
       Object.assign(fx.shadowCam, { left: -half, right: half, top: half, bottom: -half });
       fx.shadowCam.updateProjectionMatrix();

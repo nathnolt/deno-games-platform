@@ -48,11 +48,13 @@ export const tuning = {
 // floatLevel: (float blocks) how deep it sits in the water when it floats alone: 0.5 = half under, 1 = just under. It never sinks, but it tilts.
 // stackLimit: how many blocks may rest on top of this block (directly or through other blocks). One more and it breaks.
 //           The block wears a coloured dot: green = nothing on it, orange = 1, red = 2 (= the limit), and it shatters at limit + 1.
+// noLamp:   no coloured dot on a block with a stackLimit (for blocks that look cracked already)
 // shader:   name of a GLSL shader in client/shaders.js
 export const materials = {
   wood: { friction: 10, weight: 10, shader: 'wood' },
   ash: { friction: 8, weight: 8, shader: 'wood2' },
   glass: { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
+  crackedGlass: { friction: 4, weight: 5, shader: 'crackedGlass', stackLimit: 0, noLamp: true }, // breaks as soon as one block rests on it
   stone: { friction: 14, weight: 20, shader: 'stone1' },
   static: { static: true, friction: 12, shader: 'stone2' },
   floatBlock: { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },

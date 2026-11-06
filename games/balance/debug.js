@@ -61,7 +61,7 @@ export function createDebugMenu(view) {
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
     needsRestart: false, dirty: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, lastSend: 0, sentRev: 0,
-    fxShadows: true, fxReflection: true, fxBlur: true,
+    fxShadows: true, fxReflection: true, fxBlur: true, fxRefraction: true,
     local: false, localError: '', localBeforeStudio: false, // the local game: is it what the view shows, why it could not start, was it on before a studio opened
   };
   let infoToken = 0;
@@ -609,9 +609,10 @@ export function createDebugMenu(view) {
         check('float (buoyant)', m, 'float', 'materials', () => render()),
         m.float ? slider('float level (part under water)', m, 'floatLevel', 'materials', 0.1, 1, 0.05) : null,
         num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),
+        m.stackLimit !== undefined ? check('no lamp (looks cracked already)', m, 'noLamp', 'materials') : null,
         select('shader', shaderNames(), m, 'shader', 'materials'),
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),
-      note('Block shaders (wood, glass, stone1, stone2, float) use the face of the block; 3D shaders (wood2, ceramic, bark ...) work everywhere.'),
+      note('Block shaders (wood, glass, crackedGlass, stone1, stone2, float) use the face of the block; 3D shaders (wood2, ceramic, bark ...) work everywhere.'),
     );
     return out;
   }
@@ -924,6 +925,7 @@ export function createDebugMenu(view) {
     helper('Shadows', 'fxShadows', (on) => view.debugFx('shadows', on)),
     helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
     helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
+    helper('Glass bending', 'fxRefraction', (on) => view.debugFx('refraction', on)),
     h('span', { class: 'bb-dbg-grow' }),
     reloadBtn,
     applyBtn,
