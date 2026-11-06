@@ -17,11 +17,60 @@
 // All of them edit the same DRAFT as the rest of the debug menu (see debug.js), and NOTHING here is shared with the room. The level and
 // background studios show and test the draft in the LOCAL GAME: a private copy of the game that runs in this page (client.js, sim.js), so
 // nobody else is restarted and nothing goes over the network while you edit. The draft is never sent to the room.
+// The ONE exception is on purpose and explicit: the buttons "Add level" / "Update level" (level studio) and "Add shape" / "Update shape" (shape studio).
+// After a confirmation they send that ONE level / shape to the server, which writes levels.js / shapes.js; every room then uses it.
 
 import * as S from './shared.js';
 import { clone, h, svg } from './ui.js';
 
 const KEY = /^[A-Za-z][\w-]*$/;
+
+/**
+ * A confirmation: a dialog over a dimmed page with a confirm button and Cancel; the X, Escape and a click on the backdrop close it too.
+ * `run()` does the work and resolves { ok, error? }: a failure stays in the dialog (so you can read it and try again), a success closes it and calls `onDone`.
+ */
+function confirmDialog({ title, text, label, run, onDone }) {
+  const before = document.activeElement;
+  let busy = false;
+  const close = () => {
+    if (busy) return;
+    document.removeEventListener('keydown', onKey, true);
+    back.remove();
+    before?.focus?.();
+  };
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  }
+  const err = h('div', { class: 'bb-dbg-err bb-st-dlg-err' });
+  const ok = h('button', { type: 'button', class: 'bb-dbg-btn bb-dbg-go' }, label);
+  ok.addEventListener('click', async () => {
+    busy = true;
+    ok.disabled = true;
+    ok.textContent = 'Saving…';
+    err.textContent = '';
+    let r;
+    try { r = await run(); } catch (e) { r = { ok: false, error: `${e?.message ?? e}` }; }
+    busy = false;
+    if (r.ok) { close(); onDone?.(r); return; }
+    ok.disabled = false;
+    ok.textContent = label;
+    err.textContent = r.error ?? 'That did not work.';
+  });
+  const back = h('div', { class: 'bb-st-dlg-back' },
+    h('div', { class: 'bb-st-dlg', role: 'dialog', 'aria-modal': 'true' },
+      h('button', { type: 'button', class: 'bb-st-dlg-x', title: 'Close', onclick: close }, '✕'),
+      h('h3', {}, title),
+      h('p', {}, text),
+      err,
+      h('div', { class: 'bb-st-dlg-btns' }, ok, h('button', { type: 'button', class: 'bb-dbg-btn', onclick: close }, 'Cancel'))));
+  back.addEventListener('pointerdown', (e) => { if (e.target === back) close(); });
+  document.addEventListener('keydown', onKey, true);
+  document.body.append(back);
+  ok.focus();
+}
 // How big the studio panels are is YOUR view, not game state: it is kept in this browser only and never sent to the server or the other players.
 const prefGet = (k, d) => { try { const v = parseFloat(localStorage.getItem(`balance.studio.${k}`)); return Number.isFinite(v) ? v : d; } catch { return d; } };
 const prefSet = (k, v) => { try { localStorage.setItem(`balance.studio.${k}`, String(v)); } catch { /* private mode */ } };
@@ -1044,11 +1093,30 @@ function shapeStudio(view, api) {
   const head = h('div', { class: 'bb-st-head' });
   const probEl = h('span', { class: 'bb-st-prob' });
   const renderProb = () => api.showProblems(probEl);
+  const inFile = (key) => Object.hasOwn(view.debugRoomDefs()?.shapes ?? {}, key); // is this shape in shapes.js (as far as the room knows)?
+  function saveShape() {
+    const key = st.sel;
+    const value = D().shapes[key];
+    if (!value) return;
+    if (api.problems().length) { st.msg = `Fix this first: ${api.problems()[0]}`; renderList(); return; }
+    const add = !inFile(key);
+    confirmDialog({
+      title: add ? 'Add shape' : 'Update shape',
+      text: add
+        ? `Are you sure you want to add shape “${key}”? It is written to shapes.js and every room gets it.`
+        : `Are you sure you want to update shape “${key}”? It replaces the shape in shapes.js and every room gets the new version.`,
+      label: add ? 'Add shape' : 'Update shape',
+      run: () => api.saveItem({ kind: 'shape', op: add ? 'add' : 'update', key, value: clone(value) }),
+      onDone: (r) => { st.msg = ''; st.saved = add ? `Shape “${key}” was added to ${r.file}.` : `Shape “${key}” was updated in ${r.file}.`; renderHead(); },
+    });
+  }
   function renderHead() {
     const d = D();
     renderProb();
     put(head,
       h('strong', {}, 'Shape studio'),
+      d.shapes[st.sel] ? btn(inFile(st.sel) ? 'Update shape' : 'Add shape', saveShape, 'bb-dbg-go', inFile(st.sel) ? 'Replace this shape in shapes.js (asks to confirm first)' : 'Add this shape to shapes.js (asks to confirm first)') : null,
+      st.saved ? h('span', { class: 'bb-st-msg' }, st.saved) : null,
       st.draw ? btn('Done ⏎', finishDraw, 'bb-dbg-go') : btn('+ Polygon', startDraw, 'bb-dbg-go'),
       st.draw ? btn('Cancel', cancelDraw) : null,
       h('label', { class: 'bb-st-mini', title: 'Clicking the first point again closes the polygon and finishes it' }, h('input', { type: 'checkbox', checked: st.closeOnFirst, onchange: (e) => { st.closeOnFirst = e.target.checked; scheduleDraw(); } }), 'click first point to finish'),
@@ -1142,7 +1210,7 @@ function levelStudio(view, api) {
   const L = () => D().levels[st.lvl];
   const lab = (c) => view.debugSend({ lab: c }); // (the local game only: debugSend never reaches the room)
   const snapV = (v) => snapTo(v, st.snap);
-  const btn = (text, fn, cls = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, onclick: fn }, text);
+  const btn = (text, fn, cls = '', title = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, title, onclick: fn }, text);
   const sel = (options, value, onchange, cls = '') => {
     const s = h('select', { class: cls }, options.map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return h('option', { value: v }, l); }));
     s.value = value;
@@ -1207,6 +1275,7 @@ function levelStudio(view, api) {
         const b = l.initialBlocks[i];
         st.sel = i;
         renderBody();
+        scheduleDraw(); // (the selection outline: without this it only appeared at the next redraw, e.g. after a zoom or a move)
         const off = { x: w.x - b.x, y: w.y - b.y };
         return { move(q) { b.x = snapV(q.x - off.x); b.y = snapV(q.y - off.y); api.touch('levels', false, true); scheduleDraw(); }, up() { renderBody(); } };
       }
@@ -1368,14 +1437,54 @@ function levelStudio(view, api) {
   const body = h('div', { class: 'bb-st-body' });
 
   const probEl = h('span', { class: 'bb-st-prob' });
+  // Which levels of the draft are in levels.js already? A level object that was in the file keeps its place in it (by object, so reordering, renaming or deleting other
+  // levels does not confuse it); a level made here (New, Copy) is new until it has been added. First match is by name, when the studio opens or the draft is replaced.
+  const origin = new WeakMap(); // draft level -> index in levels.js
+  const fileLevels = () => view.debugRoomDefs()?.levels ?? [];
+  function syncOrigins() {
+    const file = fileLevels();
+    const taken = new Set(D().levels.map((lv) => origin.get(lv)).filter((i) => i !== undefined));
+    for (const lv of D().levels) {
+      if (origin.get(lv) !== undefined) continue;
+      const j = file.findIndex((f, i) => !taken.has(i) && f.name === lv.name);
+      if (j >= 0) { origin.set(lv, j); taken.add(j); }
+    }
+  }
+  const worldName = (lv) => { const w = D().worlds ?? {}; const key = lv.world in w ? lv.world : Object.keys(w)[0]; return w[key]?.name ?? key ?? '(none)'; };
+  function saveLevel() {
+    const lv = L();
+    if (!lv) return;
+    if (api.problems().length) { st.msg = `Fix this first: ${api.problems()[0]}`; renderBar(); return; }
+    syncOrigins();
+    const at = origin.get(lv);
+    const add = at === undefined;
+    const was = add ? undefined : fileLevels()[at]?.name;
+    const value = clone(lv);
+    confirmDialog({
+      title: add ? 'Add level' : 'Update level',
+      text: add
+        ? `Are you sure you want to add level “${lv.name}” to world “${worldName(lv)}”? It is written to levels.js and every room gets it.`
+        : `Are you sure you want to update level “${lv.name}” in world “${worldName(lv)}”? It replaces the level in levels.js and every room gets the new version.`,
+      label: add ? 'Add level' : 'Update level',
+      run: () => api.saveItem({ kind: 'level', op: add ? 'add' : 'update', index: at, was, value }),
+      onDone: (r) => {
+        origin.set(lv, r.index);
+        st.msg = add ? `Level “${lv.name}” was added to ${r.file}.` : `Level “${lv.name}” was updated in ${r.file}.`;
+        renderHead();
+        renderBar();
+      },
+    });
+  }
   function renderHead() {
     const d = D();
     api.showProblems(probEl);
+    syncOrigins();
     put(head,
       h('strong', {}, 'Level studio'),
       sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; fitSoon(); applyNow(); renderAll(); }, 'bb-dbg-grow'),
       btn('New', newLevel), btn('Copy', copyLevel),
       btn('▶ Playtest', () => api.playtest(st.lvl), 'bb-dbg-go'),
+      btn(origin.get(L()) === undefined ? 'Add level' : 'Update level', saveLevel, 'bb-dbg-go', origin.get(L()) === undefined ? 'Add this level to levels.js (asks to confirm first)' : 'Replace this level in levels.js (asks to confirm first)'),
       btn('Export ⧉', (e) => copyText(`${S.toSource(d.levels[st.lvl])},\n`, e.currentTarget), '', 'Copy this level as a source entry for the levels list in definitions.js'),
       btn('Export ⤓', () => saveText(JSON.stringify(d.levels[st.lvl], null, 1), `level-${st.lvl + 1}.json`, 'application/json'), '', 'Download this level as JSON'),
       btn(st.armDelete ? 'Really?' : 'Delete', deleteLevel, 'bb-dbg-danger'),
@@ -2107,7 +2216,7 @@ function backgroundStudio(view, api) {
 
 /**
  * @param view  the BalanceView
- * @param api   { draft(): the current draft, touch(kind, quiet?), syncNow(): give the draft to the local game now, playtest(levelIndex): leave the studio and play it in the local game,
+ * @param api   { draft(): the current draft, touch(kind, quiet?, live?), saveItem(request): ask the server to add / update ONE level or shape in its file (after a confirmation), syncNow(): give the draft to the local game now, playtest(levelIndex): leave the studio and play it in the local game,
  *                problems(): string[], showProblems(el), w: the widget builders of the debug menu, open(name), close() }
  */
 export function createStudio(view, api) {

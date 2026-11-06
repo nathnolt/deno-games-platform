@@ -215,3 +215,14 @@
 .bb-st-gripy { flex: none; height: 8px; cursor: ns-resize; touch-action: none; background: #151b30; border-bottom: 1px solid #2b3550; position: relative; }
 .bb-st-gripy::after { content: ''; position: absolute; left: 50%; top: 2px; width: 40px; height: 3px; margin-left: -20px; border-radius: 2px; background: #3b4668; }
 .bb-st-gripy:hover::after { background: #818cf8; }
+
+/* the confirmation of the studios (Add / Update level, Add / Update shape) */
+.bb-st-dlg-back { position: fixed; inset: 0; z-index: 100000; display: flex; align-items: center; justify-content: center; background: rgba(5, 8, 16, .62); }
+.bb-st-dlg { position: relative; width: min(28rem, 90vw); box-sizing: border-box; padding: 1.1rem 1.2rem 1rem; color: #e5e7eb; background: #161d38; border: 1px solid #4a5a94; border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, .55); font: 14px/1.4 system-ui, sans-serif; }
+.bb-st-dlg h3 { margin: 0 2rem .5rem 0; font-size: 1.05rem; }
+.bb-st-dlg p { margin: 0 0 .8rem; }
+.bb-st-dlg-x { position: absolute; top: .5rem; right: .5rem; width: 1.8rem; height: 1.8rem; font: inherit; cursor: pointer; color: #cbd5e1; background: none; border: 0; border-radius: 6px; }
+.bb-st-dlg-x:hover { background: #25305a; }
+.bb-st-dlg-err { margin: 0 0 .8rem; white-space: pre-wrap; }
+.bb-st-dlg-err:empty { display: none; }
+.bb-st-dlg-btns { display: flex; gap: .5rem; justify-content: flex-end; }

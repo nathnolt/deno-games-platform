@@ -66,29 +66,8 @@ export const materials = {
 };
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
-// A shape is a list of parts. Part types:
-//   { type: 'poly',   points: 'x,y x,y x,y ...' }   a CONVEX polygon (build concave shapes from several parts, like plus1)
-//   { type: 'circle', diameter: d, x?, y? }          x/y = centre, default (d/2, d/2)
-//   add `visual: true` to a poly to make it a drawing-only outline (it replaces the parts when the block is drawn)
-// Origin and orientation do not matter: every shape is re-centred on the middle of its bounding box when it is used.
-export const shapes = {
-  square1: [{ type: 'poly', points: '0,0 4,0 4,4 0,4' }],
-  heart: [
-    { type: 'poly', points: '4.682,2.121 2.561,4.242 0.44,2.121 2.561,0' },
-    { type: 'circle', diameter: 3, x: 3.621, y: 3.1815 },
-    { type: 'circle', diameter: 3, x: 1.5, y: 3.1815 },
-  ],
-  L:  [{ type: 'poly', points: '0,0 0,7 2,7 2,0' }, { type: 'poly', points: '0,2 4,2 4,0 0,0' }],
-  L2: [{ type: 'poly', points: '4,0 4,7 2,7 2,0' }, { type: 'poly', points: '4,2 0,2 0,0 4,0' }],
-  S:  [{ type: 'poly', points: '0,4 0,2 4,2 4,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
-  S2: [{ type: 'poly', points: '4,4 4,2 8,2 8,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
-  T:  [{ type: 'poly', points: '0,0 0,2 6,2 6,0 0,0' }, { type: 'poly', points: '2,0 2,4 4,4 4,0' }],
-  triangle: [{ type: 'poly', points: '0,0 6,6 6,0' }],
-  plus: [{ type: 'poly', points: '3,0 3,6 5,6 5,0' }, { type: 'poly', points: '1,4 7,4 7,2 1,2' }],
-  arrow: [{ type: 'poly', points: '-4,1 1,1 1,-1 -4,-1' }, { type: 'poly', points: '0,2.828 2.828,0 0,-2.828' }],
-  circle: [{ type: 'circle', diameter: 5 }],
-  what: [{ type: 'circle', diameter: 2 }, { type: 'circle', diameter: 2, x: 6, y: 1 }],
-};
+// The shapes live in their own file: ./shapes.js (the shape studio rewrites it when you press "Add shape" / "Update shape").
+export { shapes } from './shapes.js';
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────
 // The bowl is a bowl of revolution: a flat bottom, rounded corners and straight walls. The physics sees the slice through the middle
@@ -243,5 +222,5 @@ export const worlds = {
 };
 
 // ── Levels ───────────────────────────────────────────────────────────────────────────────────────────────────
-// The levels live in their own file: ./levels.js (the debug menu rewrites it when you make or change levels).
+// The levels live in their own file: ./levels.js (the level studio rewrites it when you press "Add level" / "Update level").
 export { levels } from './levels.js';

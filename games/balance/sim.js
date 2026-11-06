@@ -9,7 +9,7 @@
 // The gameplay is 2D (x, y); the 3D look is purely client-side.
 import {
   applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, groundYOf, inDrop, levels, LOSE,
-  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, PHASE, PREVIEW_COUNT, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
+  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 let planck = null;
@@ -39,6 +39,7 @@ const WIN_SHOW = 2.6; //          seconds "level cleared" is shown before the ga
 const FREEZE_AFTER = 5; //        stop simulating this long after the level has ended
 const FLOAT_SIDES = 24; //        circles are approximated by a polygon when computing buoyancy
 const BOWL_SEGMENTS = 36;
+const SAVE_PIECE_MAX = 3000; //   debug: longest piece of a level / shape that comes in one message (the platform limits a message to 4096 characters)
 const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along in every snapshot after a change
 // countdown and follow come from `tuning` (definitions.js)
 const LAB_ID_START = 100000; //   ids of blocks spawned in the level lab (they never clash with the ids of a level's own blocks)
@@ -85,12 +86,18 @@ export function clipBelow(pts, y0) {
   return { area: Math.abs(a2) / 2, cx: cx / (3 * a2), cy: cy / (3 * a2) };
 }
 
+const ROOMS = new Set(); //       debug: WeakRefs to every room of this server, so a saved level / shape reaches all of them
+let fileQueue = Promise.resolve(); // debug: files are written one after the other
+
 export class BalanceGame {
   constructor(ctx) {
     this.ctx = ctx;
     // ctx.sandboxDefs (browser only) = a private game of the debug menu: it runs on its own copy of the definitions and never leaves this page
     this.sandbox = !!ctx.sandboxDefs;
     this.grace = this.sandbox ? 0 : START_GRACE;
+    if (!this.sandbox) ROOMS.add(new WeakRef(this));
+    this.saveParts = new Map(); // debug: pieces of a level / shape that is still coming in, per player
+    this.saveResult = null; //    debug: { id, ok, error?, index?, file? }: how the last explicit save went (the player who pressed the button waits for it)
     this.defs = ctx.sandboxDefs ?? BASE; // debug: this room's definitions (BASE until somebody applies a change here)
     activate(this.defs);
     this.players = new Map(); //  playerId -> { slot, held: null | { item, rec, tx, ty, trot } }
@@ -185,7 +192,7 @@ export class BalanceGame {
       total: this.total,
       why: this.why,
       still: round2(clamp(this.settle / (tuning.countdown ?? 3), 0, 1)), // progress of the countdown after the last block (0 = not running)
-      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
+      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, ...(this.saveResult ? { sv: this.saveResult } : {}), ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
   }
 
@@ -254,9 +261,90 @@ export class BalanceGame {
     if (this.levelIdx >= levels.length) this.#toMenu();
   }
 
-  /** Debug menu: a player that just came in asks for the room's definitions. Nobody can change them from the menu: edits only ever reach the private local game. */
+  /**
+   * Debug: a player that just came in asks for the room's definitions (defsRequest), or presses "Add level" / "Update level" / "Add shape" /
+   * "Update shape" in a studio and confirms it: that arrives as numbered pieces of JSON text { id, kind: 'level' | 'shape', op: 'add' | 'update', ... }.
+   * Nothing else in the debug menu ever reaches the server.
+   */
   #debugInput(id, d) {
-    if (d.defsRequest) this.defsBurst = DEFS_BURST;
+    if (d.defsRequest) {
+      this.defsBurst = DEFS_BURST;
+      return;
+    }
+    if (this.sandbox) return; // (the local game of a studio never writes files)
+    const c = d.debugChunk;
+    if (!c || typeof c.id !== 'string' || c.id.length > 40 || !Number.isInteger(c.i) || !Number.isInteger(c.n) || c.n < 1 || c.n > 60 || c.i < 0 || c.i >= c.n || typeof c.s !== 'string' || c.s.length > SAVE_PIECE_MAX) return;
+    let asm = this.saveParts.get(id);
+    if (!asm || asm.id !== c.id || asm.n !== c.n) this.saveParts.set(id, (asm = { id: c.id, n: c.n, parts: new Array(c.n), got: 0 }));
+    if (asm.parts[c.i] === undefined) asm.got++;
+    asm.parts[c.i] = c.s;
+    if (asm.got < asm.n) return;
+    this.saveParts.delete(id);
+    let req;
+    try { req = JSON.parse(asm.parts.join('')); } catch { req = null; }
+    if (!req || typeof req !== 'object') { this.saveResult = { id: c.id, ok: false, error: 'the request arrived damaged (not valid JSON)' }; return; }
+    req.id = c.id;
+    fileQueue = fileQueue.then(() => this.#saveItem(req)).catch((e) => { this.saveResult = { id: c.id, ok: false, error: `${e?.message ?? e}` }; });
+  }
+
+  /** Debug: add or replace ONE level (levels.js) or ONE shape (shapes.js): check the result, write the file, then every room uses it from now on. */
+  async #saveItem(req) {
+    const fail = (error) => { this.saveResult = { id: req.id, ok: false, error }; };
+    activate(this.defs);
+    const next = cloneDefinitions();
+    const add = req.op === 'add';
+    if (!add && req.op !== 'update') return fail('unknown request');
+    let file;
+    let text;
+    let index = -1;
+    if (req.kind === 'level') {
+      const lv = req.value;
+      if (!lv || typeof lv !== 'object' || Array.isArray(lv)) return fail('that is not a level');
+      if (add) {
+        next.levels.push(lv);
+        index = next.levels.length - 1;
+      } else {
+        index = req.index;
+        if (!Number.isInteger(index) || !next.levels[index] || next.levels[index].name !== req.was) return fail('that level is not in levels.js any more (or it was renamed there): reload the page and try again');
+        next.levels[index] = lv;
+      }
+      file = 'levels.js';
+      text = serializeLevels(next.levels);
+    } else if (req.kind === 'shape') {
+      const key = req.key;
+      if (typeof key !== 'string' || !/^[A-Za-z][\w-]{0,39}$/.test(key)) return fail('a shape name starts with a letter and has at most 40 letters, digits, - or _');
+      const exists = Object.hasOwn(next.shapes, key);
+      if (add && exists) return fail(`there is a shape called ${key} already: use Update shape`);
+      if (!add && !exists) return fail(`there is no shape called ${key} in shapes.js: use Add shape`);
+      if (!Array.isArray(req.value)) return fail('that is not a shape');
+      next.shapes[key] = req.value;
+      file = 'shapes.js';
+      text = serializeShapes(next.shapes);
+    } else {
+      return fail('unknown request');
+    }
+    const problems = validateDefinitions(next); // shader names are a client matter: not checked here
+    if (problems.length) return fail(problems.slice(0, 3).join('; '));
+    if (typeof Deno === 'undefined' || typeof Deno.writeTextFile !== 'function') return fail('this server cannot write files');
+    try {
+      await Deno.writeTextFile(new URL(`./${file}`, import.meta.url), text);
+    } catch (e) {
+      const denied = /permission|capable|--allow-write|requires write/i.test(`${e?.name} ${e?.message}`);
+      return fail(denied
+        ? `${file} could not be written: Deno has no write permission. Add --allow-write=games/balance/levels.js,games/balance/shapes.js to the "start" (and "dev") task in deno.json, then restart the server.`
+        : `${file} could not be written: ${e?.message ?? e}`);
+    }
+    activate(this.defs);
+    applyDefinitions(next); // every room uses the live definitions, so from now on all of them have the new level / shape (their players get it right away)
+    for (const ref of ROOMS) {
+      const room = ref.deref();
+      if (!room) { ROOMS.delete(ref); continue; }
+      room.defsCache = null;
+      room.defsRev++;
+      room.defsBurst = DEFS_BURST;
+    }
+    this.saveResult = { id: req.id, ok: true, file, index };
+    return undefined;
   }
 
   /**

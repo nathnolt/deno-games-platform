@@ -900,9 +900,10 @@ export function serializeTable(name, value) {
 const LEVELS_HEAD = [
   '// Runs on BOTH server and browser. Pure data: the LEVELS of Balance. definitions.js re-exports them, so nothing else changes.',
   '//',
-  '// With `DEBUG = true` the debug menu / level studio edit this file for you: when a level is made, copied, deleted or changed and you',
-  '// press "Apply to game", the game server rewrites THIS file (comments are not kept). That needs write permission for the file:',
-  '//   deno.json:  --allow-write=games/balance/levels.js     (on the "start" and "dev" tasks)',
+  '// With `DEBUG = true` the level studio edits this file for you, but only when you press "Add level" (a new level is added at the end) or',
+  '// "Update level" (an existing level is replaced) and confirm it: the game server then rewrites THIS file (comments are not kept) and every',
+  '// room gets the change. That needs write permission for the file:',
+  '//   deno.json:  --allow-write=games/balance/levels.js,games/balance/shapes.js     (on the "start" and "dev" tasks)',
   '// (`deno task dev` watches the files and restarts the server after every save: use `deno task start` while you edit levels.)',
   '//',
   '// name, difficulty     shown in the menu (easy | medium | hard)',
@@ -918,6 +919,28 @@ const LEVELS_HEAD = [
   '',
 ].join('\n');
 
+/** The header comment of shapes.js. */
+const SHAPES_HEAD = [
+  '// Runs on BOTH server and browser. Pure data: the SHAPES of Balance. definitions.js re-exports them, so nothing else changes.',
+  '//',
+  '// With `DEBUG = true` the shape studio edits this file for you, but only when you press "Add shape" or "Update shape" and confirm it:',
+  '// the game server then rewrites THIS file (comments are not kept) and every room gets the change. That needs write permission:',
+  '//   deno.json:  --allow-write=games/balance/levels.js,games/balance/shapes.js     (on the "start" and "dev" tasks)',
+  '//',
+  '// A shape is a list of parts. Part types:',
+  "//   { type: 'poly',   points: 'x,y x,y x,y ...' }   a CONVEX polygon (build concave shapes from several parts, like plus1)",
+  "//   { type: 'circle', diameter: d, x?, y? }          x/y = centre, default (d/2, d/2)",
+  '//   add `visual: true` to a poly to make it a drawing-only outline (it replaces the parts when the block is drawn)',
+  '// Origin and orientation do not matter: every shape is re-centred on the middle of its bounding box when it is used.',
+  '// The ORDER matters a little: snapshots refer to shapes by their place in this list, so new shapes are added at the end.',
+  '',
+].join('\n');
+
+/** The whole shapes.js file for a table of shapes. */
+export function serializeShapes(table) {
+  return `${SHAPES_HEAD}\n${serializeTable('shapes', table)}`;
+}
+
 /** The whole levels.js file for a list of levels. */
 export function serializeLevels(list) {
   return `${LEVELS_HEAD}\n${serializeTable('levels', list)}`;
@@ -931,7 +954,7 @@ export function serializeDefinitions(defs) {
     '//',
     '//   tuning        numbers you can play with (gravity, camera, block depth ...)',
     '//   materials     friction, weight and shader of a block',
-    '//   shapes        the block outlines',
+    '//   shapes        (in their own file, shapes.js)',
     '//   bowls         the bowls the tower is built in',
     '//   models        .obj files in ./models and the shader of each part',
     '//   backgrounds   the scenery around the table',
@@ -939,8 +962,8 @@ export function serializeDefinitions(defs) {
     '//   levels        (in their own file, levels.js)',
     '',
   ];
-  const tables = TABLES.filter((n) => n !== 'levels').map((n) => serializeTable(n, defs[n])).join('\n');
-  return `${head.join('\n')}\n${tables}\n// ── Levels: in ./levels.js (the debug menu rewrites that file when you make or change levels) ──\nexport { levels } from './levels.js';\n`;
+  const tables = TABLES.filter((n) => n !== 'levels' && n !== 'shapes').map((n) => serializeTable(n, defs[n])).join('\n');
+  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./shapes.js, levels: in ./levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes } from './shapes.js';\nexport { levels } from './levels.js';\n`;
 }
 
 syncDefinitions();

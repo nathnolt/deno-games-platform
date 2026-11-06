@@ -920,9 +920,32 @@ export function createDebugMenu(view) {
   const panel = h('div', { class: 'bb-dbg-panel' }, header, statusEl, tabsEl, bodyEl);
   const toggle = h('button', { type: 'button', class: 'bb-dbg-toggle', title: 'Debug menu ( ` )', onclick: () => setOpen(!state.open) }, '🛠 Debug');
   // the studios (studio.js): a shape editor and a level editor with a live test lab. They edit the same draft as the tabs.
+  // ── saving ONE level / shape to its file (levels.js / shapes.js): the only thing in this menu that reaches the server, and only when a studio asks for it after a confirmation ──
+  // The platform drops inbound messages over 4096 characters, so the request travels as small pieces of JSON text that the server glues together again.
+  const waiting = new Map(); // request id -> resolve
+  view.onSaved = (sv) => {
+    const done = waiting.get(sv.id);
+    if (!done) return; // (somebody else's save: the live definitions that follow tell us what changed)
+    waiting.delete(sv.id);
+    done(sv);
+  };
+  /** @returns {Promise<{ ok: boolean, error?: string, index?: number, file?: string }>} */
+  function saveItem(request) {
+    return new Promise((resolve) => {
+      const id = Math.random().toString(36).slice(2, 12);
+      waiting.set(id, resolve);
+      const text = JSON.stringify(request);
+      const n = Math.ceil(text.length / 1500); // (1500 stays under the limit even when quotes get escaped)
+      for (let i = 0; i < n; i++) view.roomCtx.sendInput({ debugChunk: { id, i, n, s: text.slice(i * 1500, (i + 1) * 1500) } });
+      setTimeout(() => {
+        if (waiting.delete(id)) resolve({ ok: false, error: 'The server did not answer. Is it running? After replacing server files it has to be restarted.' });
+      }, 8000);
+    });
+  }
   const studio = createStudio(view, {
     draft: () => draft,
     touch,
+    saveItem,
     syncNow: () => syncLocalNow(true),
     problems: () => state.problems,
     showProblems(el) {
@@ -1074,6 +1097,7 @@ export function createDebugMenu(view) {
       view.onRun = null;
       view.onSandbox = null;
       view.onProblem = null;
+      view.onSaved = null;
       view.debugFreeCam(false);
       view.debugShowDrop(false);
       root.remove();

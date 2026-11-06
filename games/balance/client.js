@@ -405,6 +405,8 @@ class BalanceView {
   roomSnap = null; //        the room's latest snapshot
   roomDefs = null; //        the definitions the room's game runs (null = the files as they were loaded, see PRISTINE)
   sandbox = null; //         { game, queue, timer, last, defs, ready } while the local game is shown, else null
+  onSaved = null; //         debug: called with { id, ok, error?, index?, file? } when the server answers an explicit save of a level / shape
+  lastSv = null;
   onSandbox = null; //       debug: called with (on, error) when the local game turns on or off
   onProblem = null; //      debug: called with a message when something in the drawing or the definitions went wrong (the debug menu shows it)
   problems = new Map(); //  message -> count (each message is reported once)
@@ -627,6 +629,10 @@ class BalanceView {
   }
 
   #syncDefs(s) {
+    if (s.sv && s.sv.id !== this.lastSv) { // how the server did with a level / shape that somebody asked it to save (only the one who asked knows the id)
+      this.lastSv = s.sv.id;
+      this.onSaved?.(s.sv);
+    }
     if (s.drev !== undefined) this.firstDrev ??= s.drev; // (which version of the room's definitions we met when we came in)
     if (s.drev === undefined || s.drev === this.defsRev) return;
     if (s.defs) { // the server applied somebody's change (maybe ours): everybody takes over its version, at the same snapshot
