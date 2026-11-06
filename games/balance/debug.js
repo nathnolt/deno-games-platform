@@ -606,6 +606,7 @@ export function createDebugMenu(view) {
         slider('friction', m, 'friction', 'materials', 0, 20, 0.5),
         slider('weight', m, 'weight', 'materials', 0, 40, 0.5),
         check('static (never moves)', m, 'static', 'materials'),
+        m.static ? check('hazard (touching it loses)', m, 'hazard', 'materials') : null,
         check('float (buoyant)', m, 'float', 'materials', () => render()),
         m.float ? slider('float level (part under water)', m, 'floatLevel', 'materials', 0.1, 1, 0.05) : null,
         num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),

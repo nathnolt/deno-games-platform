@@ -8,7 +8,7 @@ import {
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
 const PRISTINE = DEBUG ? cloneDefinitions() : null;
 import { flatNormals, parseObj } from './obj.js';
-import { SHADOW_GLSL, refractShaders, shaders, transparentShaders, vertexShader } from './shaders.js';
+import { deformShaders, SHADOW_GLSL, refractShaders, shaders, transparentShaders, vertexShader, waveVertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
 function loadStyles() {
@@ -180,6 +180,75 @@ function chamferedPrism(outline, depth, c, holes = []) {
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(idx);
   return geo;
+}
+
+/**
+ * Give every vertex an attribute `edge`: its distance (in the face plane, x y) to the outline of the shape (outer outline and holes). The vertex shader of the
+ * water block uses it to keep the edges of the block still while the middle of the faces moves: the player must always see where the real edge (the collision) is.
+ * It depends on the position only, so vertices at the same place always get the same value.
+ */
+function addEdgeDistance(geo, loops) {
+  const P = geo.getAttribute('position').array;
+  const edge = new Float32Array(P.length / 3);
+  for (let i = 0; i < edge.length; i++) {
+    const x = P[i * 3];
+    const y = P[i * 3 + 1];
+    let best = Infinity;
+    for (const loop of loops) {
+      for (let k = 0; k < loop.length; k++) {
+        const [ax, ay] = loop[k];
+        const [bx, by] = loop[(k + 1) % loop.length];
+        const dx = bx - ax;
+        const dy = by - ay;
+        const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1)));
+        best = Math.min(best, Math.hypot(x - (ax + dx * t), y - (ay + dy * t)));
+      }
+    }
+    edge[i] = best;
+  }
+  geo.setAttribute('edge', new THREE.BufferAttribute(edge, 1));
+}
+
+/**
+ * Cut EVERY triangle of a geometry into 3 x 3 = 9 smaller ones (each edge in thirds). Every triangle is cut the same way, so neighbours always agree about
+ * where their shared edge is cut: no gaps. Position, normal and uv are interpolated. Returns a geometry without index.
+ */
+function subdivide3(geo) {
+  const src = geo.index ? geo.toNonIndexed() : geo;
+  const P = src.getAttribute('position').array;
+  const Nn = src.getAttribute('normal').array;
+  const U = src.getAttribute('uv').array;
+  const pos = [];
+  const nor = [];
+  const uvs = [];
+  const at = (t, i, j) => { // the point (i, j) of the 3 x 3 grid of triangle t (corners 0, 1, 2): corner 0 + i/3 towards corner 1 + j/3 towards corner 2
+    const s = i / 3;
+    const u = j / 3;
+    const w = 1 - s - u;
+    const g = (arr, n) => Array.from({ length: n }, (_, k) => arr[(t * 3) * n + k] * w + arr[(t * 3 + 1) * n + k] * s + arr[(t * 3 + 2) * n + k] * u);
+    return { p: g(P, 3), n: g(Nn, 3), u: g(U, 2) };
+  };
+  const push = (q) => {
+    const l = Math.hypot(...q.n) || 1;
+    pos.push(...q.p);
+    nor.push(q.n[0] / l, q.n[1] / l, q.n[2] / l);
+    uvs.push(...q.u);
+  };
+  for (let t = 0; t < P.length / 9; t++) {
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3 - i; j++) {
+        push(at(t, i, j)); push(at(t, i + 1, j)); push(at(t, i, j + 1)); //                       (the 6 triangles that point the same way as the original)
+        if (i + j < 2) { push(at(t, i + 1, j)); push(at(t, i + 1, j + 1)); push(at(t, i, j + 1)); } // (and the 3 between them)
+      }
+    }
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  out.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  if (src !== geo) src.dispose();
+  geo.dispose();
+  return out;
 }
 
 /**
@@ -1647,7 +1716,7 @@ void main() {
   #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false) {
     const transparent = transparentShaders.has(shaderName);
     return new THREE.ShaderMaterial({
-      vertexShader,
+      vertexShader: deformShaders.has(shaderName) ? waveVertexShader : vertexShader,
       fragmentShader: shaders[shaderName] ?? shaders.stone1,
       uniforms: {
         uTime: this.uTime,
@@ -1657,6 +1726,8 @@ void main() {
         uCausOn: { value: 1 },
         uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
         uReveal: { value: 1 }, //     below 1 the block dissolves in (see finish() in shaders.js)
+        uWaterColor: { value: rawColor(this.bowlDef?.water?.color ?? '#004585') }, // (the water block looks like the water of the bowl)
+        uWaterOpacity: { value: this.bowlDef?.water?.opacity ?? 0.55 },
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
         uFog: fog?.uFog ?? { value: new THREE.Vector2(1e6, 2e6) }, // blocks never fade; background models do
         ...(plain ? { ...this.#plainLight(), uRefr: { value: null }, uRefrOn: { value: 0 }, uRefrRes: { value: new THREE.Vector2(1, 1) } } : { ...this.shadowU, ...this.refrU }), // (the little preview windows are other WebGL contexts: no shared textures)
@@ -1667,13 +1738,23 @@ void main() {
     });
   }
 
-  /** Chamfered geometry for each part of a shape (or for its single visual outline, see plus1). Every block has the same depth. */
-  #geometries(key) {
-    let g = this.geoCache.get(key);
+  /**
+   * Chamfered geometry for each part of a shape (or for its single visual outline, see plus1). Every block has the same depth.
+   * `fine` = every triangle cut into 9 (for blocks whose vertex shader moves the surface, like the water block).
+   */
+  #geometries(key, fine = false) {
+    const ck = fine ? `${key}:fine` : key;
+    let g = this.geoCache.get(ck);
     if (g) return g;
     const shape = getShape(key);
-    g = shapeOutlines(shape, tuning.mergeParts !== false).map((o) => ({ geo: chamferedPrism(o.pts, DEPTH, tuning.chamfer, o.holes) }));
-    this.geoCache.set(key, g);
+    g = shapeOutlines(shape, tuning.mergeParts !== false).map((o) => {
+      const geo = chamferedPrism(o.pts, DEPTH, tuning.chamfer, o.holes);
+      if (!fine) return { geo };
+      const out = subdivide3(geo);
+      addEdgeDistance(out, [o.pts, ...(o.holes ?? [])]);
+      return { geo: out };
+    });
+    this.geoCache.set(ck, g);
     return g;
   }
 
@@ -1764,7 +1845,7 @@ void main() {
 
     if (opts.table) mat.uniforms.uCausOn.value = 0; // (waiting on the table: no caustics)
     const group = new THREE.Group();
-    for (const { geo } of this.#geometries(shapeKey)) {
+    for (const { geo } of this.#geometries(shapeKey, deformShaders.has(shaderName))) {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.userData.id = id;
       if (transparentShaders.has(shaderName)) mesh.renderOrder = 3;

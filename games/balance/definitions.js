@@ -48,6 +48,8 @@ export const tuning = {
 // floatLevel: (float blocks) how deep it sits in the water when it floats alone: 0.5 = half under, 1 = just under. It never sinks, but it tilts.
 // stackLimit: how many blocks may rest on top of this block (directly or through other blocks). One more and it breaks.
 //           The block wears a coloured dot: green = nothing on it, orange = 1, red = 2 (= the limit), and it shatters at limit + 1.
+// (the 'waterBlock' shader takes the colour and see-through-ness of the water of the bowl of the level)
+// hazard:   (with static) touching this block loses the level, like the water does
 // noLamp:   no coloured dot on a block with a stackLimit (for blocks that look cracked already)
 // shader:   name of a GLSL shader in client/shaders.js
 export const materials = {
@@ -57,6 +59,7 @@ export const materials = {
   crackedGlass: { friction: 4, weight: 5, shader: 'crackedGlass', stackLimit: 0, noLamp: true }, // breaks as soon as one block rests on it
   stone: { friction: 14, weight: 20, shader: 'stone1' },
   static: { static: true, friction: 12, shader: 'stone2' },
+  waterBlock: { static: true, friction: 0, hazard: true, shader: 'waterBlock' }, // a block of water that stays where it is: touch it and you lose
   floatBlock: { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
   floatierBlock: { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.9 },
   floatBlockHeavy: { float: true, friction: 8, weight: 30, shader: 'float', floatLevel: 0.5 },

@@ -109,6 +109,52 @@ void main() {
   gl_Position = projectionMatrix * mv;
 }`;
 
+/**
+ * Like vertexShader, but the faces of the block ripple: every vertex is pushed forwards or backwards (along the depth of the block) by a wave. The EDGES stay
+ * where they are: how much a vertex moves is multiplied by its `edge` (distance to the outline of the shape, see addEdgeDistance in client.js), which is 0 on
+ * the outline, so the outline of the block, and so its collision, never changes: you always see exactly where it is. The movement is a function of the
+ * vertex position only, so vertices at the same place move together: the surface stays closed. Only what is drawn moves; the physics does not.
+ */
+export const waveVertexShader = /* glsl */ `
+attribute float edge;
+varying vec2 vP;
+varying vec3 vP3;
+varying vec3 vN;
+varying vec3 vW;
+varying vec3 vWN;
+varying float vDist;
+uniform float uTime;
+uniform float uSeed;
+float vhash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(vhash(i), vhash(i + vec2(1.0, 0.0)), f.x), mix(vhash(i + vec2(0.0, 1.0)), vhash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float swell(vec2 p, float t) { // slow waves, about -0.3 .. 0.3
+  float h = 0.0;
+  h += 0.10 * sin(dot(p, vec2(0.95, 0.31)) * 0.55 + t * 1.0);
+  h += 0.05 * sin(dot(p, vec2(-0.37, 0.93)) * 0.90 + t * 1.3);
+  h += (vnoise(p * 0.35 + vec2(t * 0.15, -t * 0.10)) - 0.5) * 0.30;
+  h += (vnoise(p * 0.95 - vec2(t * 0.25, t * 0.20)) - 0.5) * 0.10;
+  return h;
+}
+void main() {
+  vP = uv;
+  vP3 = position;
+  float still = smoothstep(0.2, 1.3, edge); // 0 on the outline and the bevel, 1 well inside
+  vec3 pos = position + vec3(0.0, 0.0, swell(position.xy + uSeed * 7.0, uTime) * 1.4 * still);
+  vW = (modelMatrix * vec4(pos, 1.0)).xyz;
+  vWN = normalize(mat3(modelMatrix) * normal);
+  vN = normalize(normalMatrix * normal);
+  vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+  vDist = length(mv.xyz);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+/** Shaders whose blocks are drawn with waveVertexShader and a geometry cut into 3 x 3 (the faces ripple, the edges stay). */
+export const deformShaders = new Set([]); // (the water block no longer uses it: no subdivided faces, the ripples are in the fragment shader only)
+
 const prelude = /* glsl */ `
 precision highp float;
 varying vec2 vP;
@@ -342,6 +388,56 @@ void main() {
   gl_FragColor = glassOut(own, p * 1.7, max(0.1 + 0.4 * rim, line * 0.95), tilt);
 }`),
 
+  // A BLOCK OF WATER: made like the water in the bowl, with the colour and the see-through-ness of THAT water (uWaterColor, uWaterOpacity from the bowl of the level),
+  // its light of the day, its waves (here on the face of the block) that bend what is behind it, the glitter of the sun and the stronger mirror at a low angle.
+  // No caustics. It never moves: you must keep away from it.
+  waterBlock: frag(/* glsl */ `${REFRACT_GLSL}
+uniform vec3 uWaterColor;
+uniform float uWaterOpacity;
+vec2 grad2(vec2 i) { float a = hash(i) * 6.2831853; return vec2(cos(a), sin(a)); }
+float perlin(vec2 p) { // gradient (Perlin) noise, about -0.7 .. 0.7
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  return mix(mix(dot(grad2(i), f), dot(grad2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
+             mix(dot(grad2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)), dot(grad2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x), u.y);
+}
+float wh(vec2 p, float t) { // the wave height of the water of the bowl (waveH in client.js) plus finer Perlin ripples, on the face of the block
+  float h = 0.0;
+  h += 0.10 * sin(dot(p, vec2(0.95, 0.31)) * 0.55 + t * 1.0);
+  h += 0.05 * sin(dot(p, vec2(-0.37, 0.93)) * 0.90 + t * 1.3);
+  h += 0.02 * sin(dot(p, vec2(0.71, 0.71)) * 1.70 + t * 1.9);
+  h += (noise(p * 0.35 + vec2(t * 0.15, -t * 0.10)) - 0.5) * 0.20;
+  h += (noise(p * 0.95 - vec2(t * 0.25, t * 0.20)) - 0.5) * 0.06;
+  h += perlin(p * 0.65 + vec2(t * 0.22, t * 0.17)) * 0.34; // ripples (twice as large)
+  h += perlin(p * 1.55 - vec2(t * 0.38, t * 0.12)) * 0.16; // finer ones (twice as large)
+  return h;
+}
+void main() {
+  vec2 p = vP + uSeed * 7.0;
+  float t = uTime;
+  float h0 = wh(p, t);
+  vec2 slope = vec2(wh(p + vec2(0.1, 0.0), t) - h0, wh(p + vec2(0.0, 0.1), t) - h0) / 0.1;
+  float front = smoothstep(0.6, 0.95, abs(normalize(vWN).z)); // the big flat faces (the front of the block): the ripples are strongest there
+  vec3 N = normalize(normalize(vWN) + vec3(-slope, 0.0) * (2.0 + 2.5 * front)); // the waves tilt the surface
+  vec3 V = normalize(cameraPosition - vW);
+  float fres = pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 3.0);
+  vec3 col = uWaterColor * ((uAmbSky * 0.7 + uLightCol * 0.35) * 1.28); // the colour of the water follows the light of the day
+  col *= 0.8 + 0.4 * (perlin(p * 0.225 + vec2(t * 0.08, -t * 0.05)) + 0.5);  // deeper and shallower patches drifting through the water
+  float rip = perlin(p * 1.1 + vec2(t * 0.3, -t * 0.2));
+  col *= 1.0 + front * (0.5 * rip + 0.28 * smoothstep(0.35, 0.7, abs(perlin(p * 0.8 - vec2(t * 0.18, t * 0.25))) )); // visible light and dark ripples, with bright lines
+  // reflection: the sky (and the ground) as the tilted surface mirrors it, stronger at a low angle
+  vec3 R = reflect(-V, N);
+  vec3 sky = mix(uAmbGround, uAmbSky, smoothstep(-0.2, 0.7, R.y)) * 1.15;
+  float refl = clamp(0.12 + 0.75 * fres, 0.0, 0.85);
+  col = mix(col, sky, refl * 0.55);
+  float glint = pow(max(dot(N, normalize(uLightDir + V)), 0.0), 140.0);   // sun (or moon) glitter on the ripples
+  col += uLightCol * (glint * 0.9);
+  col *= 0.94 + 0.12 * N.x;
+  float keep = clamp(uWaterOpacity + fres * 0.12 + refl * 0.2 + glint * 0.6, 0.0, 1.0);
+  gl_FragColor = glassOut(col, p, keep, slope * (0.03 + 0.03 * front));
+}`),
+
   // A CHALK OUTLINE, like the one the police draw round a body on the floor: a white line with a slightly rough edge and some chalk dust,
   // nothing else. It is meant for a flat strip lying on a surface (the game draws the outline of a block that is still to come on the table
   // with it): vP.x = distance along the line, vP.y = 0 on the inside of the line .. 1 on the outside. Not lit, no shadow.
@@ -465,6 +561,6 @@ void main() {
 };
 
 /** Shaders whose blocks are see-through (drawn after the opaque ones, no depth writes). */
-export const transparentShaders = new Set(['glass', 'crackedGlass', 'outline']);
+export const transparentShaders = new Set(['glass', 'crackedGlass', 'waterBlock', 'outline']);
 /** Shaders that look through to a copy of the picture behind them (the client draws them last, on their own layer). */
-export const refractShaders = new Set(['glass', 'crackedGlass']);
+export const refractShaders = new Set(['glass', 'crackedGlass', 'waterBlock']);

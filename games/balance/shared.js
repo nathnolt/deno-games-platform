@@ -640,11 +640,12 @@ export const PHASE = { MENU: 0, PLAY: 1, WON: 2, LOST: 3 };
 /** Per-body state in snapshots. HELD_BAD = held, but outside the drop zone (letting go sends it back to the table). */
 export const BODY = { NORMAL: 0, HELD: 1, HELD_BAD: 2, STATIC: 3 };
 /** Why a level was lost. */
-export const LOSE = { WATER: 1, OUT: 2, BOWL: 3 };
+export const LOSE = { WATER: 1, OUT: 2, BOWL: 3, HAZARD: 4 };
 export const LOSE_TEXT = {
   [LOSE.WATER]: 'A block fell into the water.',
   [LOSE.OUT]: 'A block fell out of the play area.',
   [LOSE.BOWL]: 'A block hit the bowl.',
+  [LOSE.HAZARD]: 'A block touched the water block.',
 };
 
 // ── Definitions: copy, replace, check, export ────────────────────────────────────────────────────────────────

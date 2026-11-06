@@ -560,7 +560,7 @@ export class BalanceGame {
       angularDamping: 0.05,
       linearDamping: 0.02,
     });
-    const def = { density: densityOf(item.material), friction: frictionOf(item.material), restitution: isStatic ? 0 : 0.04, isSensor: held };
+    const def = { density: densityOf(item.material), friction: frictionOf(item.material), restitution: isStatic ? 0 : 0.04, isSensor: held || (isStatic && !!mat.hazard) }; // (a hazard block, like the water block, is not solid: blocks fall straight through it, and touching it still loses, see #rules)
     const floatPolys = [];
     for (const part of shape.parts) {
       if (part.type === 'circle') {
@@ -591,6 +591,7 @@ export class BalanceGame {
       held,
       owner,
       bad: false,
+      hazard: !!mat.hazard, // (a static block that loses the level when another block touches it)
       stackLimit: mat.stackLimit ?? null, // blocks that may rest on this one; one more and it breaks (see #glass)
       load: 0, //           how many do rest on it (shown as the colour of its dot): 0 .. stackLimit
       seen: new Map(), //   block id -> seconds it has been resting on this one
@@ -735,6 +736,10 @@ export class BalanceGame {
       if (rec.static || rec.held) continue;
       const body = rec.body;
       const p = body.getPosition();
+      for (let ce = body.getContactList(); ce; ce = ce.next) { // touching a hazard block (floating blocks too)
+        const other = this.recOf.get(ce.other);
+        if (other?.hazard && other.static && ce.contact.isTouching()) return this.#lose(LOSE.HAZARD);
+      }
       if (!rec.float) {
         if (p.y < WATER_Y) return this.#lose(LOSE.WATER);
         if (p.x < zone.x0 || p.x > zone.x1) return this.#lose(LOSE.OUT);
