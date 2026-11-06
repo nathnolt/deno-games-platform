@@ -44,6 +44,8 @@ const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along 
 // countdown and follow come from `tuning` (_definitions.js)
 const LAB_ID_START = 100000; //   ids of blocks spawned in the level lab (they never clash with the ids of a level's own blocks)
 const LAB_MAX_BLOCKS = 300;
+const LAND_MAX = 8; //             seconds after which a dropped block counts as having landed anyway (the countdown never waits for ever)
+const FRAGILE_KEEP = 0.6; //      seconds a block that stopped touching a fragile one still counts (a block that lands and bounces must not flip the lamp back to green)
 const FRAGILE_REST = 0.2; //      seconds a block must rest on a fragile one before it counts
 const START_GRACE = 0.8; //       seconds after a level starts during which start / restart clicks are ignored (two players clicking the same button)
 
@@ -482,7 +484,8 @@ export class BalanceGame {
     const item = h.item;
     this.#removeBlock(h.rec);
     p.held = null;
-    this.#makeBlock(item, pos.x, pos.y, angle, false); // same id, now a normal falling body
+    const fallen = this.#makeBlock(item, pos.x, pos.y, angle, false); // same id, now a normal falling body
+    fallen.landed = false;
     if (!item.lab) { // (blocks made in the level lab were never on the table)
       // Nothing on the table moves. The next block appears where its OUTLINE was (the outline turns into the block), the place that was just
       // freed stays empty, unless there is another block to come into view: it gets its outline there.
@@ -614,8 +617,11 @@ export class BalanceGame {
       bad: false,
       hazard: !!mat.hazard, // (a static block that loses the level when another block touches it)
       stackLimit: mat.stackLimit ?? null, // blocks that may rest on this one; one more and it breaks (see #glass)
+      landed: true, //      false from the moment a block is dropped until it has hit something (the win countdown waits for that)
+      air: 0, //            seconds since it was dropped, while it has not landed
       load: 0, //           how many do rest on it (shown as the colour of its dot): 0 .. stackLimit
       seen: new Map(), //   block id -> seconds it has been resting on this one
+      lost: new Map(), //   block id -> seconds since it stopped touching this one (it is forgotten after FRAGILE_KEEP)
       armed: false, // becomes true once the held block has been inside the drop zone; before that it is never shown as 'bad'
       body,
       floatPolys,
@@ -689,8 +695,15 @@ export class BalanceGame {
           queue.push(other);
         }
       }
-      for (const id of above) rec.seen.set(id, (rec.seen.get(id) ?? 0) + dt);
-      for (const id of [...rec.seen.keys()]) if (!above.has(id)) rec.seen.delete(id);
+      for (const id of above) {
+        rec.seen.set(id, (rec.seen.get(id) ?? 0) + dt);
+        rec.lost.delete(id);
+      }
+      for (const id of [...rec.seen.keys()]) { // not on it right now: it stays counted for a moment (a bounce), then it is forgotten
+        if (above.has(id)) continue;
+        const gone = (rec.lost.get(id) ?? 0) + dt;
+        if (gone > FRAGILE_KEEP || !this.recs.has(id)) { rec.seen.delete(id); rec.lost.delete(id); } else rec.lost.set(id, gone);
+      }
       let n = 0;
       for (const t of rec.seen.values()) if (t >= FRAGILE_REST) n++;
       if (n > rec.stackLimit) {
@@ -757,6 +770,15 @@ export class BalanceGame {
       if (rec.static || rec.held) continue;
       const body = rec.body;
       const p = body.getPosition();
+      if (!rec.landed) { // a dropped block that has not hit anything yet: it lands when it touches a block or the bowl (a floating block: when it reaches the water)
+        rec.air += dt;
+        let hit = rec.air > LAND_MAX || (rec.float && p.y < WATER_Y);
+        for (let ce = body.getContactList(); ce && !hit; ce = ce.next) {
+          const o = this.recOf.get(ce.other);
+          if (o && !o.held && (o.kind === 'block' || o.kind === 'bowl') && ce.contact.isTouching()) hit = true;
+        }
+        if (hit) rec.landed = true;
+      }
       for (let ce = body.getContactList(); ce; ce = ce.next) { // touching a hazard block (floating blocks too)
         const other = this.recOf.get(ce.other);
         if (other?.hazard && other.static && ce.contact.isTouching()) return this.#lose(LOSE.HAZARD);
@@ -771,7 +793,7 @@ export class BalanceGame {
     }
 
     // won: every block is placed and a countdown has run out (no check for stability: only losing blocks into the water or the bowl matters)
-    if (this.#remaining() === 0) {
+    if (this.#remaining() === 0 && this.#allLanded()) { // (the countdown only starts once every dropped block has hit something on its way down)
       this.settle += dt;
       if (this.settle >= (tuning.countdown ?? 3) + WIN_HOLD) { // (the dots fill up during `countdown`: the third one is on for the last WIN_HOLD seconds)
         this.phase = PHASE.WON;
@@ -780,6 +802,12 @@ export class BalanceGame {
     } else {
       this.settle = 0;
     }
+  }
+
+  /** Has every block that was dropped hit something (a block, the bowl, the water for a floating one) yet? */
+  #allLanded() {
+    for (const rec of this.recs.values()) if (rec.kind === 'block' && !rec.static && !rec.held && !rec.landed) return false;
+    return true;
   }
 
   #lose(why) {

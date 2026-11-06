@@ -37,6 +37,7 @@ const rawColor = (hex) => {
   const n = parseInt(String(hex).replace('#', '').padEnd(6, '0').slice(0, 6), 16);
   return new THREE.Color().setRGB(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
 };
+const RELEASE_DELAY = 50;  //   ms between letting go of the mouse and the block really dropping (pressing again in that time picks it back up)
 const STORE = 'balance.done'; // localStorage: indexes of completed levels
 const copyOf = (v) => JSON.parse(JSON.stringify(v));
 
@@ -308,6 +309,41 @@ function shapeOutlines(shape, merge) {
   return own.map((pts) => ({ pts, holes: [] }));
 }
 
+/** Is the point inside the polygon? (even-odd rule) */
+function insidePoly(pts, x, y) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i];
+    const [xj, yj] = pts[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Does this shape look the same when it is turned half a way round about its middle (so also after a quarter turn, or any turn in the steps of 45 degrees a
+ * block makes), AND is its middle solid? Then something drawn on the middle of it stays exactly where it is while the block turns. Found by comparing a grid of points
+ * with the points opposite them. (The shape is centred on the middle of its bounding box, and a half turn about that point keeps the bounding box.)
+ */
+const centreMemo = new WeakMap();
+function lookSameWhenTurned(shape) {
+  let known = centreMemo.get(shape);
+  if (known !== undefined) return known;
+  const outlines = shapeOutlines(shape, tuning.mergeParts !== false);
+  const inside = (x, y) => outlines.some((o) => insidePoly(o.pts, x, y) && !o.holes.some((hole) => insidePoly(hole, x, y)));
+  known = inside(0, 0);
+  const N = 41;
+  for (let i = 0; known && i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const x = -shape.w / 2 + ((i + 0.37) * shape.w) / N; // (a grid shifted off the edges, so no point sits exactly on a corner or a straight edge)
+      const y = -shape.h / 2 + ((j + 0.61) * shape.h) / N;
+      if (inside(x, y) !== inside(-x, -y)) { known = false; break; }
+    }
+  }
+  centreMemo.set(shape, known);
+  return known;
+}
+
 /** Outline of a circle part as a counter-clockwise point list. */
 function circleOutline(part, sides = 48) {
   return Array.from({ length: sides }, (_, k) => {
@@ -577,7 +613,7 @@ class BalanceView {
         this.ctx.sendInput({ drop: true });
         this.modeTime = now;
       }
-    } else if (this.mode === 'drag' && mine === null && now - this.modeTime > 500) {
+    } else if ((this.mode === 'drag' || this.mode === 'releasing') && mine === null && now - this.modeTime > 500) {
       this.mode = 'none';
     }
 
@@ -1704,7 +1740,7 @@ void main() {
       const r = THREE.MathUtils.clamp(Math.min(sh.w, sh.h) * 0.16, 0.3, 1.1);
       dot = new THREE.Mesh(this.dotGeo, new THREE.MeshBasicMaterial({ color: LAMP[0] }));
       dot.scale.set(r, r, 1);
-      dot.position.set(0, sh.h / 2 - r - 0.55, DEPTH / 2 + 0.04);
+      dot.position.set(0, lookSameWhenTurned(sh) ? 0 : sh.h / 2 - r - 0.55, DEPTH / 2 + 0.04); // (a block that looks the same turned round has it in the middle: it does not move when you turn the block)
       dot.userData.id = id;
       group.add(dot);
     }
@@ -2541,7 +2577,7 @@ void main() {
 
   // ── input ──
   #carrying() {
-    return this.mode === 'drag' || this.mode === 'released';
+    return this.mode === 'drag' || this.mode === 'releasing' || this.mode === 'released';
   }
 
   #setRay(e) {
@@ -2596,6 +2632,16 @@ void main() {
     if (this.snap?.ph !== PHASE.PLAY) return startCam();
     const p = this.#toWorld(e);
     if (!p) return startCam();
+    if (this.mode === 'releasing') { // pressed again right after letting go: the block was never dropped, carry on with it
+      this.releaseToken++;
+      this.ptr = p;
+      this.mode = 'drag';
+      this.modeTime = performance.now();
+      this.#follow();
+      this.#sendMove(performance.now(), true);
+      this.renderer.domElement.setPointerCapture(e.pointerId);
+      return undefined;
+    }
     if (this.mode !== 'none') return;
     const id = this.#tableAt();
     if (id === null) return startCam();
@@ -2666,7 +2712,7 @@ void main() {
       this.renderer.domElement.classList.toggle('bb-grab', this.snap?.ph === PHASE.PLAY && this.#tableAt() !== null);
       return;
     }
-    if (!p) return;
+    if (!p || this.mode === 'releasing') return; // (just let go: the block stays where it is until it drops or is picked up again)
     this.ptr = p;
     this.#follow();
     this.#sendMove();
@@ -2693,9 +2739,17 @@ void main() {
       this.#follow();
     }
     this.#sendMove(performance.now(), true);
-    this.ctx.sendInput({ drop: true }); // letting go of the mouse always lets go of the block
-    this.mode = 'released';
+    // Letting go of the mouse lets go of the block, but not for RELEASE_DELAY ms: the block stays in the hand for a moment, and pressing again in
+    // that time (a button that bounces, a very short release) just carries on. Only after the delay does it really drop.
+    this.mode = 'releasing';
     this.modeTime = performance.now();
+    const token = (this.releaseToken = (this.releaseToken ?? 0) + 1);
+    setTimeout(() => {
+      if (this.mode !== 'releasing' || this.releaseToken !== token) return;
+      this.ctx.sendInput({ drop: true });
+      this.mode = 'released';
+      this.modeTime = performance.now();
+    }, RELEASE_DELAY);
   };
 
   #onWheel = (e) => {
@@ -2711,18 +2765,18 @@ void main() {
       return;
     }
     e.preventDefault();
-    // Every notch turns the block one step at once (no waiting): a wheel notch arrives as one event with a big delta. Smooth wheels and trackpads send
-    // many small deltas instead, so those add up until they make a step; what is left over is forgotten after a short pause or a change of direction.
+    // Every notch turns the block one step at once, with no delay at all. Smooth wheels and trackpads send many small deltas instead, so those add up until they make a step; what is left over is forgotten after a short pause or a change of direction.
     const now = performance.now();
     const px = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1); // (lines and pages to pixels)
+    const step = (dir) => this.#turn(dir);
     if (Math.abs(px) >= 50) { // a whole notch
       this.wheelAcc = 0;
-      this.#turn(px < 0 ? 1 : -1);
+      step(px < 0 ? 1 : -1);
     } else {
       if (now - (this.lastWheel ?? 0) > 250 || Math.sign(px) !== Math.sign(this.wheelAcc ?? 0)) this.wheelAcc = 0;
       this.wheelAcc = (this.wheelAcc ?? 0) + px;
       if (Math.abs(this.wheelAcc) >= 50) {
-        this.#turn(this.wheelAcc < 0 ? 1 : -1);
+        step(this.wheelAcc < 0 ? 1 : -1);
         this.wheelAcc = 0;
       }
     }
