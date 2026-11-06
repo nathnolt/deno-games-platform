@@ -1157,28 +1157,29 @@ function levelStudio(view, api) {
     clearTimeout(applyTimer);
     applyTimer = 0;
     if (!st.open) return;
-    api.syncNow();
+    timed('syncNow', () => api.syncNow());
     if (api.problems().length || !L()) {
       if (api.problems().length) { st.msg = `Not shown in the test until this is fixed: ${api.problems()[0]}`; renderBar(); }
       return;
     }
     if (st.msg.startsWith('Not shown')) { st.msg = ''; renderBar(); }
-    lab({ play: st.lvl });
-    lab({ paused: st.mode === 'layout' });
+    timed('restart level', () => { lab({ play: st.lvl }); lab({ paused: st.mode === 'layout' }); });
   }
-  // A THROTTLE, not a debounce: while a block is being dragged the game follows about every 0.1 s (the first change after 0.04 s), and the last position always arrives.
-  let lastSend = 0;
-  const SYNC_EVERY = 100;
-  const syncDelay = () => Math.max(40, lastSend + SYNC_EVERY - performance.now());
+  // A DEBOUNCE: while a block is being dragged the blueprint (cheap, 2D) follows the mouse, but the 3D game is only rebuilt once the mouse has been still for
+  // SYNC_QUIET ms (and when the button is released). Restarting the level rebuilds every block mesh, which is far too heavy to do while moving.
+  // Timings: run  localStorage.bbPerf = 1  in the console and reload to see how long each step takes.
+  const SYNC_QUIET = 180;
+  const perf = (() => { try { return !!localStorage.getItem('bbPerf'); } catch { return false; } })();
+  const timed = (name, fn) => { if (!perf) return fn(); const t = performance.now(); const r = fn(); console.debug(`[bbPerf] ${name}: ${(performance.now() - t).toFixed(1)} ms`); return r; };
   function scheduleApply() {
-    if (applyTimer) return; // one is already on its way: it will send the newest state
-    applyTimer = setTimeout(() => { lastSend = performance.now(); applyNow(); }, syncDelay());
+    clearTimeout(applyTimer);
+    applyTimer = setTimeout(() => { applyTimer = 0; applyNow(); }, SYNC_QUIET);
   }
   /** Layout: give the draft to the local game and restart the frozen layout with it. Live test: only give it (the running test is not disturbed). */
   function scheduleSync() {
     if (st.mode === 'layout') return scheduleApply();
-    if (applyTimer) return undefined;
-    applyTimer = setTimeout(() => { applyTimer = 0; lastSend = performance.now(); if (st.open) api.syncNow(); }, syncDelay());
+    clearTimeout(applyTimer);
+    applyTimer = setTimeout(() => { applyTimer = 0; if (st.open) timed('syncNow', () => api.syncNow()); }, SYNC_QUIET);
     return undefined;
   }
 
@@ -1207,7 +1208,7 @@ function levelStudio(view, api) {
         st.sel = i;
         renderBody();
         const off = { x: w.x - b.x, y: w.y - b.y };
-        return { move(q) { b.x = snapV(q.x - off.x); b.y = snapV(q.y - off.y); api.touch('levels'); scheduleDraw(); }, up() { renderBody(); } };
+        return { move(q) { b.x = snapV(q.x - off.x); b.y = snapV(q.y - off.y); api.touch('levels', false, true); scheduleDraw(); }, up() { renderBody(); } };
       }
       // live test: grab a block of the running level
       if (!node || node.dataset.id === undefined) return null;
@@ -1315,7 +1316,7 @@ function levelStudio(view, api) {
           l.initialBlocks.push({ shape, material: st.mat, rot: 0, x: snapV(w1.x), y: snapV(w1.y) });
           st.sel = l.initialBlocks.length - 1;
           const b = l.initialBlocks[st.sel];
-          drag = { move(q) { b.x = snapV(q.x); b.y = snapV(q.y); api.touch('levels'); scheduleDraw(); }, up() { renderBody(); } };
+          drag = { move(q) { b.x = snapV(q.x); b.y = snapV(q.y); api.touch('levels', false, true); scheduleDraw(); }, up() { renderBody(); } };
           api.touch('levels');
           renderBody();
         }

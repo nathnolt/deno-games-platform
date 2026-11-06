@@ -85,14 +85,21 @@ export function createDebugMenu(view) {
    * shows this change by itself (dragging a background model), so the local game is not rebuilt for it.
    * Nothing here ever reaches the room: that is the "Apply to game" button.
    */
-  function touch(kind, quiet = false) {
+  let liveTimer = 0;
+  function touch(kind, quiet = false, live = false) {
     if (PHYSICS.has(kind)) state.needsRestart = true;
     state.dirty = true;
-    validate();
-    scheduleBackup();
-    renderStatus();
+    if (live) { // dragging: validating the whole draft, saving the backup and redrawing the status wait until the mouse is still for a moment
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(() => { liveTimer = 0; validate(); scheduleBackup(); renderStatus(); }, 150);
+    } else {
+      validate();
+      scheduleBackup();
+      renderStatus();
+    }
     if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
-    if (!quiet) touchLocal(kind);
+    if (live) localKinds.add(kind); // (the studio gives it to the local game itself, once the drag pauses: see syncNow)
+    else if (!quiet) touchLocal(kind);
     studio.changed(kind); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
   }
 
