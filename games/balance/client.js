@@ -37,6 +37,7 @@ const rawColor = (hex) => {
   const n = parseInt(String(hex).replace('#', '').padEnd(6, '0').slice(0, 6), 16);
   return new THREE.Color().setRGB(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
 };
+const ROTATE_ANIM = 30; //      how fast the block in your hand turns to a new angle: it has turned 95% of the way in about 0.1 s
 const RELEASE_DELAY = 50;  //   ms between letting go of the mouse and the block really dropping (pressing again in that time picks it back up)
 const STORE = 'balance.done'; // localStorage: indexes of completed levels
 const copyOf = (v) => JSON.parse(JSON.stringify(v));
@@ -2086,7 +2087,7 @@ void main() {
     }
 
     const TAU = Math.PI * 2;
-    const draw = (v, rate) => {
+    const draw = (v, rate, rotRate = rate) => { // (rotRate: how fast the angle follows its target; 30 = it has turned 95% of the way in 0.1 s)
       const t = this.#target(v);
       const c = v.cur;
       const k = rate >= 1 ? 1 : 1 - Math.exp(-rate * dt);
@@ -2095,7 +2096,8 @@ void main() {
       c.z += (t.z - c.z) * k;
       c.s += (t.s - c.s) * k;
       c.tl = (c.tl ?? 1) + (t.tl - (c.tl ?? 1)) * k;
-      c.a += (((((t.a - c.a + Math.PI) % TAU) + TAU) % TAU) - Math.PI) * k;
+      const ka = rotRate === rate ? k : 1 - Math.exp(-rotRate * dt); // (an angle speed of its own is always a smooth follow; the other rates are "instant" from 1 up)
+      c.a += (((((t.a - c.a + Math.PI) % TAU) + TAU) % TAU) - Math.PI) * ka;
       v.group.position.set(c.x, c.y, c.z);
       v.group.rotation.z = c.a;
       v.group.rotation.x = -(1 - c.tl) * Math.PI / 2; // lying on the table → standing
@@ -2104,7 +2106,7 @@ void main() {
 
     for (const v of this.bodyViews.values()) {
       const mineHeld = v.owner === this.ctx.me.slot && (v.st === BODY.HELD || v.st === BODY.HELD_BAD) && this.#carrying();
-      draw(v, v.static ? 1 : mineHeld ? 45 : 24);
+      draw(v, v.static ? 1 : mineHeld ? 45 : 24, mineHeld ? ROTATE_ANIM : undefined);
     }
     for (const v of this.tableViews.values()) draw(v, 14);
     this.#animateGhosts(dt);
