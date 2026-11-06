@@ -320,8 +320,11 @@ export class BalanceGame {
       if (!add && !exists) return fail(`there is no shape called ${key} in _shapes.js: use Add shape`);
       if (!Array.isArray(req.value)) return fail('that is not a shape');
       next.shapes[key] = req.value;
+      next.shapeCategories ??= {};
+      if (typeof req.category === 'string' && req.category.trim()) next.shapeCategories[key] = req.category.trim().slice(0, 40);
+      else delete next.shapeCategories[key];
       file = '_shapes.js';
-      text = serializeShapes(next.shapes);
+      text = serializeShapes(next.shapes, next.shapeCategories);
     } else {
       return fail('unknown request');
     }

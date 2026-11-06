@@ -69,6 +69,46 @@ function confirmDialog({ title, text, label, run, onDone }) {
   document.body.append(back);
   ok.focus();
 }
+/** A select of shapes with the category names as group headings. */
+function shapeSelect(d, value, onchange) {
+  const groups = S.shapeGroups(Object.keys(d.shapes), d.shapeCategories ?? {});
+  const s = h('select', {}, groups.map(([c, ks]) => h('optgroup', { label: c }, ks.map((k) => h('option', { value: k }, k)))));
+  s.value = value;
+  s.addEventListener('change', () => onchange(s.value));
+  return s;
+}
+/** A wide dialog with every shape on view at once, under its category heading. A click picks one; the X, Escape and the backdrop close it. */
+function shapePicker(d, current, color, onPick) {
+  const before = document.activeElement;
+  const close = () => {
+    document.removeEventListener('keydown', onKey, true);
+    back.remove();
+    before?.focus?.();
+  };
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  }
+  const groups = S.shapeGroups(Object.keys(d.shapes), d.shapeCategories ?? {});
+  const back = h('div', { class: 'bb-st-dlg-back' },
+    h('div', { class: 'bb-st-dlg bb-st-pick', role: 'dialog', 'aria-modal': 'true' },
+      h('button', { type: 'button', class: 'bb-st-dlg-x', title: 'Close', onclick: close }, '✕'),
+      h('h3', {}, 'Choose a shape'),
+      h('div', { class: 'bb-st-pick-body' }, groups.map(([c, ks]) => h('section', { class: 'bb-st-pick-cat' },
+        h('h4', {}, `${c} (${ks.length})`),
+        h('div', { class: 'bb-st-pick-grid' }, ks.map((k) => h('button', {
+          type: 'button',
+          class: `bb-st-pick-item${k === current ? ' bb-on' : ''}`,
+          title: k,
+          onclick: () => { close(); onPick(k); },
+        }, thumb(d.shapes[k], color, 84, 64), h('span', {}, k)))))))));
+  back.addEventListener('pointerdown', (e) => { if (e.target === back) close(); });
+  document.addEventListener('keydown', onKey, true);
+  document.body.append(back);
+  back.querySelector('.bb-on')?.scrollIntoView?.({ block: 'center' });
+}
 // How big the studio panels are is YOUR view, not game state: it lives in this page only (not stored anywhere, not sent to the server or the other players).
 const dockPref = { w: 470, bp: 300 }; // width of the level / background studio panel, height of the blueprint (px)
 /** A handle on the right edge of a docked studio panel: drag it to make the panel (and so the blueprint) wider; the game gets the rest. */
@@ -801,6 +841,11 @@ function shapeStudio(view, api) {
     const entries = Object.entries(d.shapes).map(([k, v]) => [k === from ? to : k, v]);
     for (const k of Object.keys(d.shapes)) delete d.shapes[k];
     for (const [k, v] of entries) d.shapes[k] = v;
+    if (d.shapeCategories && Object.hasOwn(d.shapeCategories, from)) {
+      const cs = Object.entries(d.shapeCategories).map(([k, v]) => [k === from ? to : k, v]);
+      for (const k of Object.keys(d.shapeCategories)) delete d.shapeCategories[k];
+      for (const [k, v] of cs) d.shapeCategories[k] = v;
+    }
     for (const L of d.levels) {
       L.initialBlocks.forEach((b) => { if (b.shape === from) b.shape = to; });
       L.shapes.forEach((s) => { if (s.shape === from) s.shape = to; });
@@ -813,6 +858,15 @@ function shapeStudio(view, api) {
     renderAll();
     return undefined;
   }
+  const categoryOfSel = (key) => D().shapeCategories?.[key] ?? '';
+  function setCategory(key, raw) {
+    const d = D();
+    const c = `${raw ?? ''}`.trim().slice(0, 40);
+    const cats = (d.shapeCategories ??= {});
+    if (c) cats[key] = c; else delete cats[key];
+    api.touch('shapes');
+    renderList();
+  }
   function removeShape(key) {
     const d = D();
     const n = usage(key);
@@ -820,6 +874,7 @@ function shapeStudio(view, api) {
     if (keys().length <= 1) return fail('Keep at least one shape.');
     const at = keys().indexOf(key);
     delete d.shapes[key];
+    if (d.shapeCategories) delete d.shapeCategories[key];
     st.sel = keys()[Math.min(at, keys().length - 1)];
     st.msg = '';
     layout = null;
@@ -920,20 +975,32 @@ function shapeStudio(view, api) {
   function renderList() {
     const d = D();
     const mats = Object.keys(d.materials).filter((m) => !d.materials[m].static);
-    put(listEl, ...keys().map((key, i) => {
-      const n = usage(key);
-      return h('button', { type: 'button', class: `bb-st-item${key === st.sel ? ' bb-on' : ''}`, onclick: () => { select(key); focus(key); } },
-        thumb(d.shapes[key], matColor(d, st.mat === '(mixed)' ? mats[i % mats.length] : st.mat)),
-        h('span', { class: 'bb-st-itemname' }, key), n ? h('span', { class: 'bb-st-badge', title: `used in ${n} level(s)` }, `×${n}`) : null);
-    }));
+    const nodes = [];
+    let i = 0;
+    for (const [cat, ks] of S.shapeGroups(keys(), d.shapeCategories ?? {})) {
+      nodes.push(h('div', { class: 'bb-st-cat' }, `${cat} (${ks.length})`));
+      for (const key of ks) {
+        const n = usage(key);
+        const color = matColor(d, st.mat === '(mixed)' ? mats[i++ % mats.length] : st.mat);
+        nodes.push(h('button', { type: 'button', class: `bb-st-item${key === st.sel ? ' bb-on' : ''}`, onclick: () => { select(key); focus(key); } },
+          thumb(d.shapes[key], color),
+          h('span', { class: 'bb-st-itemname' }, key), n ? h('span', { class: 'bb-st-badge', title: `used in ${n} level(s)` }, `×${n}`) : null));
+      }
+    }
+    put(listEl, ...nodes);
     const nameIn = h('input', { type: 'text', placeholder: 'new shape name', value: st.newName });
     nameIn.addEventListener('input', () => { st.newName = nameIn.value; });
     nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') newEmpty(nameIn.value); });
+    const catIn = h('input', { type: 'text', list: 'bb-st-cats', maxlength: 40, placeholder: S.OTHER_CATEGORY, value: categoryOfSel(st.sel) });
+    catIn.addEventListener('change', () => setCategory(st.sel, catIn.value));
+    catIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') catIn.blur(); });
+    const catList = h('datalist', { id: 'bb-st-cats' }, [...new Set(Object.values(d.shapeCategories ?? {}))].map((c) => h('option', { value: c })));
     put(listHead,
       h('div', { class: 'bb-st-row' }, nameIn, btn('New (empty)', () => newEmpty(nameIn.value))),
       st.sel ? h('div', { class: 'bb-st-row' },
-        btn('Duplicate', () => { let n = `${st.sel}_copy`; for (let i = 2; D().shapes[n]; i++) n = `${st.sel}_copy${i}`; addShape(n, clone(D().shapes[st.sel])); }),
+        btn('Duplicate', () => { let n = `${st.sel}_copy`; for (let i = 2; D().shapes[n]; i++) n = `${st.sel}_copy${i}`; const cat = categoryOfSel(st.sel); addShape(n, clone(D().shapes[st.sel])); if (st.sel === n && cat) setCategory(n, cat); }),
         btn('Delete', () => removeShape(st.sel), 'bb-dbg-danger')) : null,
+      st.sel ? h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'category'), catIn, catList) : null,
       st.sel ? h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'export'),
         btn('Copy', (e) => copyText(shapeSource(st.sel), e.currentTarget), '', 'Copy as a line for the shapes table in _shapes.js')) : null,
       st.msg ? h('div', { class: 'bb-dbg-err' }, st.msg) : null);
@@ -1048,7 +1115,7 @@ function shapeStudio(view, api) {
         ? `Are you sure you want to add shape “${key}”? It is written to _shapes.js and every room gets it.`
         : `Are you sure you want to update shape “${key}”? It replaces the shape in _shapes.js and every room gets the new version.`,
       label: add ? 'Add shape' : 'Update shape',
-      run: () => api.saveItem({ kind: 'shape', op: add ? 'add' : 'update', key, value: clone(value) }),
+      run: () => api.saveItem({ kind: 'shape', op: add ? 'add' : 'update', key, value: clone(value), category: D().shapeCategories?.[key] ?? '' }),
       onDone: (r) => { st.msg = ''; st.saved = add ? `Shape “${key}” was added to ${r.file}.` : `Shape “${key}” was updated in ${r.file}.`; renderHead(); },
     });
   }
@@ -1459,9 +1526,21 @@ function levelStudio(view, api) {
     const d = D();
     put(palette,
       h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'palette'), h('label', { class: 'bb-st-mini' }, 'material', sel(nonStatic(), st.mat, (v) => { st.mat = v; renderPalette(); }))),
-      h('div', { class: 'bb-st-strip' }, Object.keys(d.shapes).map((key) => h('button', { type: 'button', class: 'bb-st-chip', title: key, onpointerdown: (e) => paletteDown(e, key) }, thumb(d.shapes[key], matColor(d, st.mat), 50, 36), h('span', {}, key)))));
+      h('div', { class: 'bb-st-strip' }, S.shapeGroups(Object.keys(d.shapes), d.shapeCategories ?? {}).flatMap(([cat, ks]) => [
+        h('div', { class: 'bb-st-strip-cat' }, `${cat} (${ks.length})`),
+        ...ks.map((key) => h('button', { type: 'button', class: 'bb-st-chip', title: `${key} · ${cat}`, onpointerdown: (e) => paletteDown(e, key) }, thumb(d.shapes[key], matColor(d, st.mat), 50, 36), h('span', {}, key))),
+      ])));
   }
 
+  /** The shape of a start block / block to place: a select grouped by category, and a button for the dialog with all shapes. */
+  const shapeField = (obj) => h('span', { class: 'bb-st-shapefield' },
+    shapeSelect(D(), obj.shape, (v) => { obj.shape = v; api.touch('levels'); renderBody(); }),
+    h('button', {
+      type: 'button',
+      class: 'bb-dbg-btn',
+      title: 'See all shapes',
+      onclick: () => shapePicker(D(), obj.shape, matColor(D(), obj.material), (k) => { obj.shape = k; api.touch('levels'); renderBody(); scheduleDraw(); }),
+    }, '▦'));
   const mini = (options, obj, key) => sel(options, obj[key], (v) => { obj[key] = v; api.touch('levels'); });
   const numIn = (obj, key, step, cb) => {
     const i = h('input', { type: 'number', step, class: 'bb-dbg-n', value: obj[key] ?? 0 });
@@ -1501,16 +1580,25 @@ function levelStudio(view, api) {
       dropOn ? h('div', { class: 'bb-st-row' }, ...['x0', 'x1', 'y0', 'y1'].map((k) => h('label', { class: 'bb-st-mini' }, k, numIn(l.drop, k, 1, scheduleDraw)))) : null));
 
     // start layout
-    const rows = l.initialBlocks.map((b, i) => h('button', { type: 'button', class: `bb-st-pill${i === st.sel ? ' bb-on' : ''}`, onclick: () => { st.sel = i; renderBody(); scheduleDraw(); } }, `${b.shape} · ${b.material}`));
-    const b = l.initialBlocks[st.sel];
+    const startRows = l.initialBlocks.map((b, i) => {
+      const row = h('div', { class: `bb-st-seq bb-st-start${i === st.sel ? ' bb-on' : ''}` },
+        h('span', { class: 'bb-dbg-idx' }, i + 1),
+        shapeField(b), mini(matList, b, 'material'),
+        ...[['x', 0.25], ['y', 0.25], ['rot', 5]].map(([k, step]) => h('label', { class: 'bb-st-mini' }, k, numIn(b, k, step, scheduleDraw))),
+        btn('⧉', () => { l.initialBlocks.push({ ...b, x: b.x + 1, y: b.y + 1 }); st.sel = l.initialBlocks.length - 1; api.touch('levels'); renderBody(); scheduleDraw(); }),
+        btn('✕', () => { l.initialBlocks.splice(i, 1); st.sel = -1; api.touch('levels'); renderBody(); scheduleDraw(); }, 'bb-dbg-danger'));
+      // touching a row selects that block on the blueprint (without rebuilding the rows: that would drop the focus of the field being edited)
+      row.addEventListener('focusin', () => {
+        if (st.sel === i) return;
+        st.sel = i;
+        row.parentNode?.querySelectorAll('.bb-st-start').forEach((r) => r.classList.toggle('bb-on', r === row));
+        scheduleDraw();
+      });
+      row.addEventListener('pointerdown', () => row.dispatchEvent(new Event('focusin')));
+      return row;
+    });
     out.push(w.section(`Start layout (${l.initialBlocks.length})`,
-      h('div', { class: 'bb-st-pills' }, rows.length ? rows : h('span', { class: 'bb-dbg-note' }, 'Empty: drag a shape from the palette into the blueprint.')),
-      b ? h('div', { class: 'bb-st-sel' },
-        h('div', { class: 'bb-st-row' }, mini(shapesList, b, 'shape'), mini(matList, b, 'material')),
-        h('div', { class: 'bb-st-row' },
-          ...[['x', 0.25], ['y', 0.25], ['rot', 5]].map(([k, step]) => h('label', { class: 'bb-st-mini' }, k, numIn(b, k, step, scheduleDraw))),
-          btn('⧉', () => { l.initialBlocks.push({ ...b, x: b.x + 1, y: b.y + 1 }); st.sel = l.initialBlocks.length - 1; api.touch('levels'); renderBody(); }),
-          btn('✕', () => { l.initialBlocks.splice(st.sel, 1); st.sel = -1; api.touch('levels'); renderBody(); }, 'bb-dbg-danger'))) : null));
+      startRows.length ? h('div', { class: 'bb-st-scroll' }, ...startRows) : h('span', { class: 'bb-dbg-note' }, 'Empty: drag a shape from the palette into the blueprint.')));
 
     // blocks to place
     const seq = l.shapes.map((s, i) => {
@@ -1518,7 +1606,7 @@ function levelStudio(view, api) {
       return h('div', { class: `bb-st-seq${i < n ? ' bb-first' : ''}`, title: i < n ? 'on the table from the start' : 'appears later' },
         h('span', { class: 'bb-dbg-idx' }, i + 1),
         thumb(d.shapes[s.shape] ?? [], matColor(d, s.material), 34, 26),
-        mini(shapesList, s, 'shape'), mini(matList, s, 'material'),
+        shapeField(s), mini(matList, s, 'material'),
         btn('↑', () => { if (i > 0) { [l.shapes[i - 1], l.shapes[i]] = [l.shapes[i], l.shapes[i - 1]]; api.touch('levels'); renderBody(); } }),
         btn('↓', () => { if (i < l.shapes.length - 1) { [l.shapes[i + 1], l.shapes[i]] = [l.shapes[i], l.shapes[i + 1]]; api.touch('levels'); renderBody(); } }),
         btn('⧉', () => { l.shapes.splice(i + 1, 0, { ...s }); api.touch('levels'); renderBody(); }),
@@ -1530,8 +1618,11 @@ function levelStudio(view, api) {
     }
     out.push(w.section(`Blocks to place (${l.shapes.length})`,
       h('p', { class: 'bb-dbg-note' }, `The first ${Math.min(l.chooseShapes, l.shapes.length)} (highlighted) lie on the table at the start. Total area ${f3(area)}.`),
-      ...seq,
-      h('div', { class: 'bb-st-row' }, btn('+ add block', () => { l.shapes.push({ shape: shapesList[0], material: matList.find((m) => !d.materials[m].static) ?? matList[0] }); api.touch('levels'); renderBody(); }))));
+      h('div', { class: 'bb-st-scroll' }, ...seq),
+      h('div', { class: 'bb-st-row' }, btn('+ add block', () => {
+        const material = matList.find((m) => !d.materials[m].static) ?? matList[0];
+        shapePicker(D(), null, matColor(D(), material), (k) => { l.shapes.push({ shape: k, material }); api.touch('levels'); renderBody(); });
+      }))));
     put(body, ...out);
   }
 

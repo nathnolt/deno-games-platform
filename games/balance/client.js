@@ -1964,15 +1964,17 @@ void main() {
 
   /** The world navigation and one card per level of the chosen world. Built again when the levels change (debug menu). */
   #buildCards() {
-    const keys = Object.keys(worlds);
-    if (!keys.includes(this.worldKey)) this.worldKey = keys[0];
     const inWorld = (k) => levels.map((lv, i) => [lv, i]).filter(([lv]) => worldKeyOf(lv) === k);
-    this.worldBtns = keys.map((k) => el('button', {
+    const all = Object.keys(worlds);
+    const keys = all.filter((k) => inWorld(k).length > 0); // worlds without any level are not shown
+    this.worldKeys = keys.length ? keys : all.slice(0, 1);
+    if (!this.worldKeys.includes(this.worldKey)) this.worldKey = this.worldKeys[0];
+    this.worldBtns = this.worldKeys.map((k) => el('button', {
       class: `bb-world${k === this.worldKey ? ' bb-on' : ''}${inWorld(k).length && inWorld(k).every(([, i]) => this.done.has(i)) ? ' bb-complete' : ''}`,
       onclick: () => { this.worldKey = k; this.#buildCards(); },
-    }, worlds[k].name));
+    }, `${worlds[k].name} (${inWorld(k).length})`)); // (the number of levels in it)
     this.worldsEl.replaceChildren(...this.worldBtns);
-    this.worldsEl.classList.toggle('bb-hide', keys.length < 2);
+    this.worldsEl.classList.toggle('bb-hide', this.worldKeys.length < 2);
     const own = inWorld(this.worldKey);
     this.cards = own.map(([lv, i], n) =>
       el(
@@ -1989,7 +1991,7 @@ void main() {
 
   #markDone() {
     this.cards.forEach((c) => c.classList.toggle('bb-complete', this.done.has(+c.dataset.lv)));
-    Object.keys(worlds).forEach((k, n) => {
+    (this.worldKeys ?? []).forEach((k, n) => {
       const own = levels.map((lv, i) => [lv, i]).filter(([lv]) => worldKeyOf(lv) === k);
       this.worldBtns[n]?.classList.toggle('bb-complete', own.length > 0 && own.every(([, i]) => this.done.has(i)));
     });

@@ -7,7 +7,29 @@ import { backgrounds, bowls, levels, materials, models, shapes, tuning } from '.
 import * as DEFS from './_definitions.js';
 /** The worlds the levels are grouped in (a _definitions.js without any gets one world holding everything). */
 const worlds = DEFS.worlds ?? { main: { name: 'Levels' } };
-export { backgrounds, bowls, levels, materials, models, shapes, tuning, worlds };
+/** The category of each shape: { shapeKey: 'Category name' }. A shape without one is in 'Other'. (A _definitions.js without any has no categories.) */
+const shapeCategories = DEFS.shapeCategories ?? {};
+export { backgrounds, bowls, levels, materials, models, shapes, shapeCategories, tuning, worlds };
+
+export const OTHER_CATEGORY = 'Other';
+/** The category name of a shape. */
+export const categoryOf = (key, cats = shapeCategories) => (typeof cats[key] === 'string' && cats[key] ? cats[key] : OTHER_CATEGORY);
+/**
+ * The shape keys grouped by category: [[category, [keys]], ...]. The categories come in the order they first appear in the table of categories
+ * ('Other' last); inside a category the shapes keep their own order.
+ */
+export function shapeGroups(keys, cats = shapeCategories) {
+  const order = [];
+  for (const k of Object.keys(cats)) { const c = categoryOf(k, cats); if (!order.includes(c)) order.push(c); }
+  const groups = new Map();
+  for (const k of keys) {
+    const c = categoryOf(k, cats);
+    if (!groups.has(c)) groups.set(c, []);
+    groups.get(c).push(k);
+  }
+  const names = [...groups.keys()].sort((a, b) => (a === OTHER_CATEGORY) - (b === OTHER_CATEGORY) || ((order.indexOf(a) + 1 || 1e9) - (order.indexOf(b) + 1 || 1e9)));
+  return names.map((c) => [c, groups.get(c)]);
+}
 
 /**
  * Debug menu switch. true = the in-game debug menu is available (the ` key or the button at the bottom left) and the server
@@ -649,9 +671,9 @@ export const LOSE_TEXT = {
 };
 
 // ── Definitions: copy, replace, check, export ────────────────────────────────────────────────────────────────
-const TABLES = ['tuning', 'materials', 'shapes', 'bowls', 'models', 'backgrounds', 'worlds', 'levels'];
+const TABLES = ['tuning', 'materials', 'shapes', 'shapeCategories', 'bowls', 'models', 'backgrounds', 'worlds', 'levels'];
 export const DEFINITION_TABLES = TABLES;
-const live = { tuning, materials, shapes, bowls, models, backgrounds, worlds, levels };
+const live = { tuning, materials, shapes, shapeCategories, bowls, models, backgrounds, worlds, levels };
 
 /** A deep copy of all definitions (plain JSON data). */
 export function cloneDefinitions() {
@@ -839,6 +861,12 @@ export function validateDefinitions(defs, extra = {}) {
     });
   }
 
+  // shape categories
+  for (const [k, c] of Object.entries(d.shapeCategories ?? {})) {
+    if (!shp[k]) err(`shape category: there is no shape called "${k}"`);
+    else if (typeof c !== 'string' || !c.trim() || c.length > 40) err(`shape ${k}: the category must be a name of 1 to 40 characters`);
+  }
+
   // worlds
   const wds = d.worlds ?? {};
   if (Object.keys(wds).length === 0) err('there must be at least one world');
@@ -933,12 +961,15 @@ const SHAPES_HEAD = [
   '//   add `visual: true` to a poly to make it a drawing-only outline (it replaces the parts when the block is drawn)',
   '// Origin and orientation do not matter: every shape is re-centred on the middle of its bounding box when it is used.',
   '// The ORDER matters a little: snapshots refer to shapes by their place in this list, so new shapes are added at the end.',
+  '//',
+  "// shapeCategories    the category of each shape ('Basic', 'Letters' ...): the shape selects show the shapes under these names. No category = 'Other'.",
   '',
 ].join('\n');
 
-/** The whole _shapes.js file for a table of shapes. */
-export function serializeShapes(table) {
-  return `${SHAPES_HEAD}\n${serializeTable('shapes', table)}`;
+/** The whole _shapes.js file for a table of shapes and the table of their categories. */
+export function serializeShapes(table, categories = {}) {
+  const cats = Object.fromEntries(Object.keys(table).filter((k) => categories[k]).map((k) => [k, categories[k]])); // (in the order of the shapes)
+  return `${SHAPES_HEAD}\n${serializeTable('shapes', table)}\n${serializeTable('shapeCategories', cats)}`;
 }
 
 /** The whole _levels.js file for a list of levels. */
@@ -962,8 +993,8 @@ export function serializeDefinitions(defs) {
     '//   levels        (in their own file, _levels.js)',
     '',
   ];
-  const tables = TABLES.filter((n) => n !== 'levels' && n !== 'shapes').map((n) => serializeTable(n, defs[n])).join('\n');
-  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes } from './_shapes.js';\nexport { levels } from './_levels.js';\n`;
+  const tables = TABLES.filter((n) => n !== 'levels' && n !== 'shapes' && n !== 'shapeCategories').map((n) => serializeTable(n, defs[n])).join('\n');
+  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes, shapeCategories } from './_shapes.js';\nexport { levels } from './_levels.js';\n`;
 }
 
 syncDefinitions();

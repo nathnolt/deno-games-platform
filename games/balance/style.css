@@ -235,3 +235,27 @@
 
 /* the level picker of the level studio is as wide as its longest level name (it does not take the rest of the bar) */
 .bb-dbg select.bb-st-lvsel { flex: none; width: auto; min-width: 8rem; }
+
+/* block categories: headings in the shape list, the grouped shape select with its dialog button, the shape picker dialog */
+.bb-st-cat { margin: .35rem 0 .1rem; padding: 0 .2rem; font: 600 10.5px system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: #8b9ac4; }
+.bb-st-cat:first-child { margin-top: 0; }
+.bb-st-shapefield { display: inline-flex; gap: .2rem; align-items: center; min-width: 0; }
+.bb-st-shapefield select { min-width: 0; }
+.bb-st-pick { width: min(60rem, 94vw); max-height: 88vh; display: flex; flex-direction: column; }
+.bb-st-pick-body { overflow-y: auto; min-height: 0; padding-right: .3rem; }
+.bb-st-pick-cat h4 { margin: .6rem 0 .35rem; font: 600 11px system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: #8b9ac4; }
+.bb-st-pick-cat:first-child h4 { margin-top: 0; }
+.bb-st-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(6.2rem, 1fr)); gap: .4rem; }
+.bb-st-pick-item { display: flex; flex-direction: column; align-items: center; gap: 2px; font: 11px system-ui, sans-serif; color: #cbd5e1; background: rgba(255,255,255,.04); border: 1px solid #2b3550; border-radius: 6px; padding: 4px; cursor: pointer; }
+.bb-st-pick-item:hover { border-color: #818cf8; color: #fff; }
+.bb-st-pick-item.bb-on { background: #25305a; border-color: #4a5a94; color: #fff; }
+.bb-st-pick-item span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* palette category headings, start layout rows, scrolling lists of blocks */
+.bb-st-strip-cat { flex: 0 0 100%; font: 600 10.5px system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: #8b9ac4; margin-top: .15rem; }
+.bb-st-strip-cat:first-child { margin-top: 0; }
+.bb-st-scroll { display: flex; flex-direction: column; gap: .2rem; max-height: 16rem; overflow-y: auto; padding-right: .2rem; }
+.bb-st-start { flex-wrap: wrap; border: 1px solid transparent; }
+.bb-st-start.bb-on { background: #25305a; border-color: #f43f5e; }
+.bb-st-start .bb-st-mini { display: inline-flex; align-items: center; gap: .15rem; }
+.bb-st-start select { max-width: 6rem; }

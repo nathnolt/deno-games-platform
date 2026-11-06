@@ -6,17 +6,17 @@
 //   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js     (on the "start" and "dev" tasks)
 // (`deno task dev` watches the files and restarts the server after every save: use `deno task start` while you edit levels.)
 //
-// ── Levels ───────────────────────────────────────────────────────────────────────────────────────────────────
 // name, difficulty     shown in the menu (easy | medium | hard)
-// world                key of `worlds`: the world this level is part of
+// world                key of `worlds` (_definitions.js): the world this level is part of (the first world when left out)
 // bowl, background     keys of `bowls` / `backgrounds` (the first one of each when left out)
+// time                 optional hour of the day (0-24): overrides the background
 // initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)
 //                      'static' material = fixed to the world. Anything else is a normal physics body.
 // chooseShapes         how many blocks lie on the table at once = how many can be held at the same time (4 = all four players)
 // shapes               the ordered list of blocks you must place: { shape, material }. Rotate with Q / E while holding.
 // zone (optional)      { x0, x1 }: sideways limits (default tuning.zone). Leaving it, or touching the water/bowl, loses the level.
 // drop (optional)      { x0, x1, y0, y1 }: the drop zone rectangle (default tuning.drop)
-//
+
 export const levels = [
   {
     name: 'Level 1',
@@ -24,7 +24,6 @@ export const levels = [
     difficulty: 'easy',
     bowl: 'bowl1',
     background: 'zen1',
-    // two columns of two static squares: their tops are at y = 1.6, just above the water
     initialBlocks: [
       { shape: 'square1', material: 'static', rot: 0, x: -5, y: -4.4 },
       { shape: 'square1', material: 'static', rot: 0, x: -5, y: -0.4 },
@@ -75,9 +74,9 @@ export const levels = [
     ],
   },
   {
-    name: 'Level 4',
+    name: 'Level 1',
     difficulty: 'easy',
-    world: 'world1',
+    world: 'whacky',
     bowl: 'bowl1',
     background: 'zen1',
     initialBlocks: [
@@ -92,5 +91,19 @@ export const levels = [
       { shape: 'arrow', material: 'wood' },
       { shape: 'arrow', material: 'wood' },
     ],
+  },
+  {
+    name: 'Level 2',
+    difficulty: 'easy',
+    bowl: 'bowl1',
+    background: 'zen1',
+    initialBlocks: [
+      { shape: 'S', material: 'floatBlockHeavy', rot: 31, x: 4, y: 0 },
+      { shape: 'S2', material: 'floatBlockHeavy', rot: -30.100000000000023, x: -3.5, y: 0 },
+      { shape: 'square1', material: 'wood', rot: -90, x: 1.77, y: -4.48 },
+    ],
+    chooseShapes: 3,
+    shapes: [{ shape: 'square1', material: 'wood' }],
+    world: 'whacky',
   },
 ];

@@ -67,7 +67,7 @@ export const materials = {
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
 // The shapes live in their own file: ./_shapes.js (the shape studio rewrites it when you press "Add shape" / "Update shape").
-export { shapes } from './_shapes.js';
+export * from './_shapes.js'; // (shapes, and shapeCategories when the file has them)
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────
 // The bowl is a bowl of revolution: a flat bottom, rounded corners and straight walls. The physics sees the slice through the middle
@@ -219,6 +219,12 @@ export const backgrounds = {
 export const worlds = {
   world1: { name: 'World 1' },
   world2: { name: 'World 2' },
+  test: { name: 'Test' },
+  example: { name: 'Example' },
+  whacky: { name: 'Whacky' },
+  coop: { name: 'Co-op' },
+  hard: { name: 'Hard' },
+  dumb: { name: 'Dumb' },
 };
 
 // ── Levels ───────────────────────────────────────────────────────────────────────────────────────────────────

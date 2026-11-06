@@ -10,6 +10,8 @@
 //   add `visual: true` to a poly to make it a drawing-only outline (it replaces the parts when the block is drawn)
 // Origin and orientation do not matter: every shape is re-centred on the middle of its bounding box when it is used.
 // The ORDER matters a little: snapshots refer to shapes by their place in this list, so new shapes are added at the end.
+//
+// shapeCategories    the category of each shape ('Basic', 'Letters' ...): the shape selects show the shapes under these names. No category = 'Other'.
 
 export const shapes = {
   square1: [{ type: 'poly', points: '0,0 4,0 4,4 0,4' }],
@@ -28,4 +30,19 @@ export const shapes = {
   arrow: [{ type: 'poly', points: '-4,1 1,1 1,-1 -4,-1' }, { type: 'poly', points: '0,2.828 2.828,0 0,-2.828' }],
   circle: [{ type: 'circle', diameter: 5 }],
   what: [{ type: 'circle', diameter: 2 }, { type: 'circle', diameter: 2, x: 6, y: 1 }],
+};
+
+export const shapeCategories = {
+  square1: 'Basic',
+  heart: 'Fancy',
+  L: 'Tetris',
+  L2: 'Tetris',
+  S: 'Tetris',
+  S2: 'Tetris',
+  T: 'Tetris',
+  triangle: 'Basic',
+  plus: 'Fancy',
+  arrow: 'Fancy',
+  circle: 'Basic',
+  what: 'Fancy',
 };
