@@ -2711,9 +2711,22 @@ void main() {
       return;
     }
     e.preventDefault();
-    if (performance.now() - (this.lastWheel ?? 0) < 140) return; // one notch = one step (a wheel sends several events per notch)
-    this.lastWheel = performance.now();
-    this.#turn(e.deltaY < 0 ? 1 : -1);
+    // Every notch turns the block one step at once (no waiting): a wheel notch arrives as one event with a big delta. Smooth wheels and trackpads send
+    // many small deltas instead, so those add up until they make a step; what is left over is forgotten after a short pause or a change of direction.
+    const now = performance.now();
+    const px = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1); // (lines and pages to pixels)
+    if (Math.abs(px) >= 50) { // a whole notch
+      this.wheelAcc = 0;
+      this.#turn(px < 0 ? 1 : -1);
+    } else {
+      if (now - (this.lastWheel ?? 0) > 250 || Math.sign(px) !== Math.sign(this.wheelAcc ?? 0)) this.wheelAcc = 0;
+      this.wheelAcc = (this.wheelAcc ?? 0) + px;
+      if (Math.abs(this.wheelAcc) >= 50) {
+        this.#turn(this.wheelAcc < 0 ? 1 : -1);
+        this.wheelAcc = 0;
+      }
+    }
+    this.lastWheel = now;
   };
 
   #onContext = (e) => {
