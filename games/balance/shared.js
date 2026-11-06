@@ -1,11 +1,11 @@
 // Runs on BOTH server and browser. No DOM, no Deno APIs, no imports from client/ or server/.
 //
-// The game CONTENT (materials, shapes, bowls, models, backgrounds, levels, tuning) is plain data in ./definitions.js.
+// The game CONTENT (materials, shapes, bowls, models, backgrounds, levels, tuning) is plain data in ./_definitions.js.
 // This file is the logic around it: helpers, wire constants, validation, and the code the debug menu uses to edit and export it.
 
-import { backgrounds, bowls, levels, materials, models, shapes, tuning } from './definitions.js';
-import * as DEFS from './definitions.js';
-/** The worlds the levels are grouped in (a definitions.js without any gets one world holding everything). */
+import { backgrounds, bowls, levels, materials, models, shapes, tuning } from './_definitions.js';
+import * as DEFS from './_definitions.js';
+/** The worlds the levels are grouped in (a _definitions.js without any gets one world holding everything). */
 const worlds = DEFS.worlds ?? { main: { name: 'Levels' } };
 export { backgrounds, bowls, levels, materials, models, shapes, tuning, worlds };
 
@@ -39,7 +39,7 @@ export const meta = {
 //   FRONT_Z   ← blocks waiting on the table
 //   PLAY_Z    ← the tower, the pillars and the bowl: this is where the physics happens
 //
-// The values below come from `tuning` in definitions.js. They are `let` on purpose: when the debug menu changes the tuning,
+// The values below come from `tuning` in _definitions.js. They are `let` on purpose: when the debug menu changes the tuning,
 // syncDefinitions() reassigns them and every module that imported them sees the new value.
 export const WATER_Y = 0;
 export const PLAY_Z = 0;
@@ -896,18 +896,18 @@ export function serializeTable(name, value) {
   return `export const ${name} = ${toSource(value)};\n`;
 }
 
-/** The header comment of levels.js (what a level is made of). */
+/** The header comment of _levels.js (what a level is made of). */
 const LEVELS_HEAD = [
-  '// Runs on BOTH server and browser. Pure data: the LEVELS of Balance. definitions.js re-exports them, so nothing else changes.',
+  '// Runs on BOTH server and browser. Pure data: the LEVELS of Balance. _definitions.js re-exports them, so nothing else changes.',
   '//',
   '// With `DEBUG = true` the level studio edits this file for you, but only when you press "Add level" (a new level is added at the end) or',
   '// "Update level" (an existing level is replaced) and confirm it: the game server then rewrites THIS file (comments are not kept) and every',
   '// room gets the change. That needs write permission for the file:',
-  '//   deno.json:  --allow-write=games/balance/levels.js,games/balance/shapes.js     (on the "start" and "dev" tasks)',
+  '//   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js     (on the "start" and "dev" tasks)',
   '// (`deno task dev` watches the files and restarts the server after every save: use `deno task start` while you edit levels.)',
   '//',
   '// name, difficulty     shown in the menu (easy | medium | hard)',
-  '// world                key of `worlds` (definitions.js): the world this level is part of (the first world when left out)',
+  '// world                key of `worlds` (_definitions.js): the world this level is part of (the first world when left out)',
   '// bowl, background     keys of `bowls` / `backgrounds` (the first one of each when left out)',
   '// time                 optional hour of the day (0-24): overrides the background',
   '// initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)',
@@ -919,13 +919,13 @@ const LEVELS_HEAD = [
   '',
 ].join('\n');
 
-/** The header comment of shapes.js. */
+/** The header comment of _shapes.js. */
 const SHAPES_HEAD = [
-  '// Runs on BOTH server and browser. Pure data: the SHAPES of Balance. definitions.js re-exports them, so nothing else changes.',
+  '// Runs on BOTH server and browser. Pure data: the SHAPES of Balance. _definitions.js re-exports them, so nothing else changes.',
   '//',
   '// With `DEBUG = true` the shape studio edits this file for you, but only when you press "Add shape" or "Update shape" and confirm it:',
   '// the game server then rewrites THIS file (comments are not kept) and every room gets the change. That needs write permission:',
-  '//   deno.json:  --allow-write=games/balance/levels.js,games/balance/shapes.js     (on the "start" and "dev" tasks)',
+  '//   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js     (on the "start" and "dev" tasks)',
   '//',
   '// A shape is a list of parts. Part types:',
   "//   { type: 'poly',   points: 'x,y x,y x,y ...' }   a CONVEX polygon (build concave shapes from several parts, like plus1)",
@@ -936,17 +936,17 @@ const SHAPES_HEAD = [
   '',
 ].join('\n');
 
-/** The whole shapes.js file for a table of shapes. */
+/** The whole _shapes.js file for a table of shapes. */
 export function serializeShapes(table) {
   return `${SHAPES_HEAD}\n${serializeTable('shapes', table)}`;
 }
 
-/** The whole levels.js file for a list of levels. */
+/** The whole _levels.js file for a list of levels. */
 export function serializeLevels(list) {
   return `${LEVELS_HEAD}\n${serializeTable('levels', list)}`;
 }
 
-/** The whole definitions.js file for the given definitions (the levels are written to levels.js, see serializeLevels). */
+/** The whole _definitions.js file for the given definitions (the levels are written to _levels.js, see serializeLevels). */
 export function serializeDefinitions(defs) {
   const head = [
     '// Runs on BOTH server and browser. Pure data, no code: everything that defines the CONTENT of Balance lives in this file.',
@@ -954,16 +954,16 @@ export function serializeDefinitions(defs) {
     '//',
     '//   tuning        numbers you can play with (gravity, camera, block depth ...)',
     '//   materials     friction, weight and shader of a block',
-    '//   shapes        (in their own file, shapes.js)',
+    '//   shapes        (in their own file, _shapes.js)',
     '//   bowls         the bowls the tower is built in',
     '//   models        .obj files in ./models and the shader of each part',
     '//   backgrounds   the scenery around the table',
     '//   worlds        the groups the levels are shown in (a level names its world)',
-    '//   levels        (in their own file, levels.js)',
+    '//   levels        (in their own file, _levels.js)',
     '',
   ];
   const tables = TABLES.filter((n) => n !== 'levels' && n !== 'shapes').map((n) => serializeTable(n, defs[n])).join('\n');
-  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./shapes.js, levels: in ./levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes } from './shapes.js';\nexport { levels } from './levels.js';\n`;
+  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes } from './_shapes.js';\nexport { levels } from './_levels.js';\n`;
 }
 
 syncDefinitions();

@@ -41,7 +41,7 @@ const FLOAT_SIDES = 24; //        circles are approximated by a polygon when com
 const BOWL_SEGMENTS = 36;
 const SAVE_PIECE_MAX = 3000; //   debug: longest piece of a level / shape that comes in one message (the platform limits a message to 4096 characters)
 const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along in every snapshot after a change
-// countdown and follow come from `tuning` (definitions.js)
+// countdown and follow come from `tuning` (_definitions.js)
 const LAB_ID_START = 100000; //   ids of blocks spawned in the level lab (they never clash with the ids of a level's own blocks)
 const LAB_MAX_BLOCKS = 300;
 const FRAGILE_REST = 0.2; //      seconds a block must rest on a fragile one before it counts
@@ -287,7 +287,7 @@ export class BalanceGame {
     fileQueue = fileQueue.then(() => this.#saveItem(req)).catch((e) => { this.saveResult = { id: c.id, ok: false, error: `${e?.message ?? e}` }; });
   }
 
-  /** Debug: add or replace ONE level (levels.js) or ONE shape (shapes.js): check the result, write the file, then every room uses it from now on. */
+  /** Debug: add or replace ONE level (_levels.js) or ONE shape (_shapes.js): check the result, write the file, then every room uses it from now on. */
   async #saveItem(req) {
     const fail = (error) => { this.saveResult = { id: req.id, ok: false, error }; };
     activate(this.defs);
@@ -305,20 +305,20 @@ export class BalanceGame {
         index = next.levels.length - 1;
       } else {
         index = req.index;
-        if (!Number.isInteger(index) || !next.levels[index] || next.levels[index].name !== req.was) return fail('that level is not in levels.js any more (or it was renamed there): reload the page and try again');
+        if (!Number.isInteger(index) || !next.levels[index] || next.levels[index].name !== req.was) return fail('that level is not in _levels.js any more (or it was renamed there): reload the page and try again');
         next.levels[index] = lv;
       }
-      file = 'levels.js';
+      file = '_levels.js';
       text = serializeLevels(next.levels);
     } else if (req.kind === 'shape') {
       const key = req.key;
       if (typeof key !== 'string' || !/^[A-Za-z][\w-]{0,39}$/.test(key)) return fail('a shape name starts with a letter and has at most 40 letters, digits, - or _');
       const exists = Object.hasOwn(next.shapes, key);
       if (add && exists) return fail(`there is a shape called ${key} already: use Update shape`);
-      if (!add && !exists) return fail(`there is no shape called ${key} in shapes.js: use Add shape`);
+      if (!add && !exists) return fail(`there is no shape called ${key} in _shapes.js: use Add shape`);
       if (!Array.isArray(req.value)) return fail('that is not a shape');
       next.shapes[key] = req.value;
-      file = 'shapes.js';
+      file = '_shapes.js';
       text = serializeShapes(next.shapes);
     } else {
       return fail('unknown request');
@@ -331,7 +331,7 @@ export class BalanceGame {
     } catch (e) {
       const denied = /permission|capable|--allow-write|requires write/i.test(`${e?.name} ${e?.message}`);
       return fail(denied
-        ? `${file} could not be written: Deno has no write permission. Add --allow-write=games/balance/levels.js,games/balance/shapes.js to the "start" (and "dev") task in deno.json, then restart the server.`
+        ? `${file} could not be written: Deno has no write permission. Add --allow-write=games/balance/_levels.js,games/balance/_shapes.js to the "start" (and "dev") task in deno.json, then restart the server.`
         : `${file} could not be written: ${e?.message ?? e}`);
     }
     activate(this.defs);

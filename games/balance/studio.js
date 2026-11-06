@@ -2,8 +2,6 @@
 //
 //   SHAPE STUDIO  A 2D board that shows EVERY shape at the same scale, side by side, next to the cross-section of a bowl, so you can judge
 //                 how they fit together. Drag corners to reshape, click an edge to add a corner, right-click a corner to remove it.
-//                 Next to it a 3D preview draws the same shapes with the game's own geometry and shaders, standing on the table in
-//                 front of the bowl, updating while you edit.
 //
 //   BACKGROUND STUDIO  The game with the free camera on and a panel to place the models of a background (move / turn / scale, collapsed rows,
 //                 a preview window for the model you are about to add, a button that puts the camera back where the game has it).
@@ -18,7 +16,7 @@
 // background studios show and test the draft in the LOCAL GAME: a private copy of the game that runs in this page (client.js, sim.js), so
 // nobody else is restarted and nothing goes over the network while you edit. The draft is never sent to the room.
 // The ONE exception is on purpose and explicit: the buttons "Add level" / "Update level" (level studio) and "Add shape" / "Update shape" (shape studio).
-// After a confirmation they send that ONE level / shape to the server, which writes levels.js / shapes.js; every room then uses it.
+// After a confirmation they send that ONE level / shape to the server, which writes _levels.js / _shapes.js; every room then uses it.
 
 import * as S from './shared.js';
 import { clone, h, svg } from './ui.js';
@@ -71,10 +69,8 @@ function confirmDialog({ title, text, label, run, onDone }) {
   document.body.append(back);
   ok.focus();
 }
-// How big the studio panels are is YOUR view, not game state: it is kept in this browser only and never sent to the server or the other players.
-const prefGet = (k, d) => { try { const v = parseFloat(localStorage.getItem(`balance.studio.${k}`)); return Number.isFinite(v) ? v : d; } catch { return d; } };
-const prefSet = (k, v) => { try { localStorage.setItem(`balance.studio.${k}`, String(v)); } catch { /* private mode */ } };
-const dockPref = { w: prefGet('dock', 470), bp: prefGet('bp', 300) }; // width of the level / background studio panel, height of the blueprint (px)
+// How big the studio panels are is YOUR view, not game state: it lives in this page only (not stored anywhere, not sent to the server or the other players).
+const dockPref = { w: 470, bp: 300 }; // width of the level / background studio panel, height of the blueprint (px)
 /** A handle on the right edge of a docked studio panel: drag it to make the panel (and so the blueprint) wider; the game gets the rest. */
 function dockGrip(root, view) {
   const g = h('div', { class: 'bb-st-gripx', title: 'Drag to make this panel wider or narrower (only for you: not shared with the other players)' });
@@ -84,9 +80,9 @@ function dockGrip(root, view) {
     const move = (ev) => {
       dockPref.w = Math.round(Math.min(Math.max(ev.clientX - root.getBoundingClientRect().left, 320), window.innerWidth * 0.85));
       root.style.width = `${dockPref.w}px`;
-      view.debugDock(dockPref.w);
+      view.debugDock(dockPref.w, view.top);
     };
-    const up = () => { g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); prefSet('dock', dockPref.w); };
+    const up = () => { g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); };
     g.addEventListener('pointermove', move);
     g.addEventListener('pointerup', up);
   });
@@ -344,15 +340,6 @@ function copyText(t, b) {
   };
   if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(done, fallback); else fallback();
 }
-function saveText(t, name, mime) {
-  const url = URL.createObjectURL(new Blob([t], { type: mime }));
-  const a = h('a', { href: url, download: name });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 let clipId = 0;
 /** The bowl: wood, water inside up to the water line, and the table top under it. */
 function drawBowl(g, bowl) {
@@ -391,9 +378,8 @@ function shapeStudio(view, api) {
   const st = { sel: null, part: 0, editing: false, draw: null, closeOnFirst: true, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '', tf: { x: 1.5, y: 1.5, lock: true } };
   let manual = {}; //   shapes the user moved on the board: key -> { ox, oy } (only where a shape is drawn, never its data)
   let layout = null; // { cells: { key: { ox, oy, ax, ay } }, rows: [{ y, x0, x1 }], bowlKey }
-  let preview = null;
   let raf = 0;
-  let previewRaf = 0;
+  let listTimer = 0;
 
   const D = () => api.draft();
   const keys = () => Object.keys(D().shapes);
@@ -748,7 +734,7 @@ function shapeStudio(view, api) {
   function edited(live = false) {
     const cur = D().shapes[st.sel];
     if (cur) st.part = Math.max(0, Math.min(st.part, cur.length - 1));
-    api.touch('shapes'); // validates (nothing is sent anywhere) and calls changed() below
+    api.touch('shapes', false, live); // validates (nothing is sent anywhere) and calls changed() below; while dragging that all waits until the mouse is still for a moment
     scheduleDraw();
     if (!live) renderInspector();
     else renderInfo();
@@ -774,7 +760,6 @@ function shapeStudio(view, api) {
     renderList();
     renderInspector();
     scheduleDraw();
-    updatePreview();
   }
   function usage(key) {
     let n = 0;
@@ -931,7 +916,6 @@ function shapeStudio(view, api) {
   const listHead = h('div', { class: 'bb-st-listhead' });
   const inspEl = h('div', { class: 'bb-st-insp' });
   const infoEl = h('div', { class: 'bb-st-info' });
-  const canvas = h('canvas', { class: 'bb-st-canvas' });
 
   function renderList() {
     const d = D();
@@ -951,32 +935,12 @@ function shapeStudio(view, api) {
         btn('Duplicate', () => { let n = `${st.sel}_copy`; for (let i = 2; D().shapes[n]; i++) n = `${st.sel}_copy${i}`; addShape(n, clone(D().shapes[st.sel])); }),
         btn('Delete', () => removeShape(st.sel), 'bb-dbg-danger')) : null,
       st.sel ? h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'export'),
-        btn('Copy', (e) => copyText(shapeSource(st.sel), e.currentTarget), '', 'Copy as a line for the shapes table in definitions.js'),
-        btn('JSON', (e) => copyText(JSON.stringify({ [st.sel]: D().shapes[st.sel] }, null, 1), e.currentTarget), '', 'Copy as JSON (can be imported again below)'),
-        btn('Download', () => saveText(JSON.stringify({ [st.sel]: D().shapes[st.sel] }, null, 1), `${st.sel}.json`, 'application/json'), '', `Download ${st.sel}.json`)) : null,
-      h('div', { class: 'bb-st-row' }, importIn, btn('Import', () => { if (importShape(importIn.value) === undefined && !st.msg) importIn.value = ''; })),
+        btn('Copy', (e) => copyText(shapeSource(st.sel), e.currentTarget), '', 'Copy as a line for the shapes table in _shapes.js')) : null,
       st.msg ? h('div', { class: 'bb-dbg-err' }, st.msg) : null);
   }
 
-  // ── export / import of ONE shape ──
+  // ── export of ONE shape ──
   const shapeSource = (key) => `${/^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key)}: ${S.toSource(D().shapes[key])},\n`;
-  /** Imports {"name": [subshapes]} (what Export JSON writes), or a bare [subshapes] array named by the name field. */
-  function importShape(text) {
-    let v;
-    try { v = JSON.parse(text); } catch (e) { return fail(`Not valid JSON: ${e.message}`); }
-    const entries = Array.isArray(v) ? [[st.newName.trim(), v]] : Object.entries(v ?? {});
-    if (!entries.length || entries.some(([k, d]) => !Array.isArray(d) || !d.length)) return fail('Expected {"name": [subshapes]} or an array of subshapes.');
-    const probs = [];
-    for (const [k, d] of entries) {
-      if (!KEY.test(k)) probs.push(Array.isArray(v) ? 'Type a name for the shape in the name field first.' : `"${k}" is not a valid shape name.`);
-      else if (D().shapes[k]) probs.push(`"${k}" already exists.`);
-      else { try { S.buildShape(d, k); } catch (e) { probs.push(`${k}: ${e.message}`); } }
-    }
-    if (probs.length) return fail(probs.join(' '));
-    for (const [k, d] of entries) addShape(k, d);
-    return undefined;
-  }
-  const importIn = h('textarea', { rows: 3, spellcheck: 'false', class: 'bb-st-pts', placeholder: 'Paste an exported shape (JSON) here' });
 
   const btn = (text, fn, cls = '', title = '') => h('button', { type: 'button', class: `bb-dbg-btn ${cls}`, title, onclick: fn }, text);
 
@@ -1061,28 +1025,6 @@ function shapeStudio(view, api) {
     return undefined;
   }
 
-  // ── 3D preview ──
-  function updatePreview() {
-    if (!st.open || !preview) return;
-    if (previewRaf) return;
-    previewRaf = requestAnimationFrame(() => {
-      previewRaf = 0;
-      if (!preview) return;
-      const d = D();
-      const mats = Object.keys(d.materials).filter((m) => !d.materials[m].static);
-      const items = keys().filter((key) => d.shapes[key].length).map((key, i) => ({
-        def: d.shapes[key],
-        shader: d.materials[st.mat === '(mixed)' ? mats[i % mats.length] : st.mat]?.shader ?? 'wood',
-        selected: key === st.sel,
-      }));
-      try {
-        preview.set({ items, bowl: bowlFull(d, bowlKey()), depth: d.tuning.depth, chamfer: d.tuning.chamfer, merge: d.tuning.mergeParts !== false });
-      } catch (e) {
-        console.error('balance: shape preview failed', e);
-      }
-    });
-  }
-
   // ── the screen ──
   const sel = (options, value, onchange) => {
     const s = h('select', {}, options.map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return h('option', { value: v }, l); }));
@@ -1093,7 +1035,7 @@ function shapeStudio(view, api) {
   const head = h('div', { class: 'bb-st-head' });
   const probEl = h('span', { class: 'bb-st-prob' });
   const renderProb = () => api.showProblems(probEl);
-  const inFile = (key) => Object.hasOwn(view.debugRoomDefs()?.shapes ?? {}, key); // is this shape in shapes.js (as far as the room knows)?
+  const inFile = (key) => Object.hasOwn(view.debugRoomDefs()?.shapes ?? {}, key); // is this shape in _shapes.js (as far as the room knows)?
   function saveShape() {
     const key = st.sel;
     const value = D().shapes[key];
@@ -1103,8 +1045,8 @@ function shapeStudio(view, api) {
     confirmDialog({
       title: add ? 'Add shape' : 'Update shape',
       text: add
-        ? `Are you sure you want to add shape “${key}”? It is written to shapes.js and every room gets it.`
-        : `Are you sure you want to update shape “${key}”? It replaces the shape in shapes.js and every room gets the new version.`,
+        ? `Are you sure you want to add shape “${key}”? It is written to _shapes.js and every room gets it.`
+        : `Are you sure you want to update shape “${key}”? It replaces the shape in _shapes.js and every room gets the new version.`,
       label: add ? 'Add shape' : 'Update shape',
       run: () => api.saveItem({ kind: 'shape', op: add ? 'add' : 'update', key, value: clone(value) }),
       onDone: (r) => { st.msg = ''; st.saved = add ? `Shape “${key}” was added to ${r.file}.` : `Shape “${key}” was updated in ${r.file}.`; renderHead(); },
@@ -1115,7 +1057,7 @@ function shapeStudio(view, api) {
     renderProb();
     put(head,
       h('strong', {}, 'Shape studio'),
-      d.shapes[st.sel] ? btn(inFile(st.sel) ? 'Update shape' : 'Add shape', saveShape, 'bb-dbg-go', inFile(st.sel) ? 'Replace this shape in shapes.js (asks to confirm first)' : 'Add this shape to shapes.js (asks to confirm first)') : null,
+      d.shapes[st.sel] ? btn(inFile(st.sel) ? 'Update shape' : 'Add shape', saveShape, 'bb-dbg-go', inFile(st.sel) ? 'Replace this shape in _shapes.js (asks to confirm first)' : 'Add this shape to _shapes.js (asks to confirm first)') : null,
       st.saved ? h('span', { class: 'bb-st-msg' }, st.saved) : null,
       st.draw ? btn('Done ⏎', finishDraw, 'bb-dbg-go') : btn('+ Polygon', startDraw, 'bb-dbg-go'),
       st.draw ? btn('Cancel', cancelDraw) : null,
@@ -1123,8 +1065,8 @@ function shapeStudio(view, api) {
       h('label', { class: 'bb-st-mini', title: 'On (default): the subshapes are joined in 2D and extruded as one block, without seams. Collision always uses the separate parts. (Same as Settings → mergeParts)' },
         h('input', { type: 'checkbox', checked: d.tuning.mergeParts !== false, onchange: (e) => { d.tuning.mergeParts = e.target.checked; api.touch('tuning'); } }), 'merge parts'),
       h('label', { class: 'bb-st-mini' }, 'snap', sel(SNAPS, String(st.snap), (v) => { st.snap = parseFloat(v); })),
-      h('label', { class: 'bb-st-mini' }, 'preview material', sel(['(mixed)', ...Object.keys(d.materials)], st.mat, (v) => { st.mat = v; renderList(); scheduleDraw(); updatePreview(); })),
-      h('label', { class: 'bb-st-mini' }, 'bowl', sel(Object.keys(d.bowls), bowlKey(), (v) => { st.bowl = v; layout = null; scheduleDraw(); updatePreview(); })),
+      h('label', { class: 'bb-st-mini' }, 'material', sel(['(mixed)', ...Object.keys(d.materials)], st.mat, (v) => { st.mat = v; renderList(); scheduleDraw() })),
+      h('label', { class: 'bb-st-mini' }, 'bowl', sel(Object.keys(d.bowls), bowlKey(), (v) => { st.bowl = v; layout = null; scheduleDraw() })),
       btn('Tidy', () => { manual = {}; layout = null; relayout(); board.fit(layout.bounds); scheduleDraw(); }),
       btn('Fit all', () => { board.fit(layout.bounds); scheduleDraw(); }),
       btn('Zoom to shape', () => focus()),
@@ -1135,7 +1077,6 @@ function shapeStudio(view, api) {
   }
 
   const right = h('div', { class: 'bb-st-right' },
-    h('div', { class: 'bb-st-3d' }, canvas, h('span', { class: 'bb-st-3dhint' }, 'In the game · drag = turn · wheel = zoom · double-click = reset')),
     infoEl, inspEl);
   const root = h('div', { class: 'bb-st bb-st-full' },
     head,
@@ -1153,7 +1094,6 @@ function shapeStudio(view, api) {
     renderList();
     renderInspector();
     scheduleDraw();
-    updatePreview();
   }
 
   return {
@@ -1163,7 +1103,6 @@ function shapeStudio(view, api) {
       root.classList.add('bb-show');
       layout = null;
       st.sel = D().shapes[st.sel] ? st.sel : keys()[0];
-      if (!preview) preview = view.debugPreview(canvas);
       renderAll();
       requestAnimationFrame(() => { relayout(); board.fit(layout.bounds); scheduleDraw(); });
     },
@@ -1171,20 +1110,23 @@ function shapeStudio(view, api) {
       cancelDraw();
       st.open = false;
       root.classList.remove('bb-show');
-      preview?.dispose();
-      preview = null;
     },
     /** The draft changed (by this studio, another tab of the menu, or another player). */
-    changed(kind) {
+    changed(kind, live = false) {
       if (!st.open) return;
+      if (live && kind === 'shapes') { // dragging a corner: only the board follows the mouse; the list of thumbnails is rebuilt when the mouse is still
+        scheduleDraw();
+        clearTimeout(listTimer);
+        listTimer = setTimeout(() => { listTimer = 0; if (st.open) { renderProb(); renderList(); } }, 200);
+        return;
+      }
       renderProb();
       if (kind === 'shapes' || kind === 'materials' || kind === 'bowls' || kind === 'tuning' || kind === 'all') {
         if (kind === 'all') layout = null;
         if (!layout) relayout();
         renderList();
         scheduleDraw();
-        updatePreview();
-      }
+          }
     },
     refresh() {
       layout = null;
@@ -1235,10 +1177,9 @@ function levelStudio(view, api) {
   }
   // A DEBOUNCE: while a block is being dragged the blueprint (cheap, 2D) follows the mouse, but the 3D game is only rebuilt once the mouse has been still for
   // SYNC_QUIET ms (and when the button is released). Restarting the level rebuilds every block mesh, which is far too heavy to do while moving.
-  // Timings: run  localStorage.bbPerf = 1  in the console and reload to see how long each step takes.
+  // Timings: run  window.bbPerf = true  in the console to see how long each step takes (nothing is stored).
   const SYNC_QUIET = 180;
-  const perf = (() => { try { return !!localStorage.getItem('bbPerf'); } catch { return false; } })();
-  const timed = (name, fn) => { if (!perf) return fn(); const t = performance.now(); const r = fn(); console.debug(`[bbPerf] ${name}: ${(performance.now() - t).toFixed(1)} ms`); return r; };
+    const timed = (name, fn) => { if (!window.bbPerf) return fn(); const t = performance.now(); const r = fn(); console.debug(`[bbPerf] ${name}: ${(performance.now() - t).toFixed(1)} ms`); return r; };
   function scheduleApply() {
     clearTimeout(applyTimer);
     applyTimer = setTimeout(() => { applyTimer = 0; applyNow(); }, SYNC_QUIET);
@@ -1431,15 +1372,15 @@ function levelStudio(view, api) {
   }
 
   // ── panel ──
-  const head = h('div', { class: 'bb-st-head' });
+  const head = h('div', { class: 'bb-st-head bb-st-topbar' });
   const bar = h('div', { class: 'bb-st-bar' });
   const palette = h('div', { class: 'bb-st-palette' });
   const body = h('div', { class: 'bb-st-body' });
 
   const probEl = h('span', { class: 'bb-st-prob' });
-  // Which levels of the draft are in levels.js already? A level object that was in the file keeps its place in it (by object, so reordering, renaming or deleting other
+  // Which levels of the draft are in _levels.js already? A level object that was in the file keeps its place in it (by object, so reordering, renaming or deleting other
   // levels does not confuse it); a level made here (New, Copy) is new until it has been added. First match is by name, when the studio opens or the draft is replaced.
-  const origin = new WeakMap(); // draft level -> index in levels.js
+  const origin = new WeakMap(); // draft level -> index in _levels.js
   const fileLevels = () => view.debugRoomDefs()?.levels ?? [];
   function syncOrigins() {
     const file = fileLevels();
@@ -1463,8 +1404,8 @@ function levelStudio(view, api) {
     confirmDialog({
       title: add ? 'Add level' : 'Update level',
       text: add
-        ? `Are you sure you want to add level “${lv.name}” to world “${worldName(lv)}”? It is written to levels.js and every room gets it.`
-        : `Are you sure you want to update level “${lv.name}” in world “${worldName(lv)}”? It replaces the level in levels.js and every room gets the new version.`,
+        ? `Are you sure you want to add level “${lv.name}” to world “${worldName(lv)}”? It is written to _levels.js and every room gets it.`
+        : `Are you sure you want to update level “${lv.name}” in world “${worldName(lv)}”? It replaces the level in _levels.js and every room gets the new version.`,
       label: add ? 'Add level' : 'Update level',
       run: () => api.saveItem({ kind: 'level', op: add ? 'add' : 'update', index: at, was, value }),
       onDone: (r) => {
@@ -1481,16 +1422,15 @@ function levelStudio(view, api) {
     syncOrigins();
     put(head,
       h('strong', {}, 'Level studio'),
-      sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; fitSoon(); applyNow(); renderAll(); }, 'bb-dbg-grow'),
+      sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; fitSoon(); applyNow(); renderAll(); }, 'bb-st-lvsel'),
       btn('New', newLevel), btn('Copy', copyLevel),
       btn('▶ Playtest', () => api.playtest(st.lvl), 'bb-dbg-go'),
-      btn(origin.get(L()) === undefined ? 'Add level' : 'Update level', saveLevel, 'bb-dbg-go', origin.get(L()) === undefined ? 'Add this level to levels.js (asks to confirm first)' : 'Replace this level in levels.js (asks to confirm first)'),
-      btn('Export ⧉', (e) => copyText(`${S.toSource(d.levels[st.lvl])},\n`, e.currentTarget), '', 'Copy this level as a source entry for the levels list in definitions.js'),
-      btn('Export ⤓', () => saveText(JSON.stringify(d.levels[st.lvl], null, 1), `level-${st.lvl + 1}.json`, 'application/json'), '', 'Download this level as JSON'),
+      btn(origin.get(L()) === undefined ? 'Add level' : 'Update level', saveLevel, 'bb-dbg-go', origin.get(L()) === undefined ? 'Add this level to _levels.js (asks to confirm first)' : 'Replace this level in _levels.js (asks to confirm first)'),
+      btn('Export ⧉', (e) => copyText(`${S.toSource(d.levels[st.lvl])},\n`, e.currentTarget), '', 'Copy this level as a source entry for the levels list in _definitions.js'),
       btn(st.armDelete ? 'Really?' : 'Delete', deleteLevel, 'bb-dbg-danger'),
       probEl,
       btn('Shapes', () => api.open('shapes')),
-      btn('✕', () => api.close()));
+      h('button', { type: 'button', class: 'bb-dbg-btn bb-st-x', title: 'Close the studio', onclick: () => api.close() }, '✕'));
   }
 
   function renderBar() {
@@ -1686,12 +1626,16 @@ function levelStudio(view, api) {
     e.preventDefault();
     gripY.setPointerCapture(e.pointerId);
     const move = (ev) => { dockPref.bp = Math.round(Math.min(Math.max(ev.clientY - bpEl.getBoundingClientRect().top, 120), window.innerHeight - 230)); bpEl.style.height = `${dockPref.bp}px`; };
-    const up = () => { gripY.removeEventListener('pointermove', move); gripY.removeEventListener('pointerup', up); prefSet('bp', dockPref.bp); requestAnimationFrame(() => { if (L()) board.fit(bounds()); scheduleDraw(); }); };
+    const up = () => { gripY.removeEventListener('pointermove', move); gripY.removeEventListener('pointerup', up); requestAnimationFrame(() => { if (L()) board.fit(bounds()); scheduleDraw(); }); };
     gripY.addEventListener('pointermove', move);
     gripY.addEventListener('pointerup', up);
   });
-  const root = h('div', { class: 'bb-st bb-st-dock' }, head, bar, bpEl, gripY, palette, body);
-  dockGrip(root, view);
+  // two bars: the studio bar (head) runs across the whole window at the top, the panel with the blueprint sits at the left under it and the game fills the rest
+  const dockPanel = h('div', { class: 'bb-st-dock bb-st-dockin' }, bar, bpEl, gripY, palette, body);
+  const root = h('div', { class: 'bb-st bb-st-level' }, head, dockPanel);
+  dockGrip(dockPanel, view);
+  const fitTop = () => { if (st.open) view.debugDock(dockPref.w, head.offsetHeight); }; // (the bar wraps onto more lines in a narrow window)
+  new ResizeObserver(fitTop).observe(head);
   window.addEventListener('keydown', onKey);
 
   let askedAt = 0;
@@ -1739,8 +1683,8 @@ function levelStudio(view, api) {
       st.sel = -1;
       st.msg = '';
       root.classList.add('bb-show');
-      root.style.width = `${dockPref.w}px`;
-      view.debugDock(dockPref.w);
+      dockPanel.style.width = `${dockPref.w}px`;
+      view.debugDock(dockPref.w, head.offsetHeight);
       view.onSnap = onSnap;
       st.rules = false;
       st.ph = 1;
@@ -1755,7 +1699,7 @@ function levelStudio(view, api) {
       clearTimeout(applyTimer);
       if (live) { view.debugSend({ cancel: true }); live = null; }
       root.classList.remove('bb-show');
-      view.debugDock(0);
+      view.debugDock(0, 0);
       view.onSnap = null;
       lab({ on: false });
       lab({ reload: true }); // an ordinary level again (in the local game)
@@ -2243,8 +2187,8 @@ export function createStudio(view, api) {
       root.classList.remove('bb-st-on');
     },
     /** The draft changed: `kind` is the table ('levels', 'shapes' ...) or 'all' (replaced wholesale). */
-    changed(kind) {
-      if (current) pane(current).changed(kind);
+    changed(kind, live = false) {
+      if (current) pane(current).changed(kind, live);
     },
     refresh() {
       if (current) pane(current).refresh();

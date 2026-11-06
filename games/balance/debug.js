@@ -8,29 +8,28 @@
 //   Bowls        the bowl maker (flat bottom, corner radius, squareness, shader, water, optional model)
 //   Models       the .obj models: file, shader per part
 //   Backgrounds  ground, mist and the placed models
-//   Export       download definitions.js, copy single tables, import JSON
+//   Export       download _definitions.js, copy single tables, import JSON
 //
 // Two bigger tools open from the header (they live in studio.js):
 //   Shape studio  every shape side by side at one scale next to the bowl, corner editing, and a 3D preview as it looks in the game
 //   Level studio  a blueprint of the level next to the running game, with a live test lab (spawn / grab blocks, freeze gravity, capture)
 //
 // How edits travel: you change a DRAFT copy of the definitions. NOTHING in this menu is synchronised with anybody: the draft, the studios,
-// their size, the notices all stay in your browser (the draft is backed up in localStorage, so a reload does not lose it: "Discard saved
-// edits" on the Export tab clears it). Somebody else's applied changes never touch your draft ("Reload from game" takes the game's version).
+// their size, the notices all stay in this page and NOTHING is kept in localStorage: reload the page and the draft is gone (use the Export
+// tab to download your work, or the Add / Update buttons of the studios to put a level or shape in its file). Somebody else's applied changes never touch your draft ("Reload from game" takes the game's version).
 //
 // To SEE and TEST the draft there is the LOCAL GAME: a private copy of the game (the server's own physics, sim.js) that runs in this page.
 // The header checkbox "Local game" shows it instead of the room's game; the level and background studios switch it on while they are open;
 // "Play this level" plays in it. The room's game goes on without you, and nothing you do in the local game leaves this page.
 //
 // NOTHING in this menu is shared: the draft never goes to the server or to other players. Only the gameplay itself is synchronised.
-// To keep your work, use the Export tab (download definitions.js and levels.js) and put the files in the game's folder.
+// To keep your work, use the Export tab (download _definitions.js and _levels.js) and put the files in the game's folder.
 // Changes that touch the physics (shapes, bowls, materials, tuning, levels) take effect when the level restarts (or switch on "auto-restart").
 
 import * as S from './shared.js';
 import { createStudio } from './studio.js';
 import { clone, h, NS, svg } from './ui.js';
 
-const STORE = 'balance.debug.defs';
 const BLUR_OPTIONS = [['none', 'sharp (none)'], ['light', 'light blur'], ['heavy', 'heavy blur']];
 const PHYSICS = new Set(['tuning', 'materials', 'shapes', 'bowls', 'levels', 'worlds']);
 
@@ -60,7 +59,7 @@ export function createDebugMenu(view) {
   let draft = S.cloneDefinitions();
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
-    needsRestart: false, dirty: false, problems: [], restored: false, pending: null, viewProblems: [],
+    needsRestart: false, dirty: false, problems: [], viewProblems: [],
     fxShadows: true, fxReflection: true, fxBlur: true, fxRefraction: true,
     local: false, localError: '', localBeforeStudio: false, // the local game: is it what the view shows, why it could not start, was it on before a studio opened
   };
@@ -89,18 +88,17 @@ export function createDebugMenu(view) {
   function touch(kind, quiet = false, live = false) {
     if (PHYSICS.has(kind)) state.needsRestart = true;
     state.dirty = true;
-    if (live) { // dragging: validating the whole draft, saving the backup and redrawing the status wait until the mouse is still for a moment
+    if (live) { // dragging: validating the whole draft and redrawing the status wait until the mouse is still for a moment
       clearTimeout(liveTimer);
-      liveTimer = setTimeout(() => { liveTimer = 0; validate(); scheduleBackup(); renderStatus(); }, 150);
+      liveTimer = setTimeout(() => { liveTimer = 0; validate(); renderStatus(); }, 150);
     } else {
       validate();
-      scheduleBackup();
       renderStatus();
     }
     if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
     if (live) localKinds.add(kind); // (the studio gives it to the local game itself, once the drag pauses: see syncNow)
     else if (!quiet) touchLocal(kind);
-    studio.changed(kind); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
+    studio.changed(kind, live); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
   }
 
   // ── the local game ──
@@ -162,26 +160,11 @@ export function createDebugMenu(view) {
     view.debugSandboxOff();
   }
 
-  /** Local backup of the draft (so a reload does not lose it). Nothing leaves the browser. */
-  let backupTimer = 0;
-  function backup() {
-    clearTimeout(backupTimer);
-    backupTimer = 0;
-    try {
-      if (!state.pending) { // (while an old backup waits for your decision it is not overwritten)
-        localStorage.setItem(STORE, JSON.stringify(draft));
-        state.restored = true;
-      }
-    } catch { /* private mode */ }
-  }
-  const scheduleBackup = () => { clearTimeout(backupTimer); backupTimer = setTimeout(backup, 500); };
-
   /** Replace the draft by what the game of this room is running now. Only YOU start this (button, or when you join a room that has changes): nothing here follows other players. */
   function reloadFromGame() {
     draft = clone(view.debugRoomDefs()); // (not the definitions in this page: while the local game is on, those are the local game's)
     state.dirty = false;
     validate();
-    backup();
     touchLocal('all');
     render();
     studio.refresh();
@@ -824,18 +807,18 @@ export function createDebugMenu(view) {
     });
     out.push(
       state.problems.length ? err('The definitions have problems (see the red box). They are exported anyway.') : null,
-      section('Whole file', note('Replace games/balance/definitions.js with this. (Comments in the file are not kept.)'),
-        h('div', { class: 'bb-dbg-row' }, save('Download definitions.js', 'definitions.js', () => S.serializeDefinitions(draft)), copy('Copy', () => S.serializeDefinitions(draft)))),
-      section('Levels file', note('The levels are a file of their own: games/balance/levels.js. Replace it with this download (the server never writes it for you).'),
-        h('div', { class: 'bb-dbg-row' }, save('Download levels.js', 'levels.js', () => S.serializeLevels(draft.levels)), copy('Copy', () => S.serializeLevels(draft.levels)))),
-      section('One table at a time', note('Paste into definitions.js over the same `export const ...`.'),
+      section('Whole file', note('Replace games/balance/_definitions.js with this. (Comments in the file are not kept.)'),
+        h('div', { class: 'bb-dbg-row' }, save('Download _definitions.js', '_definitions.js', () => S.serializeDefinitions(draft)), copy('Copy', () => S.serializeDefinitions(draft)))),
+      section('Levels file', note('The levels are a file of their own: games/balance/_levels.js. Replace it with this download (the server never writes it for you).'),
+        h('div', { class: 'bb-dbg-row' }, save('Download _levels.js', '_levels.js', () => S.serializeLevels(draft.levels)), copy('Copy', () => S.serializeLevels(draft.levels)))),
+      section('One table at a time', note('Paste into _definitions.js over the same `export const ...`.'),
         ...S.DEFINITION_TABLES.map((t) => h('div', { class: 'bb-dbg-row' }, h('span', { class: 'bb-dbg-grow' }, t),
           copy('Copy', () => S.serializeTable(t, draft[t])), save('Download', `${t}.js`, () => S.serializeTable(t, draft[t]))))),
     );
     const ta = h('textarea', { rows: 6, spellcheck: 'false', placeholder: 'Paste JSON here: a whole set of definitions, or only some tables (e.g. {"levels": [...]})' });
     const msg = h('div', {});
     out.push(
-      section('JSON', h('div', { class: 'bb-dbg-row' }, copy('Copy all as JSON', () => JSON.stringify(draft, null, 1)), save('Download JSON', 'definitions.json', () => JSON.stringify(draft, null, 1), 'application/json')),
+      section('JSON', h('div', { class: 'bb-dbg-row' }, copy('Copy all as JSON', () => JSON.stringify(draft, null, 1)), save('Download JSON', '_definitions.json', () => JSON.stringify(draft, null, 1), 'application/json')),
         ta, btn('Import (replaces the tables it contains)', () => {
           try {
             const next = { ...clone(draft), ...JSON.parse(ta.value) };
@@ -849,11 +832,6 @@ export function createDebugMenu(view) {
             msg.replaceChildren(err(`Not valid JSON: ${e.message}`));
           }
         }), msg),
-      section('Saved edits', note(state.restored ? 'Your edits are kept in this browser as a backup. After a reload the menu offers to restore them; the game itself always starts from definitions.js.' : 'Nothing saved yet.'),
-        btn('Discard saved edits and reload', () => {
-          try { localStorage.removeItem(STORE); } catch { /* ignore */ }
-          window.location.reload();
-        }, 'bb-dbg-danger')),
     );
     return out;
   }
@@ -909,9 +887,9 @@ export function createDebugMenu(view) {
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
     btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
-    btn('Clear saved data', () => {
-      if (!window.confirm('Clear everything this game keeps in this browser (your saved debug edits and which levels you completed) and reload?')) return;
-      try { localStorage.removeItem(STORE); localStorage.removeItem('balance.done'); } catch { /* ignore */ }
+    btn('Reset completed levels', () => {
+      if (!window.confirm('Forget which levels you have completed (kept in this browser) and reload?')) return;
+      try { localStorage.removeItem('balance.done'); } catch { /* ignore */ }
       window.location.reload();
     }, 'bb-dbg-danger'),
     btn('Restart', () => { syncLocalNow(true); view.ctx.sendInput({ restart: true }); }),
@@ -920,7 +898,7 @@ export function createDebugMenu(view) {
   const panel = h('div', { class: 'bb-dbg-panel' }, header, statusEl, tabsEl, bodyEl);
   const toggle = h('button', { type: 'button', class: 'bb-dbg-toggle', title: 'Debug menu ( ` )', onclick: () => setOpen(!state.open) }, '🛠 Debug');
   // the studios (studio.js): a shape editor and a level editor with a live test lab. They edit the same draft as the tabs.
-  // ── saving ONE level / shape to its file (levels.js / shapes.js): the only thing in this menu that reaches the server, and only when a studio asks for it after a confirmation ──
+  // ── saving ONE level / shape to its file (_levels.js / _shapes.js): the only thing in this menu that reaches the server, and only when a studio asks for it after a confirmation ──
   // The platform drops inbound messages over 4096 characters, so the request travels as small pieces of JSON text that the server glues together again.
   const waiting = new Map(); // request id -> resolve
   view.onSaved = (sv) => {
@@ -1010,23 +988,6 @@ export function createDebugMenu(view) {
 
   function renderStatus() {
     const kids = [];
-    if (state.pending) {
-      kids.push(h('div', { class: 'bb-dbg-warn' }, 'Edits from an earlier visit are saved in this browser. They are not used unless you restore them (new edits are not saved until you choose). ',
-        btn('Restore them', () => {
-          draft = state.pending;
-          state.pending = null;
-          draft.worlds ??= S.cloneDefinitions().worlds;
-          PHYSICS.forEach((k) => touch(k));
-          touch('backgrounds');
-          render();
-          studio.refresh();
-        }),
-        btn('Discard', () => {
-          try { localStorage.removeItem(STORE); } catch { /* ignore */ }
-          state.pending = null;
-          renderStatus();
-        }, 'bb-dbg-danger')));
-    }
     if (state.localError) kids.push(h('div', { class: 'bb-dbg-err' }, state.localError));
     for (const m of state.viewProblems) kids.push(h('div', { class: 'bb-dbg-err' }, m));
     if (state.problems.length) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, `${state.problems.length} problem${state.problems.length > 1 ? 's' : ''}, the local game keeps the last good version until fixed:`), '\n', state.problems.slice(0, 6).join('\n')));
@@ -1068,13 +1029,11 @@ export function createDebugMenu(view) {
     renderStatus();
   };
 
-  // Edits from a previous visit are only a BACKUP: the game starts from definitions.js (and what the server has), so a new file is never
-  // silently overridden by old saved edits. If the backup differs from what is running now, the menu offers to restore or discard it.
+  // Older versions kept a backup of the draft and the panel sizes in this browser: remove what they left behind.
   try {
-    const saved = JSON.parse(localStorage.getItem(STORE) ?? 'null');
-    const plain = saved && saved.draft ? saved.draft : saved; // (an older version wrapped it)
-    if (plain && typeof plain === 'object' && JSON.stringify(plain) !== JSON.stringify(draft)) state.pending = plain;
-  } catch { /* a broken save is ignored */ }
+    localStorage.removeItem('balance.debug.defs');
+    for (const k of ['dock', 'bp']) localStorage.removeItem(`balance.studio.${k}`);
+  } catch { /* private mode */ }
   view.onProblem = (msg) => {
     if (!state.viewProblems.includes(msg)) state.viewProblems.push(msg);
     renderStatus();
@@ -1093,7 +1052,6 @@ export function createDebugMenu(view) {
       studio.dispose();
       modelPrev?.dispose();
       clearTimeout(localTimer);
-      clearTimeout(backupTimer);
       view.onRun = null;
       view.onSandbox = null;
       view.onProblem = null;

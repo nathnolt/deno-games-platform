@@ -10,7 +10,7 @@
 //   levels        what to build, with which blocks, in which bowl and in front of which background
 //
 // With `DEBUG = true` in shared.js the in-game debug menu edits all of this live and exports a new copy of this file
-// (Export tab: "Download definitions.js"). You can also edit this file by hand.
+// (Export tab: "Download _definitions.js"). You can also edit this file by hand.
 
 // ── Tuning ───────────────────────────────────────────────────────────────────────────────────────────────────
 // Server (physics): gravity, waterDensity, countdown, follow. These apply when a level (re)starts.
@@ -66,8 +66,8 @@ export const materials = {
 };
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
-// The shapes live in their own file: ./shapes.js (the shape studio rewrites it when you press "Add shape" / "Update shape").
-export { shapes } from './shapes.js';
+// The shapes live in their own file: ./_shapes.js (the shape studio rewrites it when you press "Add shape" / "Update shape").
+export { shapes } from './_shapes.js';
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────
 // The bowl is a bowl of revolution: a flat bottom, rounded corners and straight walls. The physics sees the slice through the middle
@@ -222,5 +222,5 @@ export const worlds = {
 };
 
 // ── Levels ───────────────────────────────────────────────────────────────────────────────────────────────────
-// The levels live in their own file: ./levels.js (the level studio rewrites it when you press "Add level" / "Update level").
-export { levels } from './levels.js';
+// The levels live in their own file: ./_levels.js (the level studio rewrites it when you press "Add level" / "Update level").
+export { levels } from './_levels.js';

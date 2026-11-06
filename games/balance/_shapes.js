@@ -1,8 +1,8 @@
-// Runs on BOTH server and browser. Pure data: the SHAPES of Balance. definitions.js re-exports them, so nothing else changes.
+// Runs on BOTH server and browser. Pure data: the SHAPES of Balance. _definitions.js re-exports them, so nothing else changes.
 //
 // With `DEBUG = true` the shape studio edits this file for you, but only when you press "Add shape" or "Update shape" and confirm it:
 // the game server then rewrites THIS file (comments are not kept) and every room gets the change. That needs write permission:
-//   deno.json:  --allow-write=games/balance/levels.js,games/balance/shapes.js     (on the "start" and "dev" tasks)
+//   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js     (on the "start" and "dev" tasks)
 //
 // A shape is a list of parts. Part types:
 //   { type: 'poly',   points: 'x,y x,y x,y ...' }   a CONVEX polygon (build concave shapes from several parts, like plus1)
