@@ -16,7 +16,7 @@
 //
 // All of them edit the same DRAFT as the rest of the debug menu (see debug.js), and NOTHING here is shared with the room. The level and
 // background studios show and test the draft in the LOCAL GAME: a private copy of the game that runs in this page (client.js, sim.js), so
-// nobody else is restarted and nothing goes over the network while you edit. Only "Apply to game" in the debug menu sends the draft to the room.
+// nobody else is restarted and nothing goes over the network while you edit. The draft is never sent to the room.
 
 import * as S from './shared.js';
 import { clone, h, svg } from './ui.js';
@@ -699,7 +699,7 @@ function shapeStudio(view, api) {
   function edited(live = false) {
     const cur = D().shapes[st.sel];
     if (cur) st.part = Math.max(0, Math.min(st.part, cur.length - 1));
-    api.touch('shapes'); // validates (nothing is sent: see "Apply to game") and calls changed() below
+    api.touch('shapes'); // validates (nothing is sent anywhere) and calls changed() below
     scheduleDraw();
     if (!live) renderInspector();
     else renderInfo();

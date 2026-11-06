@@ -9,7 +9,7 @@
 // The gameplay is 2D (x, y); the 3D look is purely client-side.
 import {
   applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, groundYOf, inDrop, levels, LOSE,
-  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, PHASE, PREVIEW_COUNT, serializeLevels, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
+  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, PHASE, PREVIEW_COUNT, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 let planck = null;
@@ -22,8 +22,8 @@ export function usePlanck(module) {
 
 // ── Rooms have their own definitions ──
 // shared.js keeps ONE live set of definitions (tuning, shapes, levels ...) per process, and every room of this server is a BalanceGame in the same
-// process. A room that has never changed anything shares BASE (the files as they were when the server started). The debug menu's "Apply to game"
-// gives that room a set of its own; before a room does anything (input, tick, snapshot) its set is made the live one, so rooms never see each other's edits.
+// process. A room that has never changed anything shares BASE (the files as they were when the server started). The debug menu cannot change a room's set any more (its edits only reach the
+// private local game in the browser, through loadDefinitions). Before a room does anything (input, tick, snapshot) its set is made the live one, so rooms never see each other's edits.
 const BASE = cloneDefinitions();
 let active = BASE; // whose definitions are live right now
 function activate(defs) {
@@ -110,12 +110,7 @@ export class BalanceGame {
     this.acc = 0;
     this.startedAt = -Infinity;
     this.defsRev = 0; //          debug: bumps every time somebody changes the definitions
-    this.defsFrom = null; //      debug: who made the last change
-    this.defsError = ''; //       debug: why the last change was refused ('' = it was not)
     this.defsBurst = 0; //        debug: > 0 while the definitions are attached to the snapshots
-    this.levelsText = DEBUG ? serializeLevels(levels) : ''; // debug: the levels as last written to levels.js (compared as data, so an unchanged level list never rewrites the file)
-    this.levelsSaveError = ''; // debug: why levels.js could not be written ('' = fine)
-    this.levelsSaves = 0; //      debug: how many times levels.js was written
     this.lab = { on: false, paused: false, rules: false }; // debug: the level lab (no winning / losing, spawn blocks, freeze gravity), see #labInput
     this.rowSize = 0; //           how many places the row on the table has (blocks that wait + outlines of the next ones): fixed for a level, so nothing shifts
     this.floor = null; //          the level lab's invisible floor (the table top), see #labFloor
@@ -190,7 +185,7 @@ export class BalanceGame {
       total: this.total,
       why: this.why,
       still: round2(clamp(this.settle / (tuning.countdown ?? 3), 0, 1)), // progress of the countdown after the last block (0 = not running)
-      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, dfrom: this.defsFrom, derr: this.defsError, lsave: this.levelsSaveError, lsaves: this.levelsSaves, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
+      ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
   }
 
@@ -259,71 +254,9 @@ export class BalanceGame {
     if (this.levelIdx >= levels.length) this.#toMenu();
   }
 
-  /** Debug menu: somebody sends new definitions (levels, shapes, bowls ...) or asks for the current ones. */
+  /** Debug menu: a player that just came in asks for the room's definitions. Nobody can change them from the menu: edits only ever reach the private local game. */
   #debugInput(id, d) {
-    if (d.defsRequest) {
-      this.defsBurst = DEFS_BURST;
-      return;
-    }
-    // definitions arrive as numbered pieces of JSON text (the platform limits one message to 4096 characters)
-    const c = d.debugChunk;
-    if (!c || !Number.isInteger(c.i) || !Number.isInteger(c.n) || c.n < 1 || c.n > 40 || c.i < 0 || c.i >= c.n || typeof c.s !== 'string' || c.s.length > 3000) return;
-    this.defsParts ??= new Map();
-    let asm = this.defsParts.get(id);
-    if (!asm || asm.id !== c.id || asm.n !== c.n) this.defsParts.set(id, (asm = { id: c.id, n: c.n, parts: new Array(c.n), got: 0 }));
-    if (asm.parts[c.i] === undefined) asm.got++;
-    asm.parts[c.i] = c.s;
-    if (asm.got < asm.n) return;
-    this.defsParts.delete(id);
-    let defs;
-    try { defs = JSON.parse(asm.parts.join('')); } catch { this.defsError = 'the definitions arrived damaged (not valid JSON)'; return; }
-    if (!defs || typeof defs !== 'object') return;
-    const problems = validateDefinitions(defs); // shader names are a client matter: not checked here
-    if (problems.length) {
-      console.warn('balance: refused new definitions:', problems.slice(0, 5));
-      this.defsError = problems.slice(0, 3).join('; ');
-      return;
-    }
-    this.defsError = '';
-    const keys = () => `${SHAPE_KEYS.join()}|${MATERIAL_KEYS.join()}`;
-    const before = keys();
-    applyDefinitions(defs);
-    this.defs = cloneDefinitions(); // from now on this room has definitions of its own (the other rooms keep theirs)
-    applyDefinitions(this.defs, this.defs);
-    active = this.defs;
-    this.defsCache = null;
-    this.defsRev++;
-    this.defsFrom = id;
-    this.defsBurst = DEFS_BURST;
-    if (this.world) this.world.setGravity(new Vec2(0, -GRAVITY));
-    this.#saveLevels(); // the levels are a file of their own (levels.js): a new or changed level is written to it
-    // blocks are sent as indexes into the shape / material lists, and a level may have been deleted: start over when that changed
-    if (this.levelIdx >= levels.length) this.#toMenu();
-    else if (this.levelIdx >= 0 && keys() !== before) this.#startLevel(this.levelIdx);
-  }
-
-  /** Debug: write the levels to levels.js (only when they changed). Needs `--allow-write=games/balance/levels.js` in deno.json; without it the error is shown in the debug menu. */
-  #saveLevels() { // (waits for a quiet second: a blueprint drag changes the levels many times a second)
-    clearTimeout(this.levelsTimer);
-    this.levelsTimer = setTimeout(() => this.#writeLevels(), 1000);
-  }
-
-  async #writeLevels() {
-    if (typeof Deno === 'undefined' || typeof Deno.writeTextFile !== 'function') return;
-    const text = serializeLevels(this.defs.levels); // (this room's levels: the timer may fire while another room's definitions are live)
-    if (text === this.levelsText) return;
-    try {
-      await Deno.writeTextFile(new URL('./levels.js', import.meta.url), text);
-      this.levelsText = text;
-      this.levelsSaveError = '';
-      this.levelsSaves++;
-    } catch (e) {
-      const denied = /permission|capable|--allow-write|requires write/i.test(`${e?.name} ${e?.message}`);
-      this.levelsSaveError = denied
-        ? 'levels.js could not be written: Deno has no write permission. Add --allow-write=games/balance/levels.js to the "start" (and "dev") task in deno.json, then restart the server.'
-        : `levels.js could not be written: ${e?.message ?? e}`;
-      console.warn(`balance: ${this.levelsSaveError}`);
-    }
+    if (d.defsRequest) this.defsBurst = DEFS_BURST;
   }
 
   /**

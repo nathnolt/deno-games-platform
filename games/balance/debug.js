@@ -22,8 +22,8 @@
 // The header checkbox "Local game" shows it instead of the room's game; the level and background studios switch it on while they are open;
 // "Play this level" plays in it. The room's game goes on without you, and nothing you do in the local game leaves this page.
 //
-// The one thing that reaches the room is the button "Apply to game" (header): it sends the draft to the server, which applies it for the
-// whole room (that is gameplay, so everybody in the room plays it; other rooms never see it) and rewrites levels.js. Nothing else sends it.
+// NOTHING in this menu is shared: the draft never goes to the server or to other players. Only the gameplay itself is synchronised.
+// To keep your work, use the Export tab (download definitions.js and levels.js) and put the files in the game's folder.
 // Changes that touch the physics (shapes, bowls, materials, tuning, levels) take effect when the level restarts (or switch on "auto-restart").
 
 import * as S from './shared.js';
@@ -60,7 +60,7 @@ export function createDebugMenu(view) {
   let draft = S.cloneDefinitions();
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
-    needsRestart: false, dirty: false, problems: [], restored: false, pending: null, viewProblems: [], serverError: '', sentAt: 0, lastSend: 0, sentRev: 0,
+    needsRestart: false, dirty: false, problems: [], restored: false, pending: null, viewProblems: [],
     fxShadows: true, fxReflection: true, fxBlur: true, fxRefraction: true,
     local: false, localError: '', localBeforeStudio: false, // the local game: is it what the view shows, why it could not start, was it on before a studio opened
   };
@@ -83,7 +83,7 @@ export function createDebugMenu(view) {
   /**
    * Something in the draft changed. `kind` is the table. The local game (when it is on) follows after a moment; `quiet` = the view already
    * shows this change by itself (dragging a background model), so the local game is not rebuilt for it.
-   * Nothing here ever reaches the room: that is the "Apply to game" button.
+   * Nothing here ever reaches the room.
    */
   let liveTimer = 0;
   function touch(kind, quiet = false, live = false) {
@@ -162,29 +162,6 @@ export function createDebugMenu(view) {
     view.debugSandboxOff();
   }
 
-  // The platform drops inbound messages over 4096 characters and the full definitions are far bigger, so they travel as
-  // small pieces of JSON text (1500 characters stays under the limit even when quotes get escaped) that the server glues back together.
-  let sendId = 0;
-  function sendDefs(defs) {
-    const text = JSON.stringify(defs);
-    const id = ++sendId;
-    const n = Math.ceil(text.length / 1500);
-    for (let i = 0; i < n; i++) view.roomCtx.sendInput({ debugChunk: { id, i, n, s: text.slice(i * 1500, (i + 1) * 1500) } }); // (the ROOM's ctx: the only place the debug menu ever sends anything to)
-  }
-
-  /** "Apply to game": send the draft to the room's server (the one thing in this menu that is shared). */
-  function send() {
-    if (!validate()) return;
-    sendDefs(draft);
-    state.dirty = false;
-    state.sentAt = performance.now();
-    state.lastSend = state.sentAt;
-    state.sentRev = view.defsRev;
-    backup();
-    if (state.autoRestart && !studio.current && state.needsRestart && view.roomSnap && view.roomSnap.ph !== S.PHASE.MENU) view.roomCtx.sendInput({ restart: true });
-    renderStatus();
-  }
-
   /** Local backup of the draft (so a reload does not lose it). Nothing leaves the browser. */
   let backupTimer = 0;
   function backup() {
@@ -208,11 +185,6 @@ export function createDebugMenu(view) {
     touchLocal('all');
     render();
     studio.refresh();
-  }
-
-  /** The button "Apply to game": send the draft to the room when it has unsent changes. */
-  function applyToRoom() {
-    if (state.dirty && !state.problems.length) send();
   }
 
   // ── small widgets ────────────────────────────────────────────────────────────────────────────────────────
@@ -854,7 +826,7 @@ export function createDebugMenu(view) {
       state.problems.length ? err('The definitions have problems (see the red box). They are exported anyway.') : null,
       section('Whole file', note('Replace games/balance/definitions.js with this. (Comments in the file are not kept.)'),
         h('div', { class: 'bb-dbg-row' }, save('Download definitions.js', 'definitions.js', () => S.serializeDefinitions(draft)), copy('Copy', () => S.serializeDefinitions(draft)))),
-      section('Levels file', note('The levels are a file of their own: games/balance/levels.js. With the right permission in deno.json the server writes it for you when you press "Apply to game" (see the note at the top of levels.js); this is the manual way.'),
+      section('Levels file', note('The levels are a file of their own: games/balance/levels.js. Replace it with this download (the server never writes it for you).'),
         h('div', { class: 'bb-dbg-row' }, save('Download levels.js', 'levels.js', () => S.serializeLevels(draft.levels)), copy('Copy', () => S.serializeLevels(draft.levels)))),
       section('One table at a time', note('Paste into definitions.js over the same `export const ...`.'),
         ...S.DEFINITION_TABLES.map((t) => h('div', { class: 'bb-dbg-row' }, h('span', { class: 'bb-dbg-grow' }, t),
@@ -904,8 +876,6 @@ export function createDebugMenu(view) {
     i.addEventListener('change', () => { state[key] = i.checked; apply?.(i.checked); });
     return h('label', { class: 'bb-dbg-chk' }, i, label);
   };
-  const applyBtn = btn('Apply to game', () => { applyToRoom(); renderStatus(); }, 'bb-dbg-go');
-  applyBtn.title = 'Send your edits to the server: the game of the room (for everybody in it) then uses them, and levels.js is written. This is the only thing in the debug menu that is shared; nothing is sent before you press it.';
   let reloadArmed = 0;
   const reloadBtn = btn('Reload from game', () => {
     if (state.dirty && !reloadArmed) { // unsent edits would be thrown away: ask by pressing it twice
@@ -936,7 +906,6 @@ export function createDebugMenu(view) {
     helper('Glass bending', 'fxRefraction', (on) => view.debugFx('refraction', on)),
     h('span', { class: 'bb-dbg-grow' }),
     reloadBtn,
-    applyBtn,
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
     btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
@@ -1035,16 +1004,9 @@ export function createDebugMenu(view) {
           renderStatus();
         }, 'bb-dbg-danger')));
     }
-    if (state.dirty && !state.problems.length) {
-      kids.push(h('div', { class: 'bb-dbg-warn' }, state.local ? 'The local game shows your edits; the room does not have them (nothing is shared until you press Apply to game). ' : 'Your edits stay in this browser (nothing is shared with the other players). Tick "Local game" to try them in a private copy of the game, or press Apply to game when the room should use them. ', btn('Apply to game', () => { applyToRoom(); renderStatus(); }, 'bb-dbg-go')));
-    }
-    if (state.levelsError) kids.push(h('div', { class: 'bb-dbg-err' }, state.levelsError));
-    else if (state.levelsSavedAt && performance.now() - state.levelsSavedAt < 4000) kids.push(h('div', { class: 'bb-dbg-note' }, '✓ levels.js was saved by the server.'));
     if (state.localError) kids.push(h('div', { class: 'bb-dbg-err' }, state.localError));
-    if (state.serverError) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, 'The server refused your last change: '), state.serverError));
-    if (state.unconfirmed) kids.push(h('div', { class: 'bb-dbg-warn' }, 'The server has not confirmed your last change. Is it running? After replacing server.js or shared.js the game server has to be restarted.'));
     for (const m of state.viewProblems) kids.push(h('div', { class: 'bb-dbg-err' }, m));
-    if (state.problems.length) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, `${state.problems.length} problem${state.problems.length > 1 ? 's' : ''}, nothing is sent until fixed:`), '\n', state.problems.slice(0, 6).join('\n')));
+    if (state.problems.length) kids.push(h('div', { class: 'bb-dbg-err' }, h('strong', {}, `${state.problems.length} problem${state.problems.length > 1 ? 's' : ''}, the local game keeps the last good version until fixed:`), '\n', state.problems.slice(0, 6).join('\n')));
     if (state.needsRestart && (state.local || !state.dirty) && !state.problems.length) kids.push(h('div', { class: 'bb-dbg-warn' }, 'Physics changes apply when the level restarts. ', btn('Restart now', () => { syncLocalNow(true); view.ctx.sendInput({ restart: true }); })));
     statusEl.replaceChildren(...kids);
   }
@@ -1094,34 +1056,6 @@ export function createDebugMenu(view) {
     if (!state.viewProblems.includes(msg)) state.viewProblems.push(msg);
     renderStatus();
   };
-  // Notices about what the server did with a change are for the player who made it (they come in every snapshot, so the others filter them out).
-  const mine = () => state.lastSend > 0 && performance.now() - state.lastSend < 8000;
-  view.onLevelsSaved = ({ error }) => { // the server rewrote levels.js (or could not)
-    if (!mine()) return;
-    state.levelsError = error;
-    state.levelsSavedAt = error ? 0 : performance.now();
-    renderStatus();
-    if (!error) setTimeout(renderStatus, 4200);
-  };
-  view.onDefsError = (msg) => {
-    if (msg && !mine()) return;
-    state.serverError = msg;
-    renderStatus();
-  };
-  // a change that the server never confirms (it needs to be restarted after new files, or it is down) must not fail silently
-  const watchdog = setInterval(() => {
-    if (state.sentAt && performance.now() - state.sentAt > 2500) {
-      if (view.defsRev === state.sentRev && !state.serverError) {
-        state.unconfirmed = true;
-        renderStatus();
-      }
-      state.sentAt = 0;
-    }
-    if (state.sentAt === 0 && state.unconfirmed && view.defsRev !== state.sentRev) {
-      state.unconfirmed = false;
-      renderStatus();
-    }
-  }, 500);
   validate();
 
   return {
@@ -1140,9 +1074,6 @@ export function createDebugMenu(view) {
       view.onRun = null;
       view.onSandbox = null;
       view.onProblem = null;
-      view.onDefsError = null;
-      view.onLevelsSaved = null;
-      clearInterval(watchdog);
       view.debugFreeCam(false);
       view.debugShowDrop(false);
       root.remove();

@@ -406,13 +406,8 @@ class BalanceView {
   roomDefs = null; //        the definitions the room's game runs (null = the files as they were loaded, see PRISTINE)
   sandbox = null; //         { game, queue, timer, last, defs, ready } while the local game is shown, else null
   onSandbox = null; //       debug: called with (on, error) when the local game turns on or off
-  onLevelsSaved = null; //  debug: called with ({ saves, error }) when the server wrote levels.js (or could not)
-  lastSaves = -1;
-  lastLsave = '';
-  onDefsError = null; //    debug: called with the server's reason when it refused new definitions ('' = fine again)
   onProblem = null; //      debug: called with a message when something in the drawing or the definitions went wrong (the debug menu shows it)
   problems = new Map(); //  message -> count (each message is reported once)
-  lastDerr = '';
   onRun = null; //           debug: called when a level starts / restarts
   onSnap = null; //          debug: called with every snapshot (the level studio draws the live world from it)
   dock = 0; //               debug: pixels at the left that the studio panel covers (the game is drawn in the rest)
@@ -632,16 +627,6 @@ class BalanceView {
   }
 
   #syncDefs(s) {
-    if ((s.derr ?? '') !== this.lastDerr) { // the server refused our last change (or accepted a new one after refusing)
-      this.lastDerr = s.derr ?? '';
-      this.onDefsError?.(this.lastDerr);
-    }
-    if (s.lsaves !== undefined && (s.lsaves !== this.lastSaves || (s.lsave ?? '') !== this.lastLsave)) {
-      const first = this.lastSaves < 0;
-      this.lastSaves = s.lsaves;
-      this.lastLsave = s.lsave ?? '';
-      if (!first || this.lastLsave) this.onLevelsSaved?.({ saves: s.lsaves, error: this.lastLsave });
-    }
     if (s.drev !== undefined) this.firstDrev ??= s.drev; // (which version of the room's definitions we met when we came in)
     if (s.drev === undefined || s.drev === this.defsRev) return;
     if (s.defs) { // the server applied somebody's change (maybe ours): everybody takes over its version, at the same snapshot
