@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PREVIEW_COUNT, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
@@ -39,7 +39,7 @@ const rawColor = (hex) => {
 };
 const ROTATE_ANIM = 30; //      how fast the block in your hand turns to a new angle: it has turned 95% of the way in about 0.1 s
 const RELEASE_DELAY = 50;  //   ms between letting go of the mouse and the block really dropping (pressing again in that time picks it back up)
-const STORE = 'balance.done'; // localStorage: indexes of completed levels
+const STORE = 'balance.done'; // localStorage: the completed levels (world|name)
 const copyOf = (v) => JSON.parse(JSON.stringify(v));
 
 /**
@@ -69,9 +69,12 @@ function loadPlanck() {
   return planckLoading;
 }
 
+/** What identifies a level in the list of completed ones: its world and name (its place in the list changes when levels are added or ordered). */
+const levelId = (i) => (levels[i] ? `${worldKeyOf(levels[i])}|${levels[i].name}` : null);
 const loadDone = () => {
   try {
-    return new Set(JSON.parse(localStorage.getItem(STORE) ?? '[]'));
+    const ids = JSON.parse(localStorage.getItem(STORE) ?? '[]').map((v) => (typeof v === 'number' ? levelId(v) : v)); // (an older version stored the place in the list)
+    return new Set(ids.filter(Boolean));
   } catch {
     return new Set();
   }
@@ -83,47 +86,15 @@ const saveDone = (set) => {
 };
 
 /**
- * The DRAWN outline of a block: every sharp corner is cut off by a chamfer, so the profile seen from the front is not a hard square any more
- * (the front and back edges are chamfered by chamferedPrism; this does the same to the edges that run front to back). Only the looks change:
- * collisions use the real outline. Each cut takes `d` off both adjacent edges (a little more on a sharp corner, less when an edge is short so cuts never meet), the same size as
- * the other chamfers. Gentle bends (the 7.5 degrees between the corners of a circle) are left alone, so round shapes stay round.
- */
-function cutCorners(pts, d, minTurn = THREE.MathUtils.degToRad(20)) {
-  if (!(d > 0) || pts.length < 3) return pts;
-  pts = pts.filter((q, i) => { const p = pts[(i + pts.length - 1) % pts.length]; return Math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-9; }); // (a point written twice in a row, like the closing point of '0,0 0,2 6,2 6,0 0,0')
-  const out = [];
-  const n = pts.length;
-  for (let i = 0; i < n; i++) {
-    const a = pts[(i + n - 1) % n];
-    const b = pts[i];
-    const c = pts[(i + 1) % n];
-    const lu = Math.hypot(a[0] - b[0], a[1] - b[1]);
-    const lw = Math.hypot(c[0] - b[0], c[1] - b[1]);
-    if (lu < 1e-9 || lw < 1e-9) continue; // (a doubled point)
-    const ux = (a[0] - b[0]) / lu;
-    const uy = (a[1] - b[1]) / lu;
-    const wx = (c[0] - b[0]) / lw;
-    const wy = (c[1] - b[1]) / lw;
-    const turn = Math.PI - Math.acos(THREE.MathUtils.clamp(ux * wx + uy * wy, -1, 1)); // 0 = straight on, 90 degrees at the corner of a square
-    if (turn < minTurn || turn > THREE.MathUtils.degToRad(150)) { out.push(b); continue; } // (a gentle bend, or a needle-sharp tip: left as it is)
-    // On a sharp corner the cut edge is short and the chamfer of the caps (which moves every edge inwards by d) would turn it inside out: cut a little deeper there.
-    const need = (1.15 * d * Math.tan(turn / 4)) / Math.cos(turn / 2);
-    const k = Math.min(Math.max(d, need), lu * 0.45, lw * 0.45);
-    out.push([b[0] + ux * k, b[1] + uy * k], [b[0] + wx * k, b[1] + wy * k]);
-  }
-  return out.length >= 3 ? out : pts;
-}
-
-/**
- * A prism with chamfered edges, built from a counter-clockwise outline. The outline is the real (physics) outline: the chamfer is
- * cut INTO the block, so nothing sticks out. Parts: front / back cap (inset by the chamfer), a 45° chamfer strip on each side, and the
- * side wall. UVs (what the shaders texture with): caps use (x, y); chamfers and walls use (distance along the outline, z), so the
+ * A prism with rounded front and back edges, built from a counter-clockwise outline. The outline is the real (physics) outline, already rounded in 2D by
+ * buildShape: the rounding is cut INTO the block, so nothing sticks out. Parts: front / back cap (inset by the radius `c`), a quarter-round strip
+ * on each side (ROUND_STEPS pieces), and the side wall. UVs (what the shaders texture with): caps use (x, y); the rounded edges and walls use (distance along the outline, z), so the
  * texture runs along the edge instead of being smeared through the block. Normals are smooth along gentle curves (circles) and
  * crisp at corners.
  */
-function chamferedPrism(outline, depth, c, holes = []) {
+const ROUND_STEPS = 4; // pieces of the quarter round along the front and back edges
+function roundedPrism(outline, depth, c, holes = []) {
   const h = depth / 2;
-  const R = Math.SQRT1_2;
   const SMOOTH = Math.cos(THREE.MathUtils.degToRad(35));
   const pos = [];
   const nor = [];
@@ -160,7 +131,18 @@ function chamferedPrism(outline, depth, c, holes = []) {
       const n1 = edgeN[(i + N - 1) % N];
       const n2 = edgeN[i];
       const m = n1.clone().add(n2).multiplyScalar(1 / Math.max(0.25, 1 + n1.dot(n2)));
-      return p.clone().addScaledVector(m, -c);
+      // on a convex corner the inset moves the corner along both edges by d * tan(turn / 2): never further than 45% of an edge, so the inset loop
+      // never turns inside out (the little arcs of a rounded corner would, with an inset as big as their radius)
+      const prev = P[(i + N - 1) % N];
+      const next = P[(i + 1) % N];
+      const e1 = p.clone().sub(prev);
+      const e2 = next.clone().sub(p);
+      let d = c;
+      if (e1.x * e2.y - e1.y * e2.x > 0) {
+        const turn = Math.atan2(e1.x * e2.y - e1.y * e2.x, e1.dot(e2));
+        if (turn > 1e-6) d = Math.min(c, (0.45 * Math.min(e1.length(), e2.length())) / Math.tan(turn / 2));
+      }
+      return p.clone().addScaledVector(m, -d);
     });
     const arc = [0];
     for (let i = 0; i < N; i++) arc.push(arc[i] + P[i].distanceTo(P[(i + 1) % N]));
@@ -170,12 +152,14 @@ function chamferedPrism(outline, depth, c, holes = []) {
   // caps (with the holes cut out)
   for (const sign of [1, -1]) {
     const base = pos.length / 3;
-    for (const L of loops) L.Q.forEach((q) => vert(q.x, q.y, sign * h, 0, 0, sign, q.x, q.y));
-    const faces = THREE.ShapeUtils.triangulateShape(loops[0].Q.map((q) => q.clone()), loops.slice(1).map((L) => L.Q.map((q) => q.clone())));
+    // (where a corner is rounded as much as the edge is, the inset arc shrinks to a single point: a point written twice is left out)
+    const capLoops = loops.map((L) => L.Q.filter((q, i) => q.distanceTo(L.Q[(i + L.N - 1) % L.N]) > 1e-5));
+    for (const Lq of capLoops) Lq.forEach((q) => vert(q.x, q.y, sign * h, 0, 0, sign, q.x, q.y));
+    const faces = THREE.ShapeUtils.triangulateShape(capLoops[0].map((q) => q.clone()), capLoops.slice(1).map((Lq) => Lq.map((q) => q.clone())));
     for (const [a, b, d] of faces) tri(base + a, base + b, base + d, [0, 0, sign]);
   }
 
-  // chamfers and the side wall, edge by edge
+  // the rounded edges and the side wall, edge by edge
   for (const { N, P, edgeN, Q, arc } of loops) {
     // normal of edge e as seen from one of its ends: smoothed with the neighbouring edge when the corner is gentle
     const normalAt = (e, atEnd) => {
@@ -196,14 +180,25 @@ function chamferedPrism(outline, depth, c, holes = []) {
       const w3 = vert(P[e].x, P[e].y, zs, n0.x, n0.y, 0, arc[e], zs);
       tri(w0, w1, w2, [own.x, own.y, 0]);
       tri(w0, w2, w3, [own.x, own.y, 0]);
-      // chamfer strips: from the wall edge (z = ±zs) inwards to the cap edge (z = ±h)
+      // the rounded edge: a quarter circle from the wall edge (z = ±zs) inwards to the cap edge (z = ±h)
       for (const sign of [1, -1]) {
-        const a = vert(P[e].x, P[e].y, sign * zs, n0.x * R, n0.y * R, sign * R, arc[e], sign * zs);
-        const b = vert(P[f].x, P[f].y, sign * zs, n1.x * R, n1.y * R, sign * R, arc[e + 1], sign * zs);
-        const d = vert(Q[f].x, Q[f].y, sign * h, n1.x * R, n1.y * R, sign * R, arc[e + 1], sign * h);
-        const g = vert(Q[e].x, Q[e].y, sign * h, n0.x * R, n0.y * R, sign * R, arc[e], sign * h);
-        tri(a, b, d, [own.x * R, own.y * R, sign * R]);
-        tri(a, d, g, [own.x * R, own.y * R, sign * R]);
+        const ring = (k, i, nn, u) => {
+          const th = (k / ROUND_STEPS) * (Math.PI / 2);
+          const co = Math.cos(th);
+          const si = Math.sin(th);
+          const t = 1 - co; // how far from the wall outline towards the inset one
+          return vert(P[i].x + (Q[i].x - P[i].x) * t, P[i].y + (Q[i].y - P[i].y) * t, sign * (zs + c * si), nn.x * co, nn.y * co, sign * si, u, sign * (zs + c * si));
+        };
+        for (let k = 0; k < ROUND_STEPS; k++) {
+          const mid = ((k + 0.5) / ROUND_STEPS) * (Math.PI / 2);
+          const want = [own.x * Math.cos(mid), own.y * Math.cos(mid), sign * Math.sin(mid)];
+          const a = ring(k, e, n0, arc[e]);
+          const b = ring(k, f, n1, arc[e + 1]);
+          const d = ring(k + 1, f, n1, arc[e + 1]);
+          const g = ring(k + 1, e, n0, arc[e]);
+          tri(a, b, d, want);
+          tri(a, d, g, want);
+        }
       }
     }
   }
@@ -327,7 +322,7 @@ function outlineRibbon(outline, holes, width) {
 }
 
 /**
- * The meshes of one shape: one chamfered prism per part, or (merge on, the default) the parts joined in 2D first and extruded once,
+ * The meshes of one shape: one rounded prism per part, or (merge on, the default) the parts joined in 2D first and extruded once,
  * so there are no seams between touching parts. Collision never changes: it always uses the separate parts. A shape with a drawing-only
  * outline uses that outline as it is.
  * @returns {{pts:number[][], holes:number[][][]}[]}
@@ -383,6 +378,91 @@ function circleOutline(part, sides = 48) {
     const a = (k / sides) * Math.PI * 2;
     return [part.cx + Math.cos(a) * part.r, part.cy + Math.sin(a) * part.r];
   });
+}
+
+/** The radius of the rounding of the front and back edges (the sides are rounded in 2D by buildShape with the same radius). */
+const edgeRadius = () => Math.min(roundOf(), DEPTH / 2 - 0.02);
+
+/**
+ * A small stand-alone 3D view of one shape, for the shape studio: it is only created when the player asks for it, draws only when the shape changes or
+ * the player drags it round (never in a loop), and dispose() gives the WebGL context back. `update(def)` rebuilds the block from a shape definition
+ * (exactly as the game does) and returns an error text when the definition is not valid.
+ */
+function shapePreview3d(host) {
+  const H = 240;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(Math.max(220, host.clientWidth || 320), H, false);
+  renderer.domElement.style.cssText = `display:block;width:100%;height:${H}px;border-radius:6px;background:#141b30;touch-action:none;cursor:grab`;
+  host.append(renderer.domElement);
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 1.5));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.4);
+  sun.position.set(-3, 5, 6);
+  scene.add(sun);
+  const camera = new THREE.PerspectiveCamera(30, renderer.domElement.width / renderer.domElement.height, 0.1, 500);
+  const group = new THREE.Group();
+  scene.add(group);
+  const material = new THREE.MeshStandardMaterial({ color: 0xc9a26a, roughness: 0.55, metalness: 0 });
+  let meshes = [];
+  let yaw = 0.55;
+  let pitch = -0.3;
+  const render = () => {
+    group.rotation.set(pitch, yaw, 0);
+    renderer.render(scene, camera);
+  };
+  const clear = () => {
+    for (const m of meshes) { group.remove(m); m.geometry.dispose(); }
+    meshes = [];
+  };
+  let drag = null;
+  const el = renderer.domElement;
+  const down = (e) => { drag = { x: e.clientX, y: e.clientY }; el.setPointerCapture?.(e.pointerId); el.style.cursor = 'grabbing'; };
+  const move = (e) => {
+    if (!drag) return;
+    yaw += (e.clientX - drag.x) * 0.012;
+    pitch = Math.max(-1.5, Math.min(1.5, pitch + (e.clientY - drag.y) * 0.012));
+    drag = { x: e.clientX, y: e.clientY };
+    render();
+  };
+  const up = () => { drag = null; el.style.cursor = 'grab'; };
+  el.addEventListener('pointerdown', down);
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', up);
+  return {
+    update(def) {
+      clear();
+      let shape;
+      try {
+        shape = buildShape(def, '?');
+        for (const o of shapeOutlines(shape, true)) {
+          const mesh = new THREE.Mesh(roundedPrism(o.pts, DEPTH, edgeRadius(), o.holes ?? []), material);
+          meshes.push(mesh);
+          group.add(mesh);
+        }
+      } catch (e) {
+        clear();
+        render();
+        return `${e?.message ?? e}`;
+      }
+      camera.position.set(0, 0, (Math.max(shape.radius, 1) * 1.25) / Math.tan(THREE.MathUtils.degToRad(15)));
+      camera.lookAt(0, 0, 0);
+      render();
+      return '';
+    },
+    dispose() {
+      clear();
+      el.removeEventListener('pointerdown', down);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      material.dispose();
+      renderer.dispose();
+      renderer.forceContextLoss?.();
+      el.remove();
+    },
+  };
 }
 
 /** A block you hold: it stands up while it is lifted from 0 to TILT_UNTIL of the way to the play area, and moves back in z from BACK_FROM to the top. */
@@ -721,6 +801,11 @@ class BalanceView {
       this.defsAsk = performance.now();
       this.roomCtx.sendInput({ defsRequest: true });
     }
+  }
+
+  /** The shape studio's 3D preview (only exists while it is shown): see shapePreview3d. */
+  debugShape3d(host) {
+    return shapePreview3d(host);
   }
 
   /** Rebuild everything that is drawn from the definitions: the block geometry, the level cards and the world. */
@@ -1650,7 +1735,7 @@ void main() {
   }
 
   /**
-   * Chamfered geometry for each part of a shape (or for its single visual outline, see plus1). Every block has the same depth.
+   * Rounded geometry for each part of a shape (or for its single visual outline, see plus1). Every block has the same depth.
    * `fine` = every triangle cut into 9 (for blocks whose vertex shader moves the surface, like the water block).
    */
   #geometries(key, fine = false) {
@@ -1659,7 +1744,7 @@ void main() {
     if (g) return g;
     const shape = getShape(key);
     g = shapeOutlines(shape, tuning.mergeParts !== false).map((o) => {
-      const geo = chamferedPrism(cutCorners(o.pts, tuning.chamfer), DEPTH, tuning.chamfer, (o.holes ?? []).map((hole) => cutCorners(hole, tuning.chamfer)));
+      const geo = roundedPrism(o.pts, DEPTH, edgeRadius(), o.holes ?? []);
       if (!fine) return { geo };
       const out = subdivide3(geo);
       addEdgeDistance(out, [o.pts, ...(o.holes ?? [])]);
@@ -1857,7 +1942,7 @@ void main() {
     this.phase = ph;
     if (ph !== PHASE.PLAY) this.mode = 'none';
     if (ph === PHASE.WON && !this.spectator && s.lv >= 0 && !this.sandbox) { // (a win in the local game is a test, not progress)
-      this.done.add(s.lv);
+      this.done.add(levelId(s.lv));
       saveDone(this.done);
       this.#markDone();
     }
@@ -1970,7 +2055,7 @@ void main() {
     this.worldKeys = keys.length ? keys : all.slice(0, 1);
     if (!this.worldKeys.includes(this.worldKey)) this.worldKey = this.worldKeys[0];
     this.worldBtns = this.worldKeys.map((k) => el('button', {
-      class: `bb-world${k === this.worldKey ? ' bb-on' : ''}${inWorld(k).length && inWorld(k).every(([, i]) => this.done.has(i)) ? ' bb-complete' : ''}`,
+      class: `bb-world${k === this.worldKey ? ' bb-on' : ''}${inWorld(k).length && inWorld(k).every(([, i]) => this.done.has(levelId(i))) ? ' bb-complete' : ''}`,
       onclick: () => { this.worldKey = k; this.#buildCards(); },
     }, `${worlds[k].name} (${inWorld(k).length})`)); // (the number of levels in it)
     this.worldsEl.replaceChildren(...this.worldBtns);
@@ -1990,10 +2075,10 @@ void main() {
   }
 
   #markDone() {
-    this.cards.forEach((c) => c.classList.toggle('bb-complete', this.done.has(+c.dataset.lv)));
+    this.cards.forEach((c) => c.classList.toggle('bb-complete', this.done.has(levelId(+c.dataset.lv))));
     (this.worldKeys ?? []).forEach((k, n) => {
       const own = levels.map((lv, i) => [lv, i]).filter(([lv]) => worldKeyOf(lv) === k);
-      this.worldBtns[n]?.classList.toggle('bb-complete', own.length > 0 && own.every(([, i]) => this.done.has(i)));
+      this.worldBtns[n]?.classList.toggle('bb-complete', own.length > 0 && own.every(([, i]) => this.done.has(levelId(i))));
     });
   }
 

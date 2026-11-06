@@ -3,10 +3,20 @@
 // The game CONTENT (materials, shapes, bowls, models, backgrounds, levels, tuning) is plain data in ./_definitions.js.
 // This file is the logic around it: helpers, wire constants, validation, and the code the debug menu uses to edit and export it.
 
-import { backgrounds, bowls, levels, materials, models, shapes, tuning } from './_definitions.js';
+import { backgrounds, bowls, materials, models, shapes, tuning } from './_definitions.js';
 import * as DEFS from './_definitions.js';
-/** The worlds the levels are grouped in (a _definitions.js without any gets one world holding everything). */
-const worlds = DEFS.worlds ?? { main: { name: 'Levels' } };
+// _levels.js holds the levels GROUPED BY WORLD: { world1: { name: 'World 1', levels: [ {...}, ... ] }, ... } (the order of the worlds and of the levels in them
+// is the order of the menu). The rest of the game works with two tables made from it: `worlds` ({ key: { name } }) and a flat list `levels` in which every
+// level knows its world (level.world), worlds in order, levels in order. (The old format, a plain list of levels with the worlds table in
+// _definitions.js, is still read.)
+const levelFile = DEFS.levels;
+const nestedFile = !!levelFile && !Array.isArray(levelFile);
+/** The worlds the levels are grouped in. */
+const worlds = nestedFile
+  ? Object.fromEntries(Object.entries(levelFile).map(([k, w]) => [k, Object.fromEntries(Object.entries(w).filter(([f]) => f !== 'levels'))]))
+  : (DEFS.worlds ?? { main: { name: 'Levels' } });
+/** Every level of every world, in menu order, each with its `world`. */
+const levels = nestedFile ? Object.entries(levelFile).flatMap(([k, w]) => (w.levels ?? []).map((lv) => ({ ...lv, world: k }))) : levelFile;
 /** The category of each shape: { shapeKey: 'Category name' }. A shape without one is in 'Other'. (A _definitions.js without any has no categories.) */
 const shapeCategories = DEFS.shapeCategories ?? {};
 export { backgrounds, bowls, levels, materials, models, shapes, shapeCategories, tuning, worlds };
@@ -116,6 +126,57 @@ export const frictionOf = (m) => (materials[m].friction ?? 10) / 20;
 export const densityOf = (m) => (materials[m].weight ?? 10) / 10;
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
+/** The radius of the rounding of every block edge (tuning.round; an older _definitions.js calls it chamfer). */
+export const roundOf = () => (Number.isFinite(tuning.round) ? tuning.round : Number.isFinite(tuning.chamfer) ? tuning.chamfer : 0);
+
+/**
+ * Round the corners of an outline: every corner that turns by more than `minTurn` becomes an arc of radius R that touches both edges (a convex corner
+ * is cut off, a concave one is filled). An arc never takes more than 45% of an edge, so neighbouring arcs never meet: on a short edge the arc gets
+ * smaller (and a corner that would need an arc under half of R stays sharp). Gentle bends, like the 7.5 degrees between the corners of a circle, are left alone.
+ * @param {number[][]} pts  a loop, either way round
+ * @param {number} R
+ * @param {number} step  the angle one piece of an arc spans (radians)
+ */
+export function roundOutline(pts, R, minTurn = (20 * Math.PI) / 180, step = (30 * Math.PI) / 180) {
+  pts = pts.filter((q, i) => { const p = pts[(i + pts.length - 1) % pts.length]; return Math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-9; }); // (a point written twice in a row)
+  if (!(R > 0) || pts.length < 3) return pts;
+  const n = pts.length;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[(i + n - 1) % n];
+    const b = pts[i];
+    const c = pts[(i + 1) % n];
+    const lu = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const lw = Math.hypot(c[0] - b[0], c[1] - b[1]);
+    const ux = (a[0] - b[0]) / lu, uy = (a[1] - b[1]) / lu;
+    const wx = (c[0] - b[0]) / lw, wy = (c[1] - b[1]) / lw;
+    const inner = Math.acos(Math.max(-1, Math.min(1, ux * wx + uy * wy))); // the angle between the two edges: PI = straight on
+    const turn = Math.PI - inner;
+    if (turn < minTurn || turn > Math.PI * 0.97) { out.push(b); continue; }
+    const half = Math.tan(turn / 2);
+    let t = R * half; // how far from the corner the arc touches the edges
+    const most = Math.min(lu, lw) * 0.45;
+    let r = R;
+    if (t > most) { t = most; r = t / half; }
+    if (r < R * 0.5) { out.push(b); continue; }
+    const bx = ux + wx, by = uy + wy;
+    const bl = Math.hypot(bx, by) || 1;
+    const dc = r / Math.sin(inner / 2); // from the corner to the middle of the arc, along the bisector
+    const cx = b[0] + (bx / bl) * dc, cy = b[1] + (by / bl) * dc;
+    const t1 = [b[0] + ux * t, b[1] + uy * t];
+    const t2 = [b[0] + wx * t, b[1] + wy * t];
+    const a1 = Math.atan2(t1[1] - cy, t1[0] - cx);
+    let delta = Math.atan2(t2[1] - cy, t2[0] - cx) - a1;
+    while (delta > Math.PI) delta -= Math.PI * 2;
+    while (delta < -Math.PI) delta += Math.PI * 2;
+    const m = Math.max(1, Math.ceil(Math.abs(delta) / step));
+    out.push(t1);
+    for (let k = 1; k < m; k++) out.push([cx + Math.cos(a1 + (delta * k) / m) * r, cy + Math.sin(a1 + (delta * k) / m) * r]);
+    out.push(t2);
+  }
+  return out.length >= 3 ? out : pts;
+}
+
 /**
  * Normalised geometry for a shape definition: parts centred on the bounding-box centre, polygons counter-clockwise.
  * Throws on a broken definition. (getShape() is the cached version for shapes by key.)
@@ -146,27 +207,39 @@ export function buildShape(def, key = '?') {
   const vis = all.filter((p) => p.visual);
   if (raw.length === 0) throw new Error(`shape "${key}" has only visual or cutting parts`);
 
-  // CSG: parts marked `cut` are taken away from the others. The collision becomes convex pieces of what is left; the looks use the exact outline.
-  let cutVisual = null;
-  if (cutters.length) {
+  // The blocks are ROUNDED: the parts are joined in 2D (minus the `cut` parts), every corner gets an arc of tuning.round, and the collision is the
+  // convex pieces of that rounded outline, so what you see is what bumps. The looks use a fine outline (64 sides per circle), the collision a coarser one
+  // (every corner of the outline costs convex pieces). Shapes made of circles only stay as they are (they are round already).
+  const R = roundOf();
+  let visualFine = null;
+  let boundsParts = raw; // (the bounding box, and so the middle of the block, is that of the shape before it was rounded: rounding never moves a block)
+  if (cutters.length || (R > 0 && raw.some((p) => p.type === 'poly'))) {
     const outline = (n) => (p) => (p.type === 'circle' ? Array.from({ length: n }, (_, k) => [p.cx + Math.cos((k / n) * Math.PI * 2) * p.r, p.cy + Math.sin((k / n) * Math.PI * 2) * p.r]) : p.pts);
-    // the looks use a fine outline (64 sides per circle); the collision a coarser one, because every corner of a hole costs one convex piece
-    const fine = differenceOutlines(raw.map(outline(64)), cutters.map(outline(64)));
-    if (!fine) throw new Error(`the cut removes the whole shape "${key}"`);
-    const coarse = differenceOutlines(raw.map(outline(24)), cutters.map(outline(24))) ?? fine;
-    const pieces = [];
-    for (const r of coarse) {
-      const cp = convexPieces(r);
-      if (!cp) throw new Error(`shape "${key}": the cut could not be split into convex pieces (try a simpler cut)`);
-      pieces.push(...cp);
+    const solve = (n) => (cutters.length ? differenceOutlines(raw.map(outline(n)), cutters.map(outline(n))) : unionOutlines(raw.map(outline(n))));
+    const rounded = (regions) => (R > 0 ? regions.map((r) => ({ outer: roundOutline(r.outer, R), holes: r.holes.map((hl) => roundOutline(hl, R)) })) : regions);
+    const fine = solve(64);
+    if (!fine && cutters.length) throw new Error(`the cut removes the whole shape "${key}"`);
+    if (fine) {
+      const coarse = solve(24) ?? fine;
+      const pieces = [];
+      let ok = true;
+      for (const r of rounded(coarse)) {
+        const cp = convexPieces(r);
+        if (!cp) { ok = false; break; }
+        pieces.push(...cp);
+      }
+      if (!ok && cutters.length) throw new Error(`shape "${key}": the cut could not be split into convex pieces (try a simpler cut)`);
+      if (ok) {
+        boundsParts = coarse.map((r) => ({ type: 'poly', pts: r.outer }));
+        raw.length = 0;
+        raw.push(...pieces.map((pts) => ({ type: 'poly', pts })));
+        visualFine = rounded(fine);
+      }
     }
-    raw.length = 0;
-    raw.push(...pieces.map((pts) => ({ type: 'poly', pts })));
-    cutVisual = fine;
   }
 
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const p of raw) {
+  for (const p of boundsParts) {
     if (p.type === 'circle') {
       x0 = Math.min(x0, p.cx - p.r); x1 = Math.max(x1, p.cx + p.r);
       y0 = Math.min(y0, p.cy - p.r); y1 = Math.max(y1, p.cy + p.r);
@@ -189,8 +262,8 @@ export function buildShape(def, key = '?') {
     return { type: 'poly', pts };
   });
   const shiftPts = (pts) => pts.map(([x, y]) => [x - mx, y - my]);
-  const visual = vis.length ? vis.map((p) => ({ pts: shiftPts(p.pts), holes: [] }))
-    : cutVisual ? cutVisual.map((r) => ({ pts: shiftPts(r.outer), holes: r.holes.map(shiftPts) })) : null;
+  const visual = vis.length ? vis.map((p) => ({ pts: shiftPts(R > 0 ? roundOutline(p.pts, R) : p.pts), holes: [] }))
+    : visualFine ? visualFine.map((r) => ({ pts: shiftPts(r.outer), holes: r.holes.map(shiftPts) })) : null;
   return { parts, visual, w: x1 - x0, h: y1 - y0, radius, ox: mx, oy: my };
 }
 
@@ -744,13 +817,15 @@ export function validateDefinitions(defs, extra = {}) {
 
   // tuning
   const t = d.tuning ?? {};
-  for (const k of ['gravity', 'waterDensity', 'follow', 'depth', 'chamfer', 'frontZ', 'hoverZ', 'slotGap', 'maxHoldX', 'maxHoldY', 'minHoldY']) {
+  for (const k of ['gravity', 'waterDensity', 'follow', 'depth', 'frontZ', 'hoverZ', 'slotGap', 'maxHoldX', 'maxHoldY', 'minHoldY']) {
     if (!isNum(t[k])) err(`tuning.${k}: not a number`);
   }
   if (t.mergeParts !== undefined && typeof t.mergeParts !== 'boolean') err('tuning.mergeParts must be true or false');
   if (t.countdown !== undefined && !(isNum(t.countdown) && t.countdown >= 0.5 && t.countdown <= 60)) err('tuning.countdown must be from 0.5 to 60 seconds');
   if (isNum(t.gravity) && t.gravity <= 0) err('tuning.gravity must be above 0');
   if (isNum(t.depth) && t.depth < 0.3) err('tuning.depth must be at least 0.3');
+  for (const k of ['round', 'chamfer']) if (t[k] !== undefined && !isNum(t[k])) err(`tuning.${k} must be a number`); // (chamfer = the old name of round)
+  if (isNum(t.round) && isNum(t.depth) && (t.round < 0 || t.round > t.depth / 2 - 0.02)) err('tuning.round must be between 0 and half the depth');
   if (isNum(t.chamfer) && isNum(t.depth) && (t.chamfer < 0 || t.chamfer > t.depth / 2 - 0.02)) err('tuning.chamfer must be between 0 and half the depth');
   rect(t.zone, 'tuning.zone', ['x0', 'x1']);
   rect(t.drop, 'tuning.drop', ['x0', 'x1', 'y0', 'y1']);
@@ -928,14 +1003,16 @@ export function serializeTable(name, value) {
 const LEVELS_HEAD = [
   '// Runs on BOTH server and browser. Pure data: the LEVELS of Balance. _definitions.js re-exports them, so nothing else changes.',
   '//',
-  '// With `DEBUG = true` the level studio edits this file for you, but only when you press "Add level" (a new level is added at the end) or',
-  '// "Update level" (an existing level is replaced) and confirm it: the game server then rewrites THIS file (comments are not kept) and every',
-  '// room gets the change. That needs write permission for the file:',
+  '// The levels are grouped by world: the order of the worlds and of the levels in them is the order of the menu.',
+  '//   export const levels = { worldKey: { name: \'World name\', levels: [ { ...level }, ... ] }, ... }',
+  '//',
+  '// With `DEBUG = true` the level studio edits this file for you, but only when you press "Add level" (a new level is added at the end of its world),',
+  '// "Update level" (an existing level is replaced) or "Save order" (the level order menu) and confirm it: the game server then rewrites THIS file',
+  '// (comments are not kept) and every room gets the change. That needs write permission for the file:',
   '//   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js     (on the "start" and "dev" tasks)',
   '// (`deno task dev` watches the files and restarts the server after every save: use `deno task start` while you edit levels.)',
   '//',
   '// name, difficulty     shown in the menu (easy | medium | hard)',
-  '// world                key of `worlds` (_definitions.js): the world this level is part of (the first world when left out)',
   '// bowl, background     keys of `bowls` / `backgrounds` (the first one of each when left out)',
   '// time                 optional hour of the day (0-24): overrides the background',
   '// initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)',
@@ -972,9 +1049,27 @@ export function serializeShapes(table, categories = {}) {
   return `${SHAPES_HEAD}\n${serializeTable('shapes', table)}\n${serializeTable('shapeCategories', cats)}`;
 }
 
-/** The whole _levels.js file for a list of levels. */
-export function serializeLevels(list) {
-  return `${LEVELS_HEAD}\n${serializeTable('levels', list)}`;
+/** The flat list of levels in menu order: the worlds in the order of the table of worlds, the levels of a world in the order they have in the list. */
+export function orderLevels(list, worldTable) {
+  const keys = Object.keys(worldTable);
+  const rank = (lv) => Math.max(0, keys.indexOf(lv.world));
+  return list.map((lv, i) => [lv, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([lv]) => lv);
+}
+
+/** The flat list of levels as _levels.js holds it: { worldKey: { name, levels: [...] } }. (A level without a known world goes to the first world.) */
+export function nestLevels(list, worldTable) {
+  const keys = Object.keys(worldTable);
+  const out = Object.fromEntries(keys.map((k) => [k, { ...worldTable[k], levels: [] }]));
+  for (const lv of list) {
+    const { world, ...rest } = lv;
+    out[keys.includes(world) ? world : keys[0]].levels.push(rest);
+  }
+  return out;
+}
+
+/** The whole _levels.js file for a flat list of levels (each knows its world) and the table of worlds. */
+export function serializeLevels(list, worldTable) {
+  return `${LEVELS_HEAD}\n${serializeTable('levels', nestLevels(list, worldTable))}`;
 }
 
 /** The whole _definitions.js file for the given definitions (the levels are written to _levels.js, see serializeLevels). */
@@ -989,11 +1084,10 @@ export function serializeDefinitions(defs) {
     '//   bowls         the bowls the tower is built in',
     '//   models        .obj files in ./models and the shader of each part',
     '//   backgrounds   the scenery around the table',
-    '//   worlds        the groups the levels are shown in (a level names its world)',
-    '//   levels        (in their own file, _levels.js)',
+    '//   levels        (in their own file, _levels.js, grouped in worlds)',
     '',
   ];
-  const tables = TABLES.filter((n) => n !== 'levels' && n !== 'shapes' && n !== 'shapeCategories').map((n) => serializeTable(n, defs[n])).join('\n');
+  const tables = TABLES.filter((n) => n !== 'levels' && n !== 'worlds' && n !== 'shapes' && n !== 'shapeCategories').map((n) => serializeTable(n, defs[n])).join('\n');
   return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes, shapeCategories } from './_shapes.js';\nexport { levels } from './_levels.js';\n`;
 }
 

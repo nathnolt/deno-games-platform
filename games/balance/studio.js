@@ -109,6 +109,80 @@ function shapePicker(d, current, color, onPick) {
   document.body.append(back);
   back.querySelector('.bb-on')?.scrollIntoView?.({ block: 'center' });
 }
+/**
+ * The level order menu: the worlds and the levels in them as _levels.js has them now (what the room runs), with buttons to move a level up or down inside its
+ * world and a world up or down. "Save order" writes the new order to _levels.js. Nothing is written before that.
+ */
+function orderDialog(view, api, onDone) {
+  const rd = view.debugRoomDefs();
+  const before = document.activeElement;
+  let busy = false;
+  const close = () => {
+    if (busy) return;
+    document.removeEventListener('keydown', onKey, true);
+    back.remove();
+    before?.focus?.();
+  };
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  }
+  const err = h('div', { class: 'bb-dbg-err bb-st-dlg-err' });
+  const body = h('div', { class: 'bb-st-ord-body' });
+  const save = h('button', { type: 'button', class: 'bb-dbg-btn bb-dbg-go' }, 'Save order');
+  const small = (text, fn, off, title) => h('button', { type: 'button', class: 'bb-dbg-btn', title, disabled: off, onclick: fn }, text);
+  const W = rd?.worlds ?? {};
+  const first = Object.keys(W)[0];
+  const worldOf = (lv) => (lv.world && W[lv.world] ? lv.world : first);
+  const order = Object.keys(W);
+  const lists = Object.fromEntries(order.map((k) => [k, []]));
+  (rd?.levels ?? []).forEach((lv, i) => lists[worldOf(lv)].push(i));
+  const start = JSON.stringify([order, lists]);
+  const swap = (arr, i, by) => { const j = i + by; if (j < 0 || j >= arr.length) return; [arr[i], arr[j]] = [arr[j], arr[i]]; render(); };
+  function render() {
+    save.disabled = busy || JSON.stringify([order, lists]) === start;
+    put(body, order.map((k, wi) => h('section', { class: 'bb-st-ord-world' },
+      h('div', { class: 'bb-st-ord-head' },
+        h('strong', {}, `${W[k].name ?? k}`), h('span', { class: 'bb-dbg-note' }, `${lists[k].length} level${lists[k].length === 1 ? '' : 's'}`), h('span', { class: 'bb-dbg-grow' }),
+        small('▲', () => swap(order, wi, -1), wi === 0, 'Move this world up'), small('▼', () => swap(order, wi, 1), wi === order.length - 1, 'Move this world down')),
+      lists[k].length
+        ? lists[k].map((li, n) => h('div', { class: 'bb-st-ord-row' },
+          h('span', { class: 'bb-dbg-idx' }, n + 1), h('span', { class: 'bb-st-ord-name' }, rd.levels[li].name), h('span', { class: 'bb-dbg-note' }, rd.levels[li].difficulty ?? ''),
+          small('▲', () => swap(lists[k], n, -1), n === 0, 'Earlier in this world'), small('▼', () => swap(lists[k], n, 1), n === lists[k].length - 1, 'Later in this world')))
+        : h('p', { class: 'bb-dbg-note' }, 'No levels in this world.'))));
+  }
+  save.addEventListener('click', async () => {
+    busy = true;
+    save.disabled = true;
+    save.textContent = 'Saving…';
+    err.textContent = '';
+    let r;
+    try { r = await api.saveItem({ kind: 'order', op: 'update', worlds: order, order: lists, names: rd.levels.map((l) => l.name) }); } catch (e) { r = { ok: false, error: `${e?.message ?? e}` }; }
+    busy = false;
+    save.textContent = 'Save order';
+    if (r.ok) {
+      close();
+      onDone?.({ worlds: [...order], ids: order.flatMap((k) => lists[k].map((i) => `${k}|${rd.levels[i].name}`)), file: r.file });
+      return;
+    }
+    err.textContent = r.error ?? 'That did not work.';
+    render();
+  });
+  const back = h('div', { class: 'bb-st-dlg-back' },
+    h('div', { class: 'bb-st-dlg bb-st-ord', role: 'dialog', 'aria-modal': 'true' },
+      h('button', { type: 'button', class: 'bb-st-dlg-x', title: 'Close', onclick: close }, '✕'),
+      h('h3', {}, 'Level order'),
+      rd ? h('p', { class: 'bb-dbg-note' }, 'Move levels up and down inside their world, and worlds up and down. This is the order of the menu. Nothing changes until you press Save order, which rewrites _levels.js.') : h('p', {}, 'The levels of the room have not arrived yet: close this and try again in a moment.'),
+      body,
+      err,
+      h('div', { class: 'bb-st-dlg-btns' }, rd ? save : null, h('button', { type: 'button', class: 'bb-dbg-btn', onclick: close }, 'Cancel'))));
+  back.addEventListener('pointerdown', (e) => { if (e.target === back) close(); });
+  document.addEventListener('keydown', onKey, true);
+  document.body.append(back);
+  if (rd) render();
+}
 // How big the studio panels are is YOUR view, not game state: it lives in this page only (not stored anywhere, not sent to the server or the other players).
 const dockPref = { w: 470, bp: 300 }; // width of the level / background studio panel, height of the blueprint (px)
 /** A handle on the right edge of a docked studio panel: drag it to make the panel (and so the blueprint) wider; the game gets the rest. */
@@ -206,8 +280,8 @@ function thumb(def, color, w = 46, hgt = 34) {
   const root = svg('svg', { width: w, height: hgt, viewBox: `0 0 ${w} ${hgt}`, class: 'bb-st-thumb' });
   const g = svg('g', { transform: `translate(${(w - bw * k) / 2 - b[0] * k} ${(hgt + bh * k) / 2 + b[1] * k}) scale(${k} ${-k})` });
   const common = { fill: color, stroke: '#1f2937', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' };
-  const bs = def.some((p) => p.cut || p.visual) ? built(def) : null; // (the result of the cuts)
-  const looks = bs?.visual ?? null; // the outline the block really has in the game: with its cuts (holes) taken out
+  const bs = def.some((p) => p.type !== 'circle') ? built(def) : null; // (the result of the cuts and of the rounding)
+  const looks = bs?.visual ?? null; // the outline the block really has in the game: rounded, with its cuts (holes) taken out
   if (looks) {
     const loop = (pts) => `M${pts.map(([x, y]) => `${x + bs.ox} ${y + bs.oy}`).join('L')}Z`;
     g.append(svg('path', { d: looks.map((v) => [v.pts, ...(v.holes ?? [])].map(loop).join('')).join(''), 'fill-rule': 'evenodd', ...common }));
@@ -415,7 +489,7 @@ function drawParts(def, fill, stroke, extra = {}) {
 //  SHAPE STUDIO
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 function shapeStudio(view, api) {
-  const st = { sel: null, part: 0, editing: false, draw: null, closeOnFirst: true, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '', tf: { x: 1.5, y: 1.5, lock: true } };
+  const st = { sel: null, part: 0, editing: false, calc: false, show3d: false, draw: null, closeOnFirst: true, snap: 1, mat: '(mixed)', bowl: null, open: false, msg: '', newName: '', tf: { x: 1.5, y: 1.5, lock: true } };
   let manual = {}; //   shapes the user moved on the board: key -> { ox, oy } (only where a shape is drawn, never its data)
   let layout = null; // { cells: { key: { ox, oy, ax, ay } }, rows: [{ y, x0, x1 }], bowlKey }
   let raf = 0;
@@ -715,14 +789,22 @@ function shapeStudio(view, api) {
         }
       });
       grp.append(...kids);
-      if (def.some((q) => q.cut)) { // the result of the cuts: the outline the block really has (dark), and how it is split for collision (thin lines)
-        try {
-          const built = S.buildShape(def, key);
-          const cx = built.ox, cy = built.oy;
+      const calc = st.calc && key === st.sel && !calcTimer; // (while the shape is being edited the calculated one waits until the mouse is still)
+      if (calc) kids.forEach((node) => node.setAttribute('opacity', 0.22));
+      if (calc || def.some((q) => q.cut)) { // the result: the outline the block really has (dark; rounded, cuts taken out), and how it is split for collision (thin lines)
+        const bt = built(def);
+        if (bt) {
+          const cx = bt.ox, cy = bt.oy;
           const shiftBack = (pts) => pts.map(([x, y]) => `${x + cx},${y + cy}`).join(' ');
-          for (const q of built.parts) grp.append(svg('polygon', { points: shiftBack(q.pts), fill: 'none', stroke: 'rgba(15,23,42,.2)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
-          for (const v of built.visual ?? []) for (const loop of [v.pts, ...(v.holes ?? [])]) grp.append(svg('polygon', { points: shiftBack(loop), fill: 'none', stroke: '#0f172a', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
-        } catch { /* the problem is shown under the shape (renderInfo) */ }
+          const loopPath = (pts) => `M${pts.map(([x, y]) => `${x + cx} ${y + cy}`).join('L')}Z`;
+          if (calc && bt.visual) grp.append(svg('path', { d: bt.visual.map((v) => [v.pts, ...(v.holes ?? [])].map(loopPath).join('')).join(''), 'fill-rule': 'evenodd', fill: col, opacity: 0.85, 'pointer-events': 'none' }));
+          for (const q of bt.parts) {
+            grp.append(q.type === 'circle'
+              ? svg('circle', { cx: q.cx + cx, cy: q.cy + cy, r: q.r, fill: 'none', stroke: 'rgba(15,23,42,.35)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' })
+              : svg('polygon', { points: shiftBack(q.pts), fill: 'none', stroke: calc ? 'rgba(15,23,42,.45)' : 'rgba(15,23,42,.2)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
+          }
+          for (const v of bt.visual ?? []) for (const loop of [v.pts, ...(v.holes ?? [])]) grp.append(svg('polygon', { points: shiftBack(loop), fill: 'none', stroke: '#0f172a', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
+        }
       }
       for (const [pi, p] of def.entries()) { // a part that is not convex cannot be a collision shape
         if (p.type !== 'circle' && !p.visual && !p.cut && !isConvex(parsePts(p.points))) grp.append(svg('polygon', { points: p.points, fill: 'none', stroke: '#ef4444', 'stroke-width': 3, 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none' }));
@@ -776,6 +858,8 @@ function shapeStudio(view, api) {
     if (cur) st.part = Math.max(0, Math.min(st.part, cur.length - 1));
     api.touch('shapes', false, live); // validates (nothing is sent anywhere) and calls changed() below; while dragging that all waits until the mouse is still for a moment
     scheduleDraw();
+    bumpCalc();
+    pvRefresh();
     if (!live) renderInspector();
     else renderInfo();
   }
@@ -800,6 +884,7 @@ function shapeStudio(view, api) {
     renderList();
     renderInspector();
     scheduleDraw();
+    pvRefresh(true);
   }
   function usage(key) {
     let n = 0;
@@ -1143,8 +1228,75 @@ function shapeStudio(view, api) {
       btn('✕ Close', () => api.close()));
   }
 
+  // ── previews of the CALCULATED shape: rounded, cuts taken out, and how it is split into convex pieces for collision. Both are off until you ask: the 2D
+  // one lies over the shape on the board, the 3D one is a small window that exists only while it is shown. Neither is calculated while you are still
+  // changing the shape: they wait until it has been still for a moment. ──
+  const host3d = h('div', { class: 'bb-st-3d bb-hide' });
+  const err3d = h('div', { class: 'bb-dbg-err bb-hide' });
+  const previewRow = h('div', { class: 'bb-st-row' });
+  let pv = null;
+  let pvTimer = 0;
+  let calcTimer = 0;
+  function renderPreviewBar() {
+    put(previewRow,
+      h('span', { class: 'bb-st-mini' }, 'preview'),
+      btn(st.calc ? '▣ 2D shown' : '▢ 2D', () => set2d(!st.calc), st.calc ? 'bb-dbg-go' : '', 'Show the shape as it is calculated: the rounded outline the block has, and the convex pieces its collision is made of'),
+      view.debugShape3d ? btn(st.show3d ? '▣ 3D shown' : '▢ 3D', () => set3d(!st.show3d), st.show3d ? 'bb-dbg-go' : '', 'A small 3D view of the block. Drag it to turn it. It only exists while it is shown, and follows your changes when you stop moving') : null);
+  }
+  function set2d(on) {
+    st.calc = on;
+    clearTimeout(calcTimer);
+    calcTimer = 0;
+    renderPreviewBar();
+    scheduleDraw();
+  }
+  function bumpCalc() {
+    if (!st.calc) return;
+    clearTimeout(calcTimer);
+    calcTimer = setTimeout(() => { calcTimer = 0; scheduleDraw(); }, 200);
+  }
+  function pvRefresh(now = false) {
+    clearTimeout(pvTimer);
+    pvTimer = 0;
+    if (!pv) return;
+    const run = () => {
+      pvTimer = 0;
+      if (!pv) return;
+      const def = D().shapes[st.sel];
+      const msg = def ? pv.update(def) : 'No shape selected.';
+      err3d.textContent = msg;
+      err3d.classList.toggle('bb-hide', !msg);
+    };
+    if (now) run(); else pvTimer = setTimeout(run, 250);
+  }
+  function set3d(on) {
+    if (on === !!pv) { st.show3d = on; return; }
+    st.show3d = on;
+    if (on) {
+      host3d.classList.remove('bb-hide');
+      try {
+        pv = view.debugShape3d(host3d);
+      } catch (e) {
+        pv = null;
+        st.show3d = false;
+        host3d.classList.add('bb-hide');
+        err3d.textContent = `The 3D view could not start: ${e?.message ?? e}`;
+        err3d.classList.remove('bb-hide');
+      }
+      pvRefresh(true);
+    } else {
+      clearTimeout(pvTimer);
+      pvTimer = 0;
+      pv?.dispose();
+      pv = null;
+      host3d.classList.add('bb-hide');
+      err3d.classList.add('bb-hide');
+    }
+    renderPreviewBar();
+  }
+
   const right = h('div', { class: 'bb-st-right' },
-    infoEl, inspEl);
+    h('div', { class: 'bb-st-preview' }, previewRow, host3d, err3d), infoEl, inspEl);
   const root = h('div', { class: 'bb-st bb-st-full' },
     head,
     h('div', { class: 'bb-st-cols' }, h('div', { class: 'bb-st-left' }, listHead, listEl), h('div', { class: 'bb-st-board' }, board.el), right));
@@ -1171,16 +1323,19 @@ function shapeStudio(view, api) {
       layout = null;
       st.sel = D().shapes[st.sel] ? st.sel : keys()[0];
       renderAll();
+      renderPreviewBar();
       requestAnimationFrame(() => { relayout(); board.fit(layout.bounds); scheduleDraw(); });
     },
     hide() {
       cancelDraw();
+      set3d(false); // (the 3D window gives its WebGL context back)
       st.open = false;
       root.classList.remove('bb-show');
     },
     /** The draft changed (by this studio, another tab of the menu, or another player). */
     changed(kind, live = false) {
       if (!st.open) return;
+      if (kind === 'shapes' || kind === 'tuning' || kind === 'all') { bumpCalc(); pvRefresh(); }
       if (live && kind === 'shapes') { // dragging a corner: only the board follows the mouse; the list of thumbnails is rebuilt when the mouse is still
         scheduleDraw();
         clearTimeout(listTimer);
@@ -1310,9 +1465,12 @@ function levelStudio(view, api) {
     const built0 = built(def);
     if (!built0) return grp;
     const static_ = d.materials[materialKey]?.static;
-    for (const p of built0.parts) {
-      const common = { fill: matColor(d, materialKey), stroke: style.stroke ?? (static_ ? '#374151' : '#3b2a14'), 'stroke-width': style.width ?? 1.1, 'vector-effect': 'non-scaling-stroke', opacity: style.opacity ?? 0.93, ...(style.dash ? { 'stroke-dasharray': style.dash } : {}) };
-      grp.append(p.type === 'circle' ? svg('circle', { cx: p.cx, cy: p.cy, r: p.r, ...common }) : svg('polygon', { points: p.pts.map((q) => q.join(',')).join(' '), ...common }));
+    const common = { fill: matColor(d, materialKey), stroke: style.stroke ?? (static_ ? '#374151' : '#3b2a14'), 'stroke-width': style.width ?? 1.1, 'vector-effect': 'non-scaling-stroke', opacity: style.opacity ?? 0.93, ...(style.dash ? { 'stroke-dasharray': style.dash } : {}) };
+    if (built0.visual) { // the block as it is in the game: rounded (and the collision is the same outline)
+      const loop = (pts) => `M${pts.map(([x, y]) => `${x} ${y}`).join('L')}Z`;
+      grp.append(svg('path', { d: built0.visual.map((v) => [v.pts, ...(v.holes ?? [])].map(loop).join('')).join(''), 'fill-rule': 'evenodd', ...common }));
+    } else {
+      for (const p of built0.parts) grp.append(p.type === 'circle' ? svg('circle', { cx: p.cx, cy: p.cy, r: p.r, ...common }) : svg('polygon', { points: p.pts.map((q) => q.join(',')).join(' '), ...common }));
     }
     if (static_) grp.append(svg('circle', { cx: 0, cy: 0, r: 0.18, fill: '#111827', opacity: 0.6 }));
     return grp;
@@ -1447,15 +1605,29 @@ function levelStudio(view, api) {
   const probEl = h('span', { class: 'bb-st-prob' });
   // Which levels of the draft are in _levels.js already? A level object that was in the file keeps its place in it (by object, so reordering, renaming or deleting other
   // levels does not confuse it); a level made here (New, Copy) is new until it has been added. First match is by name, when the studio opens or the draft is replaced.
-  const origin = new WeakMap(); // draft level -> index in _levels.js
+  // A draft level knows the level of _levels.js it came from by its world and name (not by its place in the list, which changes when levels are added or ordered).
+  const origin = new WeakMap(); // draft level -> { name, world, pending?: index }
   const fileLevels = () => view.debugRoomDefs()?.levels ?? [];
+  const fileWorlds = () => view.debugRoomDefs()?.worlds ?? D().worlds;
+  const worldKeyIn = (lv, worlds) => (lv.world && worlds[lv.world] ? lv.world : Object.keys(worlds)[0]);
+  /** Where is the file version of this draft level in the room's list of levels? undefined = it is not in the file (yet). */
+  function fileIndexOf(lv) {
+    const o = origin.get(lv);
+    if (!o) return undefined;
+    const W = fileWorlds();
+    const i = fileLevels().findIndex((f) => f.name === o.name && worldKeyIn(f, W) === o.world);
+    if (i >= 0) { delete o.pending; return i; }
+    return o.pending; // (just saved: the room's list has not arrived yet)
+  }
   function syncOrigins() {
     const file = fileLevels();
-    const taken = new Set(D().levels.map((lv) => origin.get(lv)).filter((i) => i !== undefined));
+    const W = fileWorlds();
+    const taken = new Set(D().levels.map((lv) => fileIndexOf(lv)).filter((i) => i !== undefined));
     for (const lv of D().levels) {
-      if (origin.get(lv) !== undefined) continue;
-      const j = file.findIndex((f, i) => !taken.has(i) && f.name === lv.name);
-      if (j >= 0) { origin.set(lv, j); taken.add(j); }
+      if (fileIndexOf(lv) !== undefined) continue;
+      const wk = worldKeyIn(lv, D().worlds);
+      const j = file.findIndex((f, i) => !taken.has(i) && f.name === lv.name && worldKeyIn(f, W) === wk);
+      if (j >= 0) { origin.set(lv, { name: lv.name, world: wk }); taken.add(j); }
     }
   }
   const worldName = (lv) => { const w = D().worlds ?? {}; const key = lv.world in w ? lv.world : Object.keys(w)[0]; return w[key]?.name ?? key ?? '(none)'; };
@@ -1464,7 +1636,7 @@ function levelStudio(view, api) {
     if (!lv) return;
     if (api.problems().length) { st.msg = `Fix this first: ${api.problems()[0]}`; renderBar(); return; }
     syncOrigins();
-    const at = origin.get(lv);
+    const at = fileIndexOf(lv);
     const add = at === undefined;
     const was = add ? undefined : fileLevels()[at]?.name;
     const value = clone(lv);
@@ -1474,25 +1646,63 @@ function levelStudio(view, api) {
         ? `Are you sure you want to add level “${lv.name}” to world “${worldName(lv)}”? It is written to _levels.js and every room gets it.`
         : `Are you sure you want to update level “${lv.name}” in world “${worldName(lv)}”? It replaces the level in _levels.js and every room gets the new version.`,
       label: add ? 'Add level' : 'Update level',
-      run: () => api.saveItem({ kind: 'level', op: add ? 'add' : 'update', index: at, was, value }),
+      run: () => api.saveItem({ kind: 'level', op: add ? 'add' : 'update', index: at, was, value, worldDef: value.world ? clone(D().worlds[value.world] ?? null) : null }),
       onDone: (r) => {
-        origin.set(lv, r.index);
+        origin.set(lv, { name: lv.name, world: worldKeyIn(lv, D().worlds), pending: r.index });
         st.msg = add ? `Level “${lv.name}” was added to ${r.file}.` : `Level “${lv.name}” was updated in ${r.file}.`;
         renderHead();
         renderBar();
       },
     });
   }
+  /** The order menu; when its order is saved the draft follows it (the draft's own list of levels is only used by the studio). */
+  function openOrder() {
+    orderDialog(view, api, ({ worlds, ids }) => {
+      const d = D();
+      const cur = d.levels[st.lvl];
+      const wRank = [...worlds, ...Object.keys(d.worlds).filter((k) => !worlds.includes(k))];
+      const idOf = (lv) => { const o = origin.get(lv); return `${o?.world ?? worldKeyIn(lv, d.worlds)}|${o?.name ?? lv.name}`; };
+      const sorted = d.levels
+        .map((lv, i) => [lv, i, wRank.indexOf(worldKeyIn(lv, d.worlds)), ids.indexOf(idOf(lv))])
+        .sort((a, b) => a[2] - b[2] || (a[3] < 0 ? 1e6 : a[3]) - (b[3] < 0 ? 1e6 : b[3]) || a[1] - b[1])
+        .map(([lv]) => lv);
+      d.levels.splice(0, d.levels.length, ...sorted);
+      const reordered = Object.fromEntries(wRank.map((k) => [k, d.worlds[k]]).filter(([, w]) => w));
+      for (const k of Object.keys(d.worlds)) delete d.worlds[k];
+      Object.assign(d.worlds, reordered);
+      st.lvl = Math.max(0, d.levels.indexOf(cur));
+      st.msg = 'The level order was saved to _levels.js.';
+      api.touch('worlds');
+      api.touch('levels');
+      renderAll();
+    });
+  }
+  /** Two selects: the world, and the level within that world (a level without a world is in the first world). */
+  function levelSelects(d) {
+    const wkeys = Object.keys(d.worlds);
+    const worldOf = (lv) => (lv.world && d.worlds[lv.world] ? lv.world : wkeys[0]);
+    const cur = d.levels[st.lvl];
+    const curWorld = cur ? worldOf(cur) : wkeys[0];
+    const inWorld = (k) => d.levels.map((lv, i) => [lv, i]).filter(([lv]) => worldOf(lv) === k);
+    const shown = wkeys.filter((k) => k === curWorld || inWorld(k).length > 0);
+    const go = (i) => { st.lvl = i; st.sel = -1; fitSoon(); applyNow(); renderAll(); };
+    return [
+      sel(shown.map((k) => [k, `${d.worlds[k].name ?? k} (${inWorld(k).length})`]), curWorld, (k) => { const first = inWorld(k)[0]; if (first) go(first[1]); }, 'bb-st-lvsel'),
+      sel(inWorld(curWorld).map(([lv, i], n) => [String(i), `${n + 1}. ${lv.name}`]), String(st.lvl), (v) => go(+v), 'bb-st-lvsel'),
+    ];
+  }
+
   function renderHead() {
     const d = D();
     api.showProblems(probEl);
     syncOrigins();
     put(head,
       h('strong', {}, 'Level studio'),
-      sel(d.levels.map((lv, i) => [String(i), `${i + 1}. ${lv.name}`]), String(st.lvl), (v) => { st.lvl = +v; st.sel = -1; fitSoon(); applyNow(); renderAll(); }, 'bb-st-lvsel'),
+      ...levelSelects(d),
       btn('New', newLevel), btn('Copy', copyLevel),
       btn('▶ Playtest', () => api.playtest(st.lvl), 'bb-dbg-go'),
-      btn(origin.get(L()) === undefined ? 'Add level' : 'Update level', saveLevel, 'bb-dbg-go', origin.get(L()) === undefined ? 'Add this level to _levels.js (asks to confirm first)' : 'Replace this level in _levels.js (asks to confirm first)'),
+      btn(fileIndexOf(L()) === undefined ? 'Add level' : 'Update level', saveLevel, 'bb-dbg-go', fileIndexOf(L()) === undefined ? 'Add this level to the end of its world in _levels.js (asks to confirm first)' : 'Replace this level in _levels.js (asks to confirm first)'),
+      btn('Level order', openOrder, '', 'Change the order of the levels in each world (and of the worlds) and save it to _levels.js'),
       btn('Export ⧉', (e) => copyText(`${S.toSource(d.levels[st.lvl])},\n`, e.currentTarget), '', 'Copy this level as a source entry for the levels list in _definitions.js'),
       btn(st.armDelete ? 'Really?' : 'Delete', deleteLevel, 'bb-dbg-danger'),
       probEl,
@@ -1562,7 +1772,7 @@ function levelStudio(view, api) {
     const dropOn = !!l.drop;
     out.push(w.section('Level',
       w.text('name', l, 'name', 'levels'),
-      w.select('world', [['', `(first world: ${d.worlds[Object.keys(d.worlds)[0]]?.name ?? ''})`], ...Object.keys(d.worlds).map((k) => [k, `${d.worlds[k].name} (${k})`])], l, 'world', 'levels'),
+      w.select('world', [['', `(first world: ${d.worlds[Object.keys(d.worlds)[0]]?.name ?? ''})`], ...Object.keys(d.worlds).map((k) => [k, `${d.worlds[k].name} (${k})`])], l, 'world', 'levels', renderHead),
       w.select('difficulty', ['easy', 'medium', 'hard'], l, 'difficulty', 'levels'),
       w.select('bowl', Object.keys(d.bowls), l, 'bowl', 'levels', renderAll),
       w.select('background', Object.keys(d.backgrounds), l, 'background', 'levels'),

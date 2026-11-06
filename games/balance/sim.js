@@ -9,7 +9,7 @@
 // The gameplay is 2D (x, y); the 3D look is purely client-side.
 import {
   applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, groundYOf, inDrop, levels, LOSE,
-  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
+  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, orderLevels, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 let planck = null;
@@ -302,16 +302,45 @@ export class BalanceGame {
     if (req.kind === 'level') {
       const lv = req.value;
       if (!lv || typeof lv !== 'object' || Array.isArray(lv)) return fail('that is not a level');
+      if (typeof lv.world === 'string' && !next.worlds[lv.world] && /^[A-Za-z][\w-]{0,39}$/.test(lv.world) && typeof req.worldDef?.name === 'string' && req.worldDef.name) {
+        next.worlds[lv.world] = { name: req.worldDef.name.slice(0, 60) }; // (a world made in the debug menu comes into the file together with its first level)
+      }
+      const worldKeys = Object.keys(next.worlds);
+      lv.world = lv.world && next.worlds[lv.world] ? lv.world : worldKeys[0]; // (in the file a level is part of its world)
       if (add) {
         next.levels.push(lv);
-        index = next.levels.length - 1;
       } else {
         index = req.index;
         if (!Number.isInteger(index) || !next.levels[index] || next.levels[index].name !== req.was) return fail('that level is not in _levels.js any more (or it was renamed there): reload the page and try again');
         next.levels[index] = lv;
       }
+      next.levels = orderLevels(next.levels, next.worlds); // (a new level is the last one of its world)
+      index = next.levels.indexOf(lv);
       file = '_levels.js';
-      text = serializeLevels(next.levels);
+      text = serializeLevels(next.levels, next.worlds);
+    } else if (req.kind === 'order') {
+      // the order menu: { worlds: [world keys in the new order], order: { worldKey: [index in the list as the server has it, ...] }, names: [name per index] }
+      const keys = Object.keys(next.worlds);
+      const wk = req.worlds;
+      if (!Array.isArray(wk) || wk.length !== keys.length || new Set(wk).size !== keys.length || wk.some((k) => !keys.includes(k)) || !req.order || typeof req.order !== 'object') return fail('that is not a valid order');
+      const worldOf = (lv) => (lv.world && next.worlds[lv.world] ? lv.world : keys[0]);
+      const used = new Set();
+      const out = [];
+      for (const k of wk) {
+        const list = req.order[k];
+        if (!Array.isArray(list)) return fail('that is not a valid order');
+        for (const i of list) {
+          const lv = Number.isInteger(i) ? next.levels[i] : undefined;
+          if (!lv || used.has(i) || worldOf(lv) !== k || !Array.isArray(req.names) || req.names[i] !== lv.name) return fail('the levels in _levels.js are not the ones the menu showed (changed in the meantime?): reload the page and try again');
+          used.add(i);
+          out.push(lv);
+        }
+      }
+      if (used.size !== next.levels.length) return fail('the order does not list every level');
+      next.levels = out;
+      next.worlds = Object.fromEntries(wk.map((k) => [k, next.worlds[k]]));
+      file = '_levels.js';
+      text = serializeLevels(next.levels, next.worlds);
     } else if (req.kind === 'shape') {
       const key = req.key;
       if (typeof key !== 'string' || !/^[A-Za-z][\w-]{0,39}$/.test(key)) return fail('a shape name starts with a letter and has at most 40 letters, digits, - or _');

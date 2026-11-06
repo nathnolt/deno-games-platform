@@ -259,3 +259,16 @@
 .bb-st-start.bb-on { background: #25305a; border-color: #f43f5e; }
 .bb-st-start .bb-st-mini { display: inline-flex; align-items: center; gap: .15rem; }
 .bb-st-start select { max-width: 6rem; }
+
+/* shape studio: the previews of the calculated shape */
+.bb-st-preview { display: flex; flex-direction: column; gap: .35rem; padding: .4rem .6rem 0; }
+.bb-st-3d { border-radius: 6px; overflow: hidden; }
+.bb-st-preview .bb-hide { display: none; }
+
+/* the level order menu */
+.bb-st-ord { width: min(34rem, 94vw); max-height: 88vh; display: flex; flex-direction: column; }
+.bb-st-ord-body { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: .6rem; margin-bottom: .6rem; padding-right: .3rem; }
+.bb-st-ord-head { display: flex; align-items: center; gap: .5rem; padding-bottom: .2rem; border-bottom: 1px solid #2b3550; margin-bottom: .2rem; }
+.bb-st-ord-row { display: flex; align-items: center; gap: .5rem; padding: 2px 4px; border-radius: 6px; }
+.bb-st-ord-row:hover { background: rgba(255,255,255,.05); }
+.bb-st-ord-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
