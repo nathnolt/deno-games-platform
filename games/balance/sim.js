@@ -340,7 +340,9 @@ export class BalanceGame {
         : `${file} could not be written: ${e?.message ?? e}`);
     }
     activate(this.defs);
-    applyDefinitions(next); // every room uses the live definitions, so from now on all of them have the new level / shape (their players get it right away)
+    applyDefinitions(next);
+    Object.assign(BASE, cloneDefinitions()); // (BASE is what rooms start from and go back to: without this a room that activates its set again would bring the old levels back)
+    // every room uses the live definitions, so from now on all of them have the new level / shape (their players get it right away)
     for (const ref of ROOMS) {
       const room = ref.deref();
       if (!room) { ROOMS.delete(ref); continue; }

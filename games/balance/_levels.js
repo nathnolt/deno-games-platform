@@ -98,9 +98,8 @@ export const levels = [
     bowl: 'bowl1',
     background: 'zen1',
     initialBlocks: [
-      { shape: 'S', material: 'floatBlockHeavy', rot: 31, x: 4, y: 0 },
-      { shape: 'S2', material: 'floatBlockHeavy', rot: -30.100000000000023, x: -3.5, y: 0 },
-      { shape: 'square1', material: 'wood', rot: -90, x: 1.77, y: -4.48 },
+      { shape: 'square1', material: 'floatBlockHeavy', rot: 0, x: -0.5, y: -0.01 },
+      { shape: 'square1', material: 'floatBlockHeavy', rot: 0, x: 5, y: 0 },
     ],
     chooseShapes: 3,
     shapes: [{ shape: 'square1', material: 'wood' }],
