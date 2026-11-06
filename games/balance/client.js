@@ -83,6 +83,38 @@ const saveDone = (set) => {
 };
 
 /**
+ * The DRAWN outline of a block: every sharp corner is cut off by a chamfer, so the profile seen from the front is not a hard square any more
+ * (the front and back edges are chamfered by chamferedPrism; this does the same to the edges that run front to back). Only the looks change:
+ * collisions use the real outline. Each cut takes `d` off both adjacent edges (a little more on a sharp corner, less when an edge is short so cuts never meet), the same size as
+ * the other chamfers. Gentle bends (the 7.5 degrees between the corners of a circle) are left alone, so round shapes stay round.
+ */
+function cutCorners(pts, d, minTurn = THREE.MathUtils.degToRad(20)) {
+  if (!(d > 0) || pts.length < 3) return pts;
+  pts = pts.filter((q, i) => { const p = pts[(i + pts.length - 1) % pts.length]; return Math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-9; }); // (a point written twice in a row, like the closing point of '0,0 0,2 6,2 6,0 0,0')
+  const out = [];
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const a = pts[(i + n - 1) % n];
+    const b = pts[i];
+    const c = pts[(i + 1) % n];
+    const lu = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const lw = Math.hypot(c[0] - b[0], c[1] - b[1]);
+    if (lu < 1e-9 || lw < 1e-9) continue; // (a doubled point)
+    const ux = (a[0] - b[0]) / lu;
+    const uy = (a[1] - b[1]) / lu;
+    const wx = (c[0] - b[0]) / lw;
+    const wy = (c[1] - b[1]) / lw;
+    const turn = Math.PI - Math.acos(THREE.MathUtils.clamp(ux * wx + uy * wy, -1, 1)); // 0 = straight on, 90 degrees at the corner of a square
+    if (turn < minTurn || turn > THREE.MathUtils.degToRad(150)) { out.push(b); continue; } // (a gentle bend, or a needle-sharp tip: left as it is)
+    // On a sharp corner the cut edge is short and the chamfer of the caps (which moves every edge inwards by d) would turn it inside out: cut a little deeper there.
+    const need = (1.15 * d * Math.tan(turn / 4)) / Math.cos(turn / 2);
+    const k = Math.min(Math.max(d, need), lu * 0.45, lw * 0.45);
+    out.push([b[0] + ux * k, b[1] + uy * k], [b[0] + wx * k, b[1] + wy * k]);
+  }
+  return out.length >= 3 ? out : pts;
+}
+
+/**
  * A prism with chamfered edges, built from a counter-clockwise outline. The outline is the real (physics) outline: the chamfer is
  * cut INTO the block, so nothing sticks out. Parts: front / back cap (inset by the chamfer), a 45° chamfer strip on each side, and the
  * side wall. UVs (what the shaders texture with): caps use (x, y); chamfers and walls use (distance along the outline, z), so the
@@ -1627,7 +1659,7 @@ void main() {
     if (g) return g;
     const shape = getShape(key);
     g = shapeOutlines(shape, tuning.mergeParts !== false).map((o) => {
-      const geo = chamferedPrism(o.pts, DEPTH, tuning.chamfer, o.holes);
+      const geo = chamferedPrism(cutCorners(o.pts, tuning.chamfer), DEPTH, tuning.chamfer, (o.holes ?? []).map((hole) => cutCorners(hole, tuning.chamfer)));
       if (!fine) return { geo };
       const out = subdivide3(geo);
       addEdgeDistance(out, [o.pts, ...(o.holes ?? [])]);
