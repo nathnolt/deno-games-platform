@@ -3,7 +3,7 @@
 // The game CONTENT (materials, shapes, bowls, models, backgrounds, levels, tuning) is plain data in ./_definitions.js.
 // This file is the logic around it: helpers, wire constants, validation, and the code the debug menu uses to edit and export it.
 
-import { backgrounds, bowls, materials, models, shapes, tuning } from './_definitions.js';
+import { backgrounds, bowls, materials, models, tuning } from './_definitions.js';
 import * as DEFS from './_definitions.js';
 // _levels.js holds the levels GROUPED BY WORLD: { world1: { name: 'World 1', levels: [ {...}, ... ] }, ... } (the order of the worlds and of the levels in them
 // is the order of the menu). The rest of the game works with two tables made from it: `worlds` ({ key: { name } }) and a flat list `levels` in which every
@@ -17,11 +17,21 @@ const worlds = nestedFile
   : (DEFS.worlds ?? { main: { name: 'Levels' } });
 /** Every level of every world, in menu order, each with its `world`. */
 const levels = nestedFile ? Object.entries(levelFile).flatMap(([k, w]) => (w.levels ?? []).map((lv) => ({ ...lv, world: k }))) : levelFile;
-/** The category of each shape: { shapeKey: 'Category name' }. A shape without one is in 'Other'. (A _definitions.js without any has no categories.) */
-const shapeCategories = DEFS.shapeCategories ?? {};
+// _shapes.js holds the shapes GROUPED BY CATEGORY: { Tetris: { B: [ ...parts ], L: [ ... ] }, Fancy: { heart: [ ... ] }, ... } (the order of the categories
+// and of the shapes in them is the order of the shape selects). The rest of the game works with two flat tables made from it: `shapes` ({ key: [parts] })
+// and `shapeCategories` ({ key: 'Category name' }; a shape in 'Other' has no entry). (The old format, a flat table of shapes next to a `shapeCategories`
+// table, is still read.)
+const shapeFile = DEFS.shapes ?? {};
+const nestedShapes = Object.values(shapeFile).some((v) => v && !Array.isArray(v));
+export const OTHER_CATEGORY = 'Other';
+/** The category of each shape: { shapeKey: 'Category name' }. A shape without one is in 'Other'. */
+const shapeCategories = nestedShapes
+  ? Object.fromEntries(Object.entries(shapeFile).flatMap(([c, group]) => (c === OTHER_CATEGORY ? [] : Object.keys(group).map((k) => [k, c]))))
+  : (DEFS.shapeCategories ?? {});
+/** Every shape of every category, in order. */
+const shapes = nestedShapes ? Object.fromEntries(Object.values(shapeFile).flatMap((group) => Object.entries(group))) : shapeFile;
 export { backgrounds, bowls, levels, materials, models, shapes, shapeCategories, tuning, worlds };
 
-export const OTHER_CATEGORY = 'Other';
 /** The category name of a shape. */
 export const categoryOf = (key, cats = shapeCategories) => (typeof cats[key] === 'string' && cats[key] ? cats[key] : OTHER_CATEGORY);
 /**
@@ -1037,16 +1047,23 @@ const SHAPES_HEAD = [
   "//   { type: 'circle', diameter: d, x?, y? }          x/y = centre, default (d/2, d/2)",
   '//   add `visual: true` to a poly to make it a drawing-only outline (it replaces the parts when the block is drawn)',
   '// Origin and orientation do not matter: every shape is re-centred on the middle of its bounding box when it is used.',
-  '// The ORDER matters a little: snapshots refer to shapes by their place in this list, so new shapes are added at the end.',
+  '// The ORDER matters a little: snapshots refer to shapes by their place in this file (category by category), so new shapes are added at the end of their category.',
   '//',
-  "// shapeCategories    the category of each shape ('Basic', 'Letters' ...): the shape selects show the shapes under these names. No category = 'Other'.",
+  '// The shapes are grouped by category: the shape selects show the shapes under these names, in this order.',
+  "//   export const shapes = { Tetris: { B: [ ...parts ], ... }, Basic: { ... }, Other: { ... } }",
   '',
 ].join('\n');
 
+/** The flat table of shapes as _shapes.js holds it: { Category: { shapeKey: [parts] } }. (Categories in order of first appearance, 'Other' last.) */
+export function nestShapes(table, categories = {}) {
+  const out = {};
+  for (const [c, keys] of shapeGroups(Object.keys(table), categories)) out[c] = Object.fromEntries(keys.map((k) => [k, table[k]]));
+  return out;
+}
+
 /** The whole _shapes.js file for a table of shapes and the table of their categories. */
 export function serializeShapes(table, categories = {}) {
-  const cats = Object.fromEntries(Object.keys(table).filter((k) => categories[k]).map((k) => [k, categories[k]])); // (in the order of the shapes)
-  return `${SHAPES_HEAD}\n${serializeTable('shapes', table)}\n${serializeTable('shapeCategories', cats)}`;
+  return `${SHAPES_HEAD}\n${serializeTable('shapes', nestShapes(table, categories))}`;
 }
 
 /** The flat list of levels in menu order: the worlds in the order of the table of worlds, the levels of a world in the order they have in the list. */
@@ -1088,7 +1105,7 @@ export function serializeDefinitions(defs) {
     '',
   ];
   const tables = TABLES.filter((n) => n !== 'levels' && n !== 'worlds' && n !== 'shapes' && n !== 'shapeCategories').map((n) => serializeTable(n, defs[n])).join('\n');
-  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes, shapeCategories } from './_shapes.js';\nexport { levels } from './_levels.js';\n`;
+  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes } from './_shapes.js';\nexport { levels } from './_levels.js';\n`;
 }
 
 syncDefinitions();

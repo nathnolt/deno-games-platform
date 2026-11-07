@@ -8,6 +8,7 @@ import {
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
 const PRISTINE = DEBUG ? cloneDefinitions() : null;
 import { flatNormals, parseObj } from './obj.js';
+import { svg } from './ui.js';
 import { deformShaders, SHADOW_GLSL, refractShaders, shaders, transparentShaders, vertexShader, waveVertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
@@ -919,6 +920,8 @@ class BalanceView {
       } else {
         sb.game.loadLevels(defs.levels);
         this.#buildCards();
+        const cur = this.currentLevel ? levels[this.snap?.lv] : null; // (the level studio's time slider: the new time shows without a restart)
+        if (cur) { this.currentLevel = cur; this.#applyDay(); }
       }
     } catch (e) {
       this.#report(`the local game could not take your edits: ${e?.message ?? e}`, e);
@@ -2062,16 +2065,20 @@ void main() {
     this.worldsEl.replaceChildren(...this.worldBtns);
     this.worldsEl.classList.toggle('bb-hide', this.worldKeys.length < 2);
     const own = inWorld(this.worldKey);
-    this.cards = own.map(([lv, i], n) =>
+    const head = el('div', { class: 'bb-row bb-row-head' },
+      el('span', { class: 'bb-col-name' }, 'Name'), el('span', { class: 'bb-col-type' }, 'Type'),
+      el('span', { class: 'bb-col-diff' }, 'Difficulty'), el('span', { class: 'bb-col-done' }, 'Beaten'));
+    this.cards = own.map(([lv, i]) =>
       el(
         'button',
-        { class: `bb-card bb-d-${lv.difficulty}`, 'data-lv': String(i), disabled: this.spectator, onclick: () => !this.spectator && this.ctx.sendInput({ start: i }) },
-        el('span', { class: 'bb-num' }, String(n + 1)),
-        el('span', { class: 'bb-card-name' }, lv.name),
-        el('span', { class: 'bb-card-meta' }, `${lv.difficulty} · ${lv.shapes.length} blocks`),
-        el('span', { class: 'bb-done', title: 'Completed' }, '✓'),
+        { class: `bb-row bb-card bb-d-${lv.difficulty}`, 'data-lv': String(i), disabled: this.spectator, onclick: () => !this.spectator && this.ctx.sendInput({ start: i }) },
+        el('span', { class: 'bb-col-name' }, lv.name),
+        el('span', { class: 'bb-col-type' }, lv.type ?? 'normal'), // (levels get types later: for now they are all normal)
+        el('span', { class: 'bb-col-diff' }, lv.difficulty),
+        el('span', { class: 'bb-col-done bb-done', title: 'Beaten', 'aria-label': 'Beaten' },
+          svg('svg', { viewBox: '0 0 16 16', width: '18', height: '18', fill: 'none', stroke: 'currentColor', 'stroke-width': '2.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg('path', { d: 'M3 8.5l3.2 3.2L13 4.8' }))),
       ));
-    this.cardsEl.replaceChildren(...(this.cards.length ? this.cards : [el('p', { class: 'bb-empty' }, 'No levels in this world yet.')]));
+    this.cardsEl.replaceChildren(el('div', { class: 'bb-table' }, ...(this.cards.length ? [head, ...this.cards] : [el('p', { class: 'bb-empty' }, 'No levels in this world yet.')])));
     this.#markDone();
   }
 

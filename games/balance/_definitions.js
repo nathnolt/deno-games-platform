@@ -65,7 +65,7 @@ export const materials = {
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
 // The shapes live in their own file: ./_shapes.js (the shape studio rewrites it when you press "Add shape" / "Update shape").
-export * from './_shapes.js'; // (shapes, and shapeCategories when the file has them)
+export * from './_shapes.js'; // (shapes, grouped by category)
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────
 // The bowl is a bowl of revolution: a flat bottom, rounded corners and straight walls. The physics sees the slice through the middle

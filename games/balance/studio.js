@@ -1780,6 +1780,7 @@ function levelStudio(view, api) {
     // properties
     const zoneOn = !!l.zone;
     const dropOn = !!l.drop;
+    const timeOn = l.time !== undefined;
     out.push(w.section('Level',
       w.text('name', l, 'name', 'levels'),
       w.select('world', [['', `(first world: ${d.worlds[Object.keys(d.worlds)[0]]?.name ?? ''})`], ...Object.keys(d.worlds).map((k) => [k, `${d.worlds[k].name} (${k})`])], l, 'world', 'levels', renderHead),
@@ -1787,6 +1788,12 @@ function levelStudio(view, api) {
       w.select('bowl', Object.keys(d.bowls), l, 'bowl', 'levels', renderAll),
       w.select('background', Object.keys(d.backgrounds), l, 'background', 'levels'),
       w.num('blocks on the table', l, 'chooseShapes', 'levels', { min: 1, max: 8, int: true }),
+      w.field('overwrite time', (() => {
+        const c = h('input', { type: 'checkbox', checked: timeOn });
+        c.addEventListener('change', () => { if (c.checked) l.time = D().backgrounds[l.background ?? Object.keys(D().backgrounds)[0]]?.light?.time ?? 12; else delete l.time; api.touch('levels'); renderBody(); });
+        return c;
+      })()),
+      timeOn ? w.slider('time of day (hour)', l, 'time', 'levels', 0, 24, 0.25) : null,
       w.field('own side limits', (() => {
         const c = h('input', { type: 'checkbox', checked: zoneOn });
         c.addEventListener('change', () => { if (c.checked) l.zone = { ...D().tuning.zone }; else delete l.zone; api.touch('levels'); renderBody(); });
