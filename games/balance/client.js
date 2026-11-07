@@ -1946,6 +1946,7 @@ void main() {
       saveDone(this.done);
       this.#markDone();
     }
+    if (ph === PHASE.MENU) this.#clearPlayView();
     this.menu.classList.toggle('bb-show', ph === PHASE.MENU);
     this.result.classList.toggle('bb-show', ph === PHASE.WON || ph === PHASE.LOST);
     this.result.classList.toggle('bb-won', ph === PHASE.WON);
@@ -2096,6 +2097,14 @@ void main() {
     }
   }
 
+  /** Everything that belongs to playing a level (the HUD, the countdown, the result) is switched off: the list of levels and the level share no visual state. */
+  #clearPlayView() {
+    this.cdEl.classList.remove('bb-show');
+    this.dots.forEach((d) => d.classList.remove('bb-on'));
+    this.hud.classList.add('bb-hide');
+    this.result.classList.remove('bb-show', 'bb-won');
+  }
+
   #updateHud(s) {
     const solo = this.players.length <= 1;
     this.menuSub.textContent = this.spectator ? 'Watching: the players are choosing a level…' : 'Choose a level';
@@ -2107,7 +2116,7 @@ void main() {
 
     const playing = s.ph !== PHASE.MENU;
     this.hud.classList.toggle('bb-hide', !playing);
-    if (!playing) return;
+    if (!playing) { this.#clearPlayView(); return; } // (the list of levels shows nothing of the level that was just played)
     const lv = levels[s.lv];
     const inWorld = levels.filter((l) => worldKeyOf(l) === worldKeyOf(lv));
     this.titleEl.textContent = lv ? `${worlds[worldKeyOf(lv)]?.name ?? ''} · ${inWorld.indexOf(lv) + 1}. ${lv.name}` : '';

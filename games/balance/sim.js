@@ -298,6 +298,7 @@ export class BalanceGame {
     if (!add && req.op !== 'update') return fail('unknown request');
     let file;
     let text;
+    let more = null; // a second file to write: [name, text]
     let index = -1;
     if (req.kind === 'level') {
       const lv = req.value;
@@ -345,11 +346,25 @@ export class BalanceGame {
       const key = req.key;
       if (typeof key !== 'string' || !/^[A-Za-z][\w-]{0,39}$/.test(key)) return fail('a shape name starts with a letter and has at most 40 letters, digits, - or _');
       const exists = Object.hasOwn(next.shapes, key);
+      const was = !add && typeof req.was === 'string' && req.was !== key ? req.was : null; // an update with `was` RENAMES the shape (and the levels that use it)
       if (add && exists) return fail(`there is a shape called ${key} already: use Update shape`);
-      if (!add && !exists) return fail(`there is no shape called ${key} in _shapes.js: use Add shape`);
+      if (was) {
+        if (!Object.hasOwn(next.shapes, was)) return fail(`there is no shape called ${was} in _shapes.js (renamed there already?): reload the page and try again`);
+        if (exists) return fail(`there is a shape called ${key} already`);
+      } else if (!add && !exists) return fail(`there is no shape called ${key} in _shapes.js: use Add shape`);
       if (!Array.isArray(req.value)) return fail('that is not a shape');
-      next.shapes[key] = req.value;
       next.shapeCategories ??= {};
+      if (was) { // the new name takes the place of the old one in the list of shapes, and in every level
+        next.shapes = Object.fromEntries(Object.entries(next.shapes).map(([k, v]) => (k === was ? [key, req.value] : [k, v])));
+        delete next.shapeCategories[was];
+        for (const L of next.levels) {
+          for (const b of L.initialBlocks ?? []) if (b.shape === was) b.shape = key;
+          for (const b of L.shapes ?? []) if (b.shape === was) b.shape = key;
+        }
+        more = ['_levels.js', serializeLevels(next.levels, next.worlds)];
+      } else {
+        next.shapes[key] = req.value;
+      }
       if (typeof req.category === 'string' && req.category.trim()) next.shapeCategories[key] = req.category.trim().slice(0, 40);
       else delete next.shapeCategories[key];
       file = '_shapes.js';
@@ -362,6 +377,7 @@ export class BalanceGame {
     if (typeof Deno === 'undefined' || typeof Deno.writeTextFile !== 'function') return fail('this server cannot write files');
     try {
       await Deno.writeTextFile(new URL(`./${file}`, import.meta.url), text);
+      if (more) { file = `${file} and ${more[0]}`; await Deno.writeTextFile(new URL(`./${more[0]}`, import.meta.url), more[1]); }
     } catch (e) {
       const denied = /permission|capable|--allow-write|requires write/i.test(`${e?.name} ${e?.message}`);
       return fail(denied

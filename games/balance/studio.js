@@ -508,8 +508,8 @@ function shapeStudio(view, api) {
   function relayout() {
     const d = D();
     const bowl = bowlFull(d, bowlKey());
-    const gY = S.groundYOf(bowl);
-    const start = bowl.a + bowl.t + 5;
+    const gY = Math.round(S.groundYOf(bowl)); // (every cell starts on a whole grid point, so shapes can be compared side by side)
+    const start = Math.ceil(bowl.a + bowl.t + 5);
     const maxX = start + 46;
     const cells = {};
     const rows = [];
@@ -523,13 +523,13 @@ function shapeStudio(view, api) {
       const hh = b[3] - b[1];
       if (x > start && x + w > maxX) {
         rows.push(row);
-        y -= rowH + 4;
+        y -= Math.ceil(rowH) + 4;
         x = start;
         rowH = 0;
         row = { y, x0: start - 2, x1: start };
       }
       cells[key] = { ox: x, oy: y, ax: b[0], ay: b[1], w, h: hh };
-      x += w + 2.5;
+      x += Math.ceil(w) + 2;
       rowH = Math.max(rowH, hh);
       row.x1 = Math.max(row.x1, x);
     }
@@ -935,6 +935,9 @@ function shapeStudio(view, api) {
       L.initialBlocks.forEach((b) => { if (b.shape === from) b.shape = to; });
       L.shapes.forEach((s) => { if (s.shape === from) s.shape = to; });
     }
+    const orig = renamedFrom[from] ?? (inFile(from) ? from : undefined); // (the name this shape has in _shapes.js: saving then renames it there too)
+    delete renamedFrom[from];
+    if (orig && orig !== to) renamedFrom[to] = orig;
     st.sel = to;
     st.msg = '';
     layout = null;
@@ -1076,6 +1079,8 @@ function shapeStudio(view, api) {
     const nameIn = h('input', { type: 'text', placeholder: 'new shape name', value: st.newName });
     nameIn.addEventListener('input', () => { st.newName = nameIn.value; });
     nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') newEmpty(nameIn.value); });
+    const renameIn = h('input', { type: 'text', value: st.sel ?? '', maxlength: 40 });
+    renameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') rename(st.sel, renameIn.value.trim()); });
     const catIn = h('input', { type: 'text', list: 'bb-st-cats', maxlength: 40, placeholder: S.OTHER_CATEGORY, value: categoryOfSel(st.sel) });
     catIn.addEventListener('change', () => setCategory(st.sel, catIn.value));
     catIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') catIn.blur(); });
@@ -1085,6 +1090,7 @@ function shapeStudio(view, api) {
       st.sel ? h('div', { class: 'bb-st-row' },
         btn('Duplicate', () => { let n = `${st.sel}_copy`; for (let i = 2; D().shapes[n]; i++) n = `${st.sel}_copy${i}`; const cat = categoryOfSel(st.sel); addShape(n, clone(D().shapes[st.sel])); if (st.sel === n && cat) setCategory(n, cat); }),
         btn('Delete', () => removeShape(st.sel), 'bb-dbg-danger')) : null,
+      st.sel ? h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'name'), renameIn, btn('Rename', () => rename(st.sel, renameIn.value.trim()), '', 'Rename this shape (also in the levels that use it). Saving it with Update shape renames it in the files too')) : null,
       st.sel ? h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'category'), catIn, catList) : null,
       st.sel ? h('div', { class: 'bb-st-row' }, h('span', { class: 'bb-st-mini' }, 'export'),
         btn('Copy', (e) => copyText(shapeSource(st.sel), e.currentTarget), '', 'Copy as a line for the shapes table in _shapes.js')) : null,
@@ -1187,21 +1193,25 @@ function shapeStudio(view, api) {
   const head = h('div', { class: 'bb-st-head' });
   const probEl = h('span', { class: 'bb-st-prob' });
   const renderProb = () => api.showProblems(probEl);
+  const renamedFrom = {}; // new name -> the name in _shapes.js
   const inFile = (key) => Object.hasOwn(view.debugRoomDefs()?.shapes ?? {}, key); // is this shape in _shapes.js (as far as the room knows)?
   function saveShape() {
     const key = st.sel;
     const value = D().shapes[key];
     if (!value) return;
     if (api.problems().length) { st.msg = `Fix this first: ${api.problems()[0]}`; renderList(); return; }
-    const add = !inFile(key);
+    const was = renamedFrom[key];
+    const add = !inFile(key) && !was;
     confirmDialog({
       title: add ? 'Add shape' : 'Update shape',
       text: add
         ? `Are you sure you want to add shape “${key}”? It is written to _shapes.js and every room gets it.`
-        : `Are you sure you want to update shape “${key}”? It replaces the shape in _shapes.js and every room gets the new version.`,
+        : was
+          ? `Are you sure you want to rename shape “${was}” to “${key}”? It is renamed in _shapes.js and in every level of _levels.js that uses it, and every room gets the change.`
+          : `Are you sure you want to update shape “${key}”? It replaces the shape in _shapes.js and every room gets the new version.`,
       label: add ? 'Add shape' : 'Update shape',
-      run: () => api.saveItem({ kind: 'shape', op: add ? 'add' : 'update', key, value: clone(value), category: D().shapeCategories?.[key] ?? '' }),
-      onDone: (r) => { st.msg = ''; st.saved = add ? `Shape “${key}” was added to ${r.file}.` : `Shape “${key}” was updated in ${r.file}.`; renderHead(); },
+      run: () => api.saveItem({ kind: 'shape', op: add ? 'add' : 'update', key, was, value: clone(value), category: D().shapeCategories?.[key] ?? '' }),
+      onDone: (r) => { delete renamedFrom[key]; st.msg = ''; st.saved = add ? `Shape “${key}” was added to ${r.file}.` : `Shape “${key}” was updated in ${r.file}.`; renderHead(); },
     });
   }
   function renderHead() {

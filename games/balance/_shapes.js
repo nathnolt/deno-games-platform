@@ -14,35 +14,39 @@
 // shapeCategories    the category of each shape ('Basic', 'Letters' ...): the shape selects show the shapes under these names. No category = 'Other'.
 
 export const shapes = {
-  square1: [{ type: 'poly', points: '0,0 4,0 4,4 0,4' }],
+  B: [{ type: 'poly', points: '0,0 4,0 4,4 0,4' }],
   heart: [
     { type: 'poly', points: '4.682,2.121 2.561,4.242 0.44,2.121 2.561,0' },
     { type: 'circle', diameter: 3, x: 3.621, y: 3.1815 },
     { type: 'circle', diameter: 3, x: 1.5, y: 3.1815 },
   ],
-  L: [{ type: 'poly', points: '0,0 0,7 2,7 2,0' }, { type: 'poly', points: '0,2 4,2 4,0 0,0' }],
-  L2: [{ type: 'poly', points: '4,0 4,7 2,7 2,0' }, { type: 'poly', points: '4,2 0,2 0,0 4,0' }],
-  S: [{ type: 'poly', points: '0,4 0,2 4,2 4,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
-  S2: [{ type: 'poly', points: '4,4 4,2 8,2 8,4' }, { type: 'poly', points: '2,2 2,0 6,0 6,2' }],
-  T: [{ type: 'poly', points: '0,0 0,2 6,2 6,0 0,0' }, { type: 'poly', points: '2,0 2,4 4,4 4,0' }],
+  L: [{ type: 'poly', points: '0,2 0,6 2,6 2,2' }, { type: 'poly', points: '0,2 4,2 4,0 0,0' }],
+  J: [{ type: 'poly', points: '4,2 4,6 2,6 2,2' }, { type: 'poly', points: '4,2 0,2 0,0 4,0' }],
+  Z: [{ type: 'poly', points: '0,5 0,3 4,3 4,5' }, { type: 'poly', points: '2,3 2,1 6,1 6,3' }],
+  S: [{ type: 'poly', points: '6,5 6,3 2,3 2,5' }, { type: 'poly', points: '4,3 4,1 0,1 0,3' }],
+  T: [{ type: 'poly', points: '0,0 0,2 6,2 6,0 0,0' }, { type: 'poly', points: '2,2 2,4 4,4 4,2' }],
   triangle: [{ type: 'poly', points: '0,0 6,6 6,0' }],
   plus: [{ type: 'poly', points: '3,0 3,6 5,6 5,0' }, { type: 'poly', points: '1,4 7,4 7,2 1,2' }],
   arrow: [{ type: 'poly', points: '-4,1 1,1 1,-1 -4,-1' }, { type: 'poly', points: '0,2.828 2.828,0 0,-2.828' }],
   circle: [{ type: 'circle', diameter: 5 }],
   what: [{ type: 'circle', diameter: 2 }, { type: 'circle', diameter: 2, x: 6, y: 1 }],
+  I: [{ type: 'poly', points: '0,2 0,0 8,0 8,2' }],
+  cutcorner: [{ type: 'poly', points: '0,5 5,0 0,0' }, { type: 'poly', points: '5,5 2.5,2.5 5,0' }],
+  halfcircle: [{ type: 'circle', diameter: 6, x: 3, y: 3 }, { type: 'poly', points: '0,3 6,3 6,0 0,0', cut: true }],
 };
 
 export const shapeCategories = {
-  square1: 'Basic',
+  B: 'Tetris',
   heart: 'Fancy',
   L: 'Tetris',
-  L2: 'Tetris',
+  J: 'Tetris',
+  Z: 'Tetris',
   S: 'Tetris',
-  S2: 'Tetris',
   T: 'Tetris',
   triangle: 'Basic',
   plus: 'Fancy',
   arrow: 'Fancy',
   circle: 'Basic',
   what: 'Fancy',
+  I: 'Tetris',
 };
