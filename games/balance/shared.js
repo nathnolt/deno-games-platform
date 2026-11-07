@@ -57,6 +57,13 @@ export function shapeGroups(keys, cats = shapeCategories) {
  */
 export const DEBUG = true;
 
+/** The colours a player can choose for themselves (the defaults of the four seats are among them). */
+export const PLAYER_COLORS = [
+  ['red', '#ef4444'], ['orange', '#f97316'], ['yellow', '#eab308'], ['green', '#22c55e'], ['cyan', '#06b6d4'],
+  ['blue', '#3b82f6'], ['purple', '#8b5cf6'], ['magenta', '#d946ef'], ['grey', '#6b7280'],
+];
+export const isPlayerColor = (c) => typeof c === 'string' && PLAYER_COLORS.some(([, hex]) => hex === c.toLowerCase());
+
 /** @type {import('../../shared/settings.js').GameMeta} */
 export const meta = {
   id: 'balance',

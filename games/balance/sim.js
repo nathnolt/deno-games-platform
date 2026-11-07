@@ -9,7 +9,7 @@
 // The gameplay is 2D (x, y); the 3D look is purely client-side.
 import {
   applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, groundYOf, inDrop, levels, LOSE,
-  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, orderLevels, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
+  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, orderLevels, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, isPlayerColor, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 let planck = null;
@@ -181,9 +181,15 @@ export class BalanceGame {
       if (item) tbl.push([item.id, SHAPE_KEYS.indexOf(item.shape), MATERIAL_KEYS.indexOf(item.material), i, item.heldBy ? (this.players.get(item.heldBy)?.slot ?? -1) : -1]);
     });
     const nx = this.queue.slice(0, PREVIEW_COUNT).map((item) => [item.id, SHAPE_KEYS.indexOf(item.shape), item.slot]); // the next blocks to appear: id, SHAPE (not the material) and the place of the row where they show as an outline
+    const pc = {}; // chosen colours by seat: { slot: '#rrggbb' } (a seat without one has its default colour, meta.seatColors)
+    for (const pl of this.players.values()) if (pl.color) pc[pl.slot] = pl.color;
+    const cu = {}; // the pointers of the players: { slot: [x, y, hand] }
+    for (const pl of this.players.values()) if (pl.cur) cu[pl.slot] = pl.cur;
     return {
       run: this.run,
+      ...(Object.keys(cu).length ? { cu } : {}),
       ph: this.phase,
+      ...(Object.keys(pc).length ? { pc } : {}),
       lv: this.levelIdx,
       b,
       tbl,
@@ -205,6 +211,15 @@ export class BalanceGame {
   // ── input ──
   /** Nobody is in charge: every seated player may choose levels, restart and go back to the menu. */
   #input(id, p, d) {
+    if (d.cur !== undefined) { // where the player's pointer is, so everybody can see their hand: [x, y, hand] (hand 0 open, 1 pointing, 2 fist) or null when it left
+      const c = d.cur;
+      p.cur = Array.isArray(c) && c.length === 3 && c.every(Number.isFinite) && Math.abs(c[0]) < 1000 && Math.abs(c[1]) < 1000 && [0, 1, 2].includes(c[2]) ? [round2(c[0]), round2(c[1]), c[2]] : null;
+      return;
+    }
+    if (typeof d.color === 'string') { // a player picks their own colour (one of PLAYER_COLORS): everybody sees it in the snapshot (`pc`), whatever the phase
+      if (isPlayerColor(d.color)) p.color = d.color.toLowerCase();
+      return;
+    }
     if (DEBUG && (d.debugChunk || d.defsRequest)) return this.#debugInput(id, d);
     if (DEBUG && d.lab) return this.#labInput(id, p, d.lab);
     const settled = performance.now() - this.startedAt > this.grace * 1000;

@@ -3,8 +3,7 @@
 
 /* the game fills the shell's container; the WebGL canvas and the DOM overlays are stacked inside it */
 .bb-root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #e7e2d6; --bb-ink: #2f372f; --bb-ink-soft: #5e665d; user-select: none; -webkit-user-select: none; color: var(--bb-ink); font-size: 14px; }
-.bb-canvas { display: block; margin-left: var(--bb-dock, 0px); margin-top: var(--bb-top, 0px); width: calc(100% - var(--bb-dock, 0px)); height: calc(100% - var(--bb-top, 0px)); touch-action: none; cursor: default; }
-.bb-canvas.bb-grab { cursor: grab; }
+.bb-canvas { display: block; margin-left: var(--bb-dock, 0px); margin-top: var(--bb-top, 0px); width: calc(100% - var(--bb-dock, 0px)); height: calc(100% - var(--bb-top, 0px)); touch-action: none; cursor: default; } /* (the hand cursors are set by client.js: #syncCursor) */
 
 /* ── HUD ── */
 .bb-hud { position: absolute; inset: var(--bb-top, 0px) 0 0 var(--bb-dock, 0px); pointer-events: none; padding: .75rem 1rem; display: flex; flex-direction: column; }
@@ -39,8 +38,18 @@
 .bb-btn.bb-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
 
 /* who is playing (hidden when you are alone) */
-.bb-legend { display: flex; flex-direction: column; gap: .2rem; font-size: .9em; color: var(--bb-ink-soft); }
-.bb-legend.bb-hide { display: none; }
+.bb-legend { display: flex; flex-direction: column; align-items: flex-start; gap: .4rem; width: max-content; max-width: 100%; padding: .55rem .75rem; font-size: 1.05em; background: rgba(0, 0, 0, .55); border-radius: 8px; pointer-events: auto; }
+.bb-legend:empty { display: none; }
+.bb-prow { display: flex; align-items: center; gap: .55rem; }
+.bb-pick-none { width: 1.5rem; height: 1.5rem; flex: none; }
+.bb-pname { font-weight: 700; text-shadow: 0 0 2px rgba(0, 0, 0, .45), 0 1px 1px rgba(0, 0, 0, .3); }
+.bb-pick { position: relative; display: inline-flex; }
+.bb-pcolor { width: 1.5rem; height: 1.5rem; padding: 0; border: 2px solid #1f2937; border-radius: 50%; cursor: pointer; box-shadow: 0 1px 3px rgba(0, 0, 0, .35); }
+.bb-pcolor:hover { transform: scale(1.1); }
+.bb-palette { display: none; position: absolute; top: calc(100% + .4rem); left: 0; z-index: 20; grid-template-columns: repeat(3, 1.6rem); gap: .4rem; padding: .5rem; background: #fff; border: 2px solid #1f2937; border-radius: 10px; box-shadow: 0 4px 14px rgba(0, 0, 0, .35); }
+.bb-palette.bb-open { display: grid; }
+.bb-swatch { width: 1.6rem; height: 1.6rem; padding: 0; border: 2px solid #1f2937; border-radius: 50%; cursor: pointer; }
+.bb-swatch:hover { transform: scale(1.12); }
 .bb-player { display: flex; align-items: center; gap: .45em; }
 .bb-dot { width: .7em; height: .7em; border-radius: 50%; background: var(--c, #fff); flex: none; }
 
@@ -90,7 +99,6 @@ button.bb-card:disabled { opacity: .6; cursor: default; }
 
 @media (max-width: 720px) {
   .bb-hint { display: none; }
-  .bb-legend { display: none; }
   .bb-hud-top { grid-template-columns: 1fr auto; }
   .bb-hud-mid { grid-column: 1 / -1; grid-row: 2; }
 }

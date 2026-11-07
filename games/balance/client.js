@@ -2,13 +2,14 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
 const PRISTINE = DEBUG ? cloneDefinitions() : null;
 import { flatNormals, parseObj } from './obj.js';
 import { svg } from './ui.js';
+import { CURSOR_SIZE, handCanvas, handCursors, handHot } from './hands.js';
 import { deformShaders, SHADOW_GLSL, refractShaders, shaders, transparentShaders, vertexShader, waveVertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
@@ -475,6 +476,19 @@ const smooth = (t) => { const k = Math.min(1, Math.max(0, t)); return k * k * (3
 const backOf = (prog) => smooth((prog - BACK_FROM) / (1 - BACK_FROM));
 
 class BalanceView {
+  pcKey = ''; //            the chosen colours of the last snapshot (as text): when it changes, everything that shows a colour is updated
+  nameEls = []; //          [slot, element] of every name at the top: its text colour follows the colour of the player
+  colorIn = null; //        your own colour circle at the top (a button); `palette` is the popup with the nine colours
+  palette = null;
+  colorSent = false; //     the colour you chose last time (kept in this browser) has been sent to the room
+  colorSentAt = 0;
+  colorTimer = 0;
+  pendingColor = '';
+  hands = null; //          the three cursors (open / point / fist) in your colour: #syncCursor puts the right one on the canvas
+  handCursorNow = ''; //    which of them is on the canvas now
+  handViews = new Map(); //  slot -> { sprite, key, x, y }: the hands of the OTHER players, drawn where their pointers are
+  curSentAt = 0;
+  handTex = new Map(); //   colour -> texture of the closed hand shown over the block another player holds
   markerGeo = Object.assign(new THREE.SphereGeometry(0.55, 16, 12), { userData: { shared: true } }); // (never disposed with a scene)
   dotGeo = Object.assign(new THREE.CircleGeometry(1, 32), { userData: { shared: true } }); // the stack-limit lamp on glass
   shardGeo = Object.assign(new THREE.BoxGeometry(1, 1, 1), { userData: { shared: true } });
@@ -609,6 +623,7 @@ class BalanceView {
     this.#buildUi();
     this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.cdEl, this.menu, this.result);
     ctx.container.append(this.root);
+    this.hands = handCursors(meta.seatColors[ctx.me.slot] ?? '#ffffff'); // your cursor is a hand in YOUR colour
     this.#setScene(null);
 
     this.observer = new ResizeObserver(() => this.#resize());
@@ -621,10 +636,12 @@ class BalanceView {
       c.addEventListener('pointermove', this.#onMove);
       c.addEventListener('pointerup', this.#onUp);
       c.addEventListener('pointercancel', this.#onUp);
+      c.addEventListener('pointerleave', this.#onLeave);
       c.addEventListener('wheel', this.#onWheel, { passive: false });
       c.addEventListener('contextmenu', this.#onContext);
       window.addEventListener('keydown', this.#onKeyDown);
     }
+    document.addEventListener('pointerdown', this.#closePalette);
     this.onRoom(ctx.room);
     this.raf = requestAnimationFrame(this.#frame);
 
@@ -640,16 +657,72 @@ class BalanceView {
   }
 
   // ── GameView ──
+  #closePalette = (e) => { if (this.palette && !e.target.closest?.('.bb-pick')) this.palette.classList.remove('bb-open'); };
+
+  /** The colour of a seat: the one its player chose, else the default of the seat. */
+  #colorOf(slot) {
+    return this.snap?.pc?.[slot] ?? meta.seatColors[slot] ?? '#ffffff';
+  }
+
   onRoom(room) {
     this.players = room.players.filter((p) => p.slot >= 0);
-    this.legend.replaceChildren(
-      ...this.players.map((p) => {
-        const dot = el('span', { class: 'bb-dot' });
-        dot.style.setProperty('--c', meta.seatColors[p.slot] ?? '#fff'); // the colour is the only dynamic style; the rest is in style.css
-        return el('div', { class: 'bb-player' }, dot, p.id === this.ctx.me.id ? `${p.name} (you)` : p.name);
-      }),
-    );
+    // the names at the top, each in the colour of its player; next to your own name the colour input (a change goes to everybody)
+    this.nameEls = [];
+    this.colorIn = null;
+    const kids = [];
+    for (const p of this.players) {
+      const mine = p.id === this.ctx.me.id;
+      const name = el('span', { class: 'bb-pname' }, p.name);
+      name.style.color = this.#colorOf(p.slot);
+      this.nameEls.push([p.slot, name]);
+      if (mine && !this.spectator) { // your colour circle, left of your name: it opens the nine colours to choose from
+        const circle = el('button', { type: 'button', class: 'bb-pcolor', title: 'Your colour' });
+        circle.style.background = this.#colorOf(p.slot);
+        const palette = el('div', { class: 'bb-palette' }, ...PLAYER_COLORS.map(([label, hex]) => {
+          const b = el('button', { type: 'button', class: 'bb-swatch', title: label, 'aria-label': label });
+          b.style.background = hex;
+          b.addEventListener('click', () => { this.#setMyColor(hex, true); palette.classList.remove('bb-open'); });
+          return b;
+        }));
+        circle.addEventListener('click', () => palette.classList.toggle('bb-open'));
+        this.colorIn = circle;
+        this.palette = palette;
+        kids.push(el('div', { class: 'bb-prow' }, el('span', { class: 'bb-pick' }, circle, palette), name));
+      } else {
+        kids.push(el('div', { class: 'bb-prow' }, el('span', { class: 'bb-pick bb-pick-none' }), name)); // (the empty place keeps the names in a straight column)
+      }
+    }
+    this.legend.replaceChildren(...kids);
     if (this.snap) this.#updateHud(this.snap);
+  }
+
+  /** You picked a colour: remember it, and tell the room (at most ten times a second while the picker is being dragged; the last colour always goes). */
+  #setMyColor(c, force) {
+    if (!PLAYER_COLORS.some(([, hex]) => hex === c)) return;
+    this.pendingColor = c;
+    try { localStorage.setItem('balance.color', c); } catch { /* ignore */ }
+    const flush = () => {
+      clearTimeout(this.colorTimer);
+      this.colorTimer = 0;
+      this.colorSentAt = performance.now();
+      this.ctx.sendInput({ color: this.pendingColor });
+      if (this.sandbox) this.#sandboxSend({ color: this.pendingColor }); // (the local game of the debug menu has its own copy of you)
+    };
+    if (force || performance.now() - this.colorSentAt >= 100) flush();
+    else if (!this.colorTimer) this.colorTimer = setTimeout(flush, 100);
+  }
+
+  /** A colour in the snapshot changed: the names, your input, your hand and the hands over the blocks of the others follow. */
+  #colorsChanged() {
+    if (!this.spectator) {
+      this.hands = handCursors(this.#colorOf(this.ctx.me.slot));
+      this.handCursorNow = ''; // (#syncCursor puts the new hand on the canvas)
+    }
+    for (const [slot, name] of this.nameEls) name.style.color = this.#colorOf(slot);
+    if (this.colorIn) this.colorIn.style.background = this.#colorOf(this.ctx.me.slot);
+    for (const h of this.handViews.values()) h.key = ''; // (the hands of the others get their new colour on the next frame)
+    for (const t of this.handTex.values()) t.dispose();
+    this.handTex.clear();
   }
 
   onSnapshot(s) {
@@ -666,6 +739,14 @@ class BalanceView {
   /** Draw a snapshot: the room's (`fromRoom`) or the local game's. */
   #applySnapshot(s, fromRoom) {
     this.snap = s;
+    const pcKey = JSON.stringify(s.pc ?? null);
+    if (pcKey !== this.pcKey) { this.pcKey = pcKey; this.#colorsChanged(); }
+    if (!this.colorSent && fromRoom && !this.spectator) { // the colour you chose the last time you were here (kept in this browser) goes to the room once
+      this.colorSent = true;
+      let c = '';
+      try { c = localStorage.getItem('balance.color') ?? ''; } catch { /* ignore */ }
+      if (c !== this.#colorOf(this.ctx.me.slot)) this.#setMyColor(c, true); // (a colour that is not one of the nine is ignored there)
+    }
     const now = performance.now();
     if (DEBUG && fromRoom) this.#syncDefs(s);
 
@@ -741,10 +822,12 @@ class BalanceView {
     this.sandbox = null;
     this.observer.disconnect();
     const c = this.renderer.domElement;
+    document.removeEventListener('pointerdown', this.#closePalette);
     c.removeEventListener('pointerdown', this.#onDown);
     c.removeEventListener('pointermove', this.#onMove);
     c.removeEventListener('pointerup', this.#onUp);
     c.removeEventListener('pointercancel', this.#onUp);
+    c.removeEventListener('pointerleave', this.#onLeave);
     c.removeEventListener('wheel', this.#onWheel);
     c.removeEventListener('contextmenu', this.#onContext);
     window.removeEventListener('keydown', this.#onKeyDown);
@@ -762,6 +845,10 @@ class BalanceView {
     this.fx.kawase?.maskMats.forEach((m) => m.dispose());
     this.fx.depthMat?.dispose();
     this.markerGeo.dispose();
+    for (const h of this.handViews.values()) h.sprite.material.dispose();
+    this.handViews.clear();
+    for (const t of this.handTex.values()) t.dispose();
+    this.handTex.clear();
     this.dotGeo.dispose();
     this.shardGeo.dispose();
     this.renderer.dispose();
@@ -1924,6 +2011,72 @@ void main() {
   }
 
   /** Another player's held block carries a small dot in their seat colour, so you can tell who holds what (the block itself is never tinted). */
+  /** Your hand: closed while a block is in it, pointing over a block you can pick up, open otherwise. */
+  #syncCursor() {
+    if (!this.hands) return;
+    const kind = this.#carrying() ? 'fist' : this.renderer.domElement.classList.contains('bb-grab') ? 'point' : 'open';
+    if (kind === this.handCursorNow) return;
+    this.handCursorNow = kind;
+    this.renderer.domElement.style.cursor = this.hands[kind];
+  }
+
+  /** The picture of a hand (kind: open / point / fist) in one colour, made once (it shows where another player's pointer is). */
+  #handTexture(kind, color) {
+    const key = `${kind}|${color}`;
+    let t = this.handTex.get(key);
+    if (!t) {
+      t = new THREE.Texture();
+      t.colorSpace = THREE.SRGBColorSpace;
+      handCanvas(kind, color, 128, (c) => { t.image = c; t.needsUpdate = true; }); // (it appears as soon as the SVG has loaded)
+      this.handTex.set(key, t);
+    }
+    return t;
+  }
+
+  /**
+   * The hands of the other players. They are drawn as pictures that always have the size of your own cursor (so a hand is as big as yours, whatever
+   * the zoom), where the pointer of the player is (a point of the play plane), and they glide there between the messages.
+   */
+  #updateHands(dt) {
+    const cu = this.snap?.ph === PHASE.MENU ? null : this.snap?.cu;
+    const held = new Set();
+    for (const v of this.bodyViews.values()) if (v.st === BODY.HELD || v.st === BODY.HELD_BAD) held.add(v.owner);
+    const size = (CURSOR_SIZE * 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) / Math.max(1, this.renderer.domElement.clientHeight);
+    const k = 1 - Math.exp(-dt * 25);
+    for (const [slot, h] of this.handViews) {
+      if (cu?.[slot] && slot !== this.ctx.me.slot) continue;
+      h.sprite.removeFromParent();
+      h.sprite.material.dispose();
+      this.handViews.delete(slot);
+    }
+    for (const [slot, c] of Object.entries(cu ?? {})) {
+      const sl = +slot;
+      if (sl === this.ctx.me.slot) continue;
+      const kind = held.has(sl) ? 'fist' : c[2] === 2 ? 'open' : c[2] === 1 ? 'point' : 'open'; // (a fist without a block in it is a stale message)
+      const color = this.#colorOf(sl);
+      let h = this.handViews.get(sl);
+      if (!h) {
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false, sizeAttenuation: false }));
+        sprite.renderOrder = 10;
+        this.frontScene.add(sprite);
+        h = { sprite, key: '', x: c[0], y: c[1] };
+        this.handViews.set(sl, h);
+      }
+      const key = `${kind}|${color}`;
+      if (h.key !== key) {
+        h.key = key;
+        h.sprite.material.map = this.#handTexture(kind, color);
+        h.sprite.material.needsUpdate = true;
+        const [hx, hy] = handHot(kind);
+        h.sprite.center.set(hx / 32, 1 - hy / 32); // (the hot spot of the hand is at the pointer)
+      }
+      h.x += (c[0] - h.x) * k;
+      h.y += (c[1] - h.y) * k;
+      h.sprite.position.set(h.x, h.y, 0);
+      h.sprite.scale.set(size, size, 1);
+    }
+  }
+
   #dropMarker(v) {
     if (!v.marker) return;
     v.marker.removeFromParent();
@@ -2113,10 +2266,8 @@ void main() {
   }
 
   #updateHud(s) {
-    const solo = this.players.length <= 1;
     this.menuSub.textContent = this.spectator ? 'Watching: the players are choosing a level…' : 'Choose a level';
     this.cards.forEach((c) => (c.disabled = this.spectator));
-    this.legend.classList.toggle('bb-hide', solo);
     this.hintEl.textContent = this.spectator
       ? 'Spectating'
       : 'Press a block on the table, drag it above the bowl and let go to drop it (red = not here, it goes back) · Q / E or mouse wheel turns it by 45° · right-click or X puts it back · drag the background to turn the camera, wheel zooms, right-drag moves (C resets)';
@@ -2251,16 +2402,8 @@ void main() {
       v.mats.forEach((m) => { m.uniforms.uReveal.value = v.reveal; });
     }
 
-    for (const v of this.bodyViews.values()) {
-      const heldByOther = (v.st === BODY.HELD || v.st === BODY.HELD_BAD) && v.owner !== this.ctx.me.slot;
-      if (heldByOther && !v.marker) {
-        v.marker = new THREE.Mesh(this.markerGeo, new THREE.MeshBasicMaterial({ color: meta.seatColors[v.owner] ?? '#ffffff' }));
-        this.frontScene.add(v.marker);
-      } else if (!heldByOther) {
-        this.#dropMarker(v);
-      }
-      if (v.marker) v.marker.position.set(v.group.position.x, v.group.position.y + v.size.radius * v.group.scale.x + 1.4, v.group.position.z);
-    }
+    this.#syncCursor();
+    this.#updateHands(dt);
     for (const v of this.bodyViews.values()) {
       const want = v.st === BODY.HELD || v.st === BODY.HELD_BAD ? this.frontScene : this.scene;
       if (v.group.parent !== want) want.add(v.group);
@@ -2846,14 +2989,28 @@ void main() {
     }
     const p = this.#toWorld(e);
     if (!this.#carrying()) {
-      this.renderer.domElement.classList.toggle('bb-grab', this.snap?.ph === PHASE.PLAY && this.#tableAt() !== null);
+      const over = this.snap?.ph === PHASE.PLAY && this.#tableAt() !== null;
+      this.renderer.domElement.classList.toggle('bb-grab', over);
+      this.#sendCursor(p, over ? 1 : 0);
       return;
     }
     if (!p || this.mode === 'releasing') return; // (just let go: the block stays where it is until it drops or is picked up again)
     this.ptr = p;
     this.#follow();
     this.#sendMove();
+    this.#sendCursor(p, 2);
   };
+
+  /** Tell the room where your pointer is (point of the play plane + which hand: 0 open, 1 pointing, 2 fist), so the others see your hand. */
+  #sendCursor(p, hand, force = false) {
+    if (!p || this.spectator) return;
+    const now = performance.now();
+    if (!force && now - this.curSentAt < SEND_GAP) return;
+    this.curSentAt = now;
+    this.ctx.sendInput({ cur: [Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100, hand] });
+  }
+
+  #onLeave = () => { if (!this.spectator && !this.#carrying()) this.ctx.sendInput({ cur: null }); }; // (the pointer left the game: the others stop seeing your hand)
 
   #onUp = (e) => {
     if (this.hookDrag) {
