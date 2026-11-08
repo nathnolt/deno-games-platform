@@ -58,7 +58,7 @@ export const materials = {
   wood:            { friction: 10, weight: 10, shader: 'wood' },
   glass:           { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
   crackedGlass:    { friction: 4, weight: 5, shader: 'crackedGlass', stackLimit: 0, noLamp: true }, // breaks as soon as one block rests on it
-  static:          { static: true, friction: 12, shader: 'stone1' },
+  static: { static: true, friction: 12, shader: 'stone1', shaderParams: { uBump: 0.255, uScale: 3.945, uColor: '#6e6e6e' } },
   waterBlock:      { static: true, friction: 0, hazard: true, shader: 'waterBlock' }, // a block of water that stays where it is: touch it and you lose
   floatBlock:      { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
   floatierBlock:   { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.9 },
@@ -67,6 +67,7 @@ export const materials = {
   noBuildZone:     { static: true, friction: 0, noBuild: true, shader: 'noBuildZone' }, // a zone you cannot build in: a bright red outline with a see-through red inside (the shape is the zone)
   oxidizerBlock:   { friction: 8, weight: 8, shader: 'oxidizer', explodesWith: 'fuelBlock' },
 };
+
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
 // The shapes live in their own file: ./_shapes.js (the shape studio rewrites it when you press "Add shape" / "Update shape").
@@ -170,7 +171,7 @@ export const backgrounds = {
   zen1: {
     mist: '#e7e2d6',
     fog: [150, 520],
-    ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2 },
+    ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2, blur: 'light', style: 'sand' },
     models: [
       { model: 'rock', scale: 5, rotation: [0, 20, 0], translate: [-66, 0, -28] },
       { model: 'rock', scale: 7, rotation: [0, 140, 0], translate: [64, 0, -44] },
@@ -182,6 +183,24 @@ export const backgrounds = {
       { model: 'mountain', scale: 5, rotation: [0, 0, 0], translate: [0, 0, -300] },
       { model: 'mountain', scale: 4, rotation: [0, 90, 0], translate: [-170, 0, -280] },
     ],
+    blur: 3,
+    blurFar: 10,
+    light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
+    bowlHeight: 4,
+    box: { w: 110, d: 52, z: 2, shader: 'floorwood' },
+    lights: [],
+    water: {
+      shader: 'ocean',
+      params: {
+        uSunHeight: -0.1,
+        uHighlight: '#ffffff',
+        uGlitter: 0.165,
+        uWaves: 0.19,
+        uSunOwn: 0.87,
+        uSunTurn: 176.1,
+        uSunSize: 0.2,
+      },
+    },
   },
   zen2: {
     mist: '#dde4df',
@@ -197,8 +216,6 @@ export const backgrounds = {
       { model: 'mountain', scale: 4.5, rotation: [0, 0, 0], translate: [-140, 0, -280] },
     ],
   },
-
-  // indoors: a plaster wall with a mahogany window behind the bowl, wooden floor, plants, three stacked black stones
   room1: {
     mist: '#f3ecdd',
     fog: [220, 700],
@@ -212,10 +229,12 @@ export const backgrounds = {
       { model: 'plant', scale: 2.1, rotation: [0, 140, 0], translate: [56, 0, -44] },
       { model: 'plant', scale: 1.3, rotation: [0, 70, 0], translate: [-72, 0, 12] },
       { model: 'stones', scale: 1.4, rotation: [0, 30, 0], translate: [74, 0, 14] },
-      { model: 'mountain', scale: 4, rotation: [0, 0, 0], translate: [0, 0, -330] }, // seen through the window
+      { model: 'mountain', scale: 4, rotation: [0, 0, 0], translate: [0, 0, -330] },
     ],
   },
 };
+
+
 
 // ── Worlds ───────────────────────────────────────────────────────────────────────────────────────────────────
 // Levels are grouped in worlds: the menu shows a row of worlds at the top and the levels of the chosen one below it.

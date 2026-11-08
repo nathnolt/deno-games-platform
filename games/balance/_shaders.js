@@ -286,29 +286,21 @@ void main() {
   },
   stone1: {
     code: `
-// Weathered slate. ONE height drives everything: the bump is its slope and the colour follows its value (high = lighter, low = darker), so the
-// grain of the relief and the grain of the colour are the same grain. Fine layers fade out with aaFade() where they get smaller than a pixel.
+// Rock (fast): one texture noise gives the bump and the colour. Lit by the game's own sun / moon through finish(). The SETTINGS are per material
+// (debug menu, Materials tab).
+uniform float uBump;  // 0.12 [0, 1]
+uniform float uScale; // 6.0 [1, 20]
+uniform vec3 uColor;  // color 0.5 0.5 0.5
+uniform float uContrast; // 0.7 [0, 3]
+uniform float uGlare; // 0.2 [0, 1]
 void main() {
-  vec3 q = vW * 1.7 + uSeed * 11.0;
-  float fq = max(length(fwidth(q)), 1e-5);                          // how much of the pattern one pixel covers
-  float aaA = aaFade(fq * 8.0), aaB = aaFade(fq * 16.0), aaC = aaFade(fq * 30.0);
-  float lump = 0.55 * perlin(q * 1.4) + 0.4 * perlin(q * 3.6) * aaA + 0.25 * perlin(q * 8.0) * aaB;      // soft rock surface
-  float fine = perlin(q * 16.0) * aaB;                                                                    // fine grain
-  float ridge = smoothstep(0.17, 0.0, abs(perlin(q * 1.8 + 5.0 + 0.3 * perlin(q * 4.0)))); // thin wandering lines
-  float crev = ridge * smoothstep(-0.1, 0.3, perlin(q * 0.7 + 3.0));                       // crevices: only in some places, fading in and out
-  float h0 = lump + 0.35 * fine - 1.3 * crev;
-  if (uQuality > 1.5) { gNormal = bumpFromHeight(h0, 0.11); gHasN = 1.0; }
-
-  float blot = pfbm(q * 0.5);
-  vec3 c = mix(vec3(0.36, 0.38, 0.44), vec3(0.50, 0.52, 0.57), smoothstep(0.3, 0.7, blot));   // blue-grey slate, gentle patches
-  c *= 0.8 + 0.34 * smoothstep(-0.8, 0.9, h0);                                                  // the colour follows the height
-  c *= 1.0 + 0.16 * fine;                                                                       // the same fine grain, light and dark
-  float speck = smoothstep(0.6, 0.78, perlin(q * 27.0)) * aaC;
-  c = mix(c, vec3(0.66, 0.68, 0.72), speck * 0.35);                                             // a few pale mineral grains
-  c *= 1.0 - 0.55 * crev;                                                                       // dark crevices
-  gRough = roughMap(q * 0.8 + 21.0, 0.65, 0.35 * aaA) + 0.2 * crev;
-  gShine = 0.35 * (1.0 - 0.6 * crev);
-  gBlow = 0.28;
+  float h = fbm3T(vPos * uScale + uSeed * 11.0);
+  gNormal = bumpFromHeight(h, uBump);
+  gHasN = 1.0;
+  gShine = 0.5;
+  gRough = 0.85;
+  gBlow = uGlare;                      // how much the lit side is brightened and whitened by the sun (less = more visible grain)
+  vec3 c = uColor * (0.95 + uContrast * (h - 0.5));  // high parts a little lighter, low parts darker
   gl_FragColor = finish(c, 1.0);
 }`,
   },
@@ -492,5 +484,80 @@ void main() {
   float pulse = 0.92 + 0.08 * sin(uTime * 2.5);
   gl_FragColor = vec4(1.0, 0.1, 0.08, across * pulse);
 }`,
+  },
+  ocean: {
+    type: 'water',
+    code: `
+// Ocean water, optimised: the expensive swirly noise is drawn ONCE by bake() into a picture,
+// and every frame only reads that picture (2 texture reads instead of ~10 fbm calls).
+
+uniform vec3 uHighlight;      // color 1.0 0.95 0.8
+uniform float uGlitter;       // 1.0 [0, 3]
+uniform float uWaves;         // 0.14 [0, 0.4]
+uniform float uFlow;          // 1.0 [0, 4]
+uniform float uSunOwn;        // 1.0 [0, 1]
+uniform float uSunTurn;       // 180.0 [-180, 180]
+uniform float uSunHeight;     // 30.0 [-10, 90]
+
+// The sun of this water: 1 = your own sun (turn 180 = behind the water as seen from the front, height = degrees above the horizon), 0 = the sun / moon of the level
+vec3 sunDir() {
+  float a = radians(uSunTurn), e = radians(uSunHeight);
+  vec3 own = vec3(cos(e) * sin(a), sin(e), cos(e) * cos(a));
+  return normalize(mix(uLightDir, own, uSunOwn));
+}
+
+// ---------------------------------------------------------------- runs ONCE (not every frame)
+// bake 1024
+vec4 bake(vec2 uv) {
+  vec2 p = uv * 3.0;                                   // 3 noise cells across; the picture tiles every 3
+  vec2 q = vec2(fbmTile(p, 3.0), fbmTile(p + vec2(5.2, 1.3), 3.0));
+  vec2 r = vec2(fbmTile(p + 4.0 * q + vec2(1.7, 9.2), 3.0), fbmTile(p + 4.0 * q + vec2(8.3, 2.8), 3.0));
+  float f = fbmTile(p + 4.0 * r, 3.0);                 // the swirly pattern from the original
+  float h = fbmTile(p * 2.0 + 3.0 * r, 6.0);           // wave height: the same flow, finer
+  return vec4(f, length(q), h, 1.0);
+}
+
+// Sky and sun reflection. The three highlight sizes share one chain of squarings (s^2 ... s^256).
+vec3 env(vec3 r) {
+  vec3 sky = vec3(0.3, 0.55, 0.95);
+  vec3 ground = vec3(0.04, 0.1, 0.22);
+  vec3 c = mix(ground, sky, smoothstep(-0.1, 0.25, r.y));
+  float s = max(dot(r, sunDir()), 0.0);
+  float s2 = s * s;      float s4 = s2 * s2;     float s8 = s4 * s4;
+  float s16 = s8 * s8;   float s32 = s16 * s16;  float s64 = s32 * s32;
+  float s128 = s64 * s64; float s256 = s128 * s128;
+  c += uHighlight * (s256 * 4.0 + s64 * 0.8 + s8 * 0.12) * uGlitter;
+  return c;
+}
+
+void main() {
+  // the two water colours
+  vec3 deepBlue = vec3(0.02, 0.1, 0.3);
+  vec3 lightBlue = vec3(0.1, 0.55, 0.85);
+  vec3 tint = vec3(0.9, 0.95, 1.0);
+
+  // two copies of the baked picture drifting in different directions
+  float t = uTime * 0.02 * uFlow;
+  vec4 a = texture(uBake, vUv + vec2(t, t * 0.6));
+  vec4 b = texture(uBake, vUv * 1.37 + vec2(-t * 0.8, t) + 0.5);
+
+  float f = a.r;
+  vec3 water = mix(deepBlue, lightBlue, f);
+  water = mix(water, deepBlue, clamp(a.g * 0.5, 0.0, 1.0));
+  water *= 0.4 + f * 1.2;
+
+  // wave bumps -> reflection direction
+  float h = a.b * 0.7 + b.b * 0.5;
+  vec3 v = viewDir();
+  vec3 n = bumpFromHeight(h, uWaves);
+  vec3 r = reflect(-v, n);
+
+  // (1 - n.v)^4 as two squarings
+  float k = 1.0 - clamp(dot(n, v), 0.0, 1.0);
+  float k2 = k * k;
+  float fres = 0.15 + 0.85 * k2 * k2;
+  gl_FragColor = vec4(mix(water, env(r) * tint, fres), 1.0);
+}
+`,
   },
 };

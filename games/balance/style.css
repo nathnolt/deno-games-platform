@@ -317,3 +317,8 @@ button.bb-card:disabled { opacity: .6; cursor: default; }
 
 /* the flash of the whole screen when fuel and oxidizer explode */
 .bb-boom { position: absolute; inset: 0; z-index: 30; pointer-events: none; background: radial-gradient(circle, rgba(255,250,225,0.85), rgba(255,170,60,0.45) 60%, rgba(255,90,20,0.25)); opacity: 0.9; transition: opacity 0.55s ease-out; }
+
+/* the parameters of a water shader: the number has a width of its own, so it growing a digit does not push the row onto the next line */
+.bb-wp-row { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
+.bb-wp-range { width: 9em; }
+.bb-wp-num { display: inline-block; box-sizing: border-box; min-width: 4.8em; text-align: right; font-variant-numeric: tabular-nums; }

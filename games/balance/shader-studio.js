@@ -11,7 +11,7 @@ import { h } from './ui.js';
 
 const KEY = /^[A-Za-z][\w-]{0,39}$/;
 const WIDTH = 580;
-const TYPES = [['opaque', 'solid'], ['transparent', 'see-through'], ['refract', 'see-through and bends the picture behind it']];
+const TYPES = [['opaque', 'solid'], ['transparent', 'see-through'], ['refract', 'see-through and bends the picture behind it'], ['water', 'WATER of a bowl (picked in the bowl editor)']];
 const BLANK = `void main() {
   vec3 c = vec3(0.6, 0.55, 0.5);
   gl_FragColor = finish(c, 1.0);
@@ -27,7 +27,23 @@ ROUGHNESS MAP: gRough = (0 glossy .. 1 rough); it is a value per pixel, so make 
 BUMP MAP: gNormal = woodBump(q, 0.1, 1.0) or rockBump(q, 0.3, 1.0), then gHasN = 1.0;   (q = a position, the last number: 1 = a position in the
   mesh (blocks that move), 0 = in the world). Your own height: take its slope and use  gNormal = bumpedNormal(grad, 0.3, 1.0);  (see shaders.js)
 Extra light: gSpec (always), gGlint (only where the sun is not in shadow)
-Light: uLightDir, uLightCol, uAmbSky.   Camera: cameraPosition.   For see-through shaders see the glass shaders.`;
+MORE HELPERS (block and water shaders): PI, TAU, saturate, remap(v,a,b,c,d), rot2(angle), luma(c), hash11/21/22/31/33, noise3/fbm3 (vec3 value noise, 0..1),
+  voronoi(vec2) -> (distance, edge distance, cell id), palette(t,a,b,c,d), hsv2rgb / rgb2hsv, 2D distance shapes sdCircle sdBox sdRoundBox sdSegment sdRing
+  sdHexagon sdTriangle, smin, sdfFill(d) (a distance -> 1 inside with a one-pixel edge), checker(p), plot(v, y), graphBG(uv), viewDir(), surfNormal(),
+  fresnel(n, v, power), lambert(n, l), blinn(n, l, v, shininess)
+Light: uLightDir, uLightCol, uAmbSky.   Camera: cameraPosition.   For see-through shaders see the glass shaders.
+
+FAST NOISE (block and water shaders): noiseT(vec2) noise3T(vec3) fbmT(vec2) fbm3T(vec3) voronoiT(vec2) hashT(vec2) read a picture of random numbers (uNoiseTex)
+  instead of calculating hashes: much cheaper than noise / fbm3 / voronoi. noiseTile(p, period) / fbmTile(p, period) repeat exactly every "period" cells.
+BAKING (water shaders): write  vec4 bake(vec2 uv)  and the picture it draws is made ONCE (not every frame); in main() read it with texture(uBake, uv) (it repeats).
+  A first line like  // bake 1024  sets its size (default 512). It is drawn again when you change a parameter. uResolution = its size.
+TYPE 'water' (the water of a bowl, picked in the background editor) has ANOTHER common part: vUv (about 0..1 across the bowl), vPos (world / 20), vW, vWN,
+  uTime, uColor, uLightDir, uLightCol, uSky, noise(vec2) fbm(vec2) noise3(vec3) fbm3(vec3) (0..1), viewDir(), fresnel(n, v, power),
+  bumpFromHeight(h, k) (a normal tilted by the slope of a height). End with gl_FragColor = vec4(colour, 1.0): the opacity of the bowl's water is applied after.
+  PARAMETERS: a uniform declared with a default in a comment becomes a control in the bowl editor:
+    uniform float uGlitter;    // 1.0 [0, 3]            slider (default, [min, max])
+    uniform vec3 uHighlight;   // color 1.0 0.95 0.8    colour picker
+    uniform vec2 uFlow;        // 0.2 0.1               number boxes`;
 
 /**
  * @param view  the BalanceView
@@ -123,7 +139,7 @@ export function shaderStudio(view, api) {
     clearTimeout(timer);
     timer = 0;
     const n = st.sel;
-    const r = view.debugCheckShader(st.text);
+    const r = view.debugCheckShader(st.text, st.type);
     showErrors(r);
     if (!r.ok) return; // (the draft keeps the last version that compiled)
     const same = isBuiltin(n) && st.text === view.debugShaderBody(n) && st.type === baseType(n);
@@ -203,7 +219,7 @@ export function shaderStudio(view, api) {
     clearTimeout(timer);
     if (timer) apply();
     const entry = table()[n];
-    const r = view.debugCheckShader(st.text);
+    const r = view.debugCheckShader(st.text, st.type);
     if (entry && !r.ok) { showErrors(r); window.alert('The shader does not compile: fix it first.'); return; }
     api.confirmDialog({
       title: entry ? 'Save shader' : 'Remove shader from file',

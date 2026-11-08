@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, paramValue, parseShaderParams, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
@@ -10,7 +10,7 @@ const PRISTINE = DEBUG ? cloneDefinitions() : null;
 import { flatNormals, parseObj } from './obj.js';
 import { svg } from './ui.js';
 import { CURSOR_SIZE, handCanvas, handCursors, handHot } from './hands.js';
-import { deformShaders, frag, PRELUDE_LINES, SHADOW_GLSL, vertexShader, waveVertexShader } from './shaders.js';
+import { bakeSizeOf, deformShaders, frag, hasBake, PRELUDE_LINES, SHADOW_GLSL, vertexShader, waterFrag, WATER_PRELUDE_LINES, waveVertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
 function loadStyles() {
@@ -394,6 +394,101 @@ function circleOutline(part, sides = 48) {
 const edgeRadius = () => Math.min(roundOf(), DEPTH / 2 - 0.02);
 
 /**
+ * uNoiseTex of the shader helpers (noiseT, noise3T, fbmT, voronoiT ...): 256 x 256 random numbers that repeat. Green is red shifted by (37, 17) texels, which
+ * noise3T needs (one texture read then gives two layers of 3D noise). One object for the whole page: every renderer (also the preview windows) uploads it itself.
+ */
+let noiseTex = null;
+function noiseTexture() {
+  if (noiseTex) return noiseTex;
+  const N = 256;
+  const r = new Uint8Array(N * N);
+  let s = 123456789; // (a fixed seed: the same picture on every machine and every start)
+  for (let i = 0; i < r.length; i++) {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    r[i] = (((t ^ (t >>> 14)) >>> 0) & 255);
+  }
+  const d = new Uint8Array(N * N * 4);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const o = (y * N + x) * 4;
+      d[o] = r[y * N + x];
+      d[o + 1] = r[((y + 17) % N) * N + ((x + 37) % N)];
+      d[o + 2] = r[((y + 101) % N) * N + ((x + 59) % N)];
+      d[o + 3] = r[((y + 190) % N) * N + ((x + 7) % N)];
+    }
+  }
+  noiseTex = new THREE.DataTexture(d, N, N, THREE.RGBAFormat, THREE.UnsignedByteType);
+  noiseTex.wrapS = noiseTex.wrapT = THREE.RepeatWrapping;
+  noiseTex.magFilter = noiseTex.minFilter = THREE.LinearFilter;
+  noiseTex.generateMipmaps = false;
+  noiseTex.needsUpdate = true;
+  return noiseTex;
+}
+
+/**
+ * The picture a water shader draws ONCE (its  vec4 bake(vec2 uv)  ): the material reads it as uBake. Every renderer that draws the material gets its own
+ * copy, drawn just before the first time it is needed (and again after material.userData.rebake() : a parameter changed).
+ */
+function attachBake(mat, code, uniforms, vertexShader) {
+  const size = bakeSizeOf(code);
+  mat.uniforms.uBake = { value: null };
+  mat.uniforms.uResolution = { value: new THREE.Vector2(size, size) };
+  const bakeVertex = /* glsl */ `
+varying vec3 vW;
+varying vec3 vWN;
+varying vec2 vUv;
+varying vec3 vPos;
+void main() { vUv = uv; vW = vec3(0.0); vWN = vec3(0.0, 1.0, 0.0); vPos = vec3(0.0); gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+  let version = 0;
+  let quad = null;
+  const per = new Map(); // renderer -> { rt, version }
+  mat.userData.rebake = () => { version++; };
+  mat.onBeforeRender = (renderer) => {
+    let e = per.get(renderer);
+    if (!e) {
+      const rt = new THREE.WebGLRenderTarget(size, size, {
+        type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping, depthBuffer: false, generateMipmaps: false,
+      });
+      e = { rt, version: -1 };
+      per.set(renderer, e);
+    }
+    if (e.version !== version) {
+      e.version = version;
+      if (!quad) {
+        const shared = { ...mat.uniforms, uBake: { value: null }, uTime: { value: 0 } }; // (the same uniform objects: the parameters follow the sliders)
+        quad = {
+          scene: new THREE.Scene(),
+          cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1),
+          mat: new THREE.ShaderMaterial({ uniforms: shared, vertexShader: bakeVertex, fragmentShader: waterFrag(code, true), depthTest: false, depthWrite: false }),
+        };
+        quad.scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quad.mat));
+        quad.scene.frustumCulled = false;
+      }
+      const prev = renderer.getRenderTarget();
+      const auto = renderer.autoClear;
+      const shadowAuto = renderer.shadowMap.autoUpdate;
+      renderer.shadowMap.autoUpdate = false;
+      renderer.autoClear = true;
+      renderer.setRenderTarget(e.rt);
+      renderer.render(quad.scene, quad.cam);
+      renderer.setRenderTarget(prev);
+      renderer.autoClear = auto;
+      renderer.shadowMap.autoUpdate = shadowAuto;
+    }
+    mat.uniforms.uBake.value = e.rt.texture;
+  };
+  mat.addEventListener('dispose', () => {
+    for (const e of per.values()) e.rt.dispose();
+    per.clear();
+    quad?.mat.dispose();
+    quad = null;
+  });
+}
+
+/**
  * A small stand-alone view of a shader, for the shader studio: a sphere and a block, with the shader on them, lit by a fixed daylight. Like the shape preview
  * it only draws when something changes or when you drag it round, and dispose() gives the WebGL context back.
  * `makeMaterial({ code, type })` makes the material (the view knows how). `update(entry)` shows a new version of the shader.
@@ -638,6 +733,8 @@ class BalanceView {
   sceneSig = null;
   groundY = -9; //           top of the table (set from the bowl of the level)
   bowlDef = null;
+  blockMats = new Set(); //    the materials of blocks whose shader has settings (debugLiveBlocks changes them while a slider is dragged)
+  waterSel = null; //   { shader, params } of the water of the background that is shown
   currentLevel = null;
   userCam = { yaw: 0, pitch: 0, zoom: 1, pan: new THREE.Vector3() }; // the player's own view change on top of the fitted camera
   fit = null; //            { pos, target } of the fitted camera (what 'reset camera' goes back to)
@@ -1179,8 +1276,44 @@ class BalanceView {
     return obj.parts.map((p) => ({ name: p.name, triangles: p.triangles }));
   }
 
-  get shaderNames() {
-    return Object.keys(shaderCode);
+  get shaderNames() { //      the shaders a block, bowl or table can use (not the water shaders)
+    return Object.keys(shaderCode).filter((n) => shaderCode[n].type !== 'water');
+  }
+
+  get waterShaderNames() { //  the shaders the water of a bowl can use
+    return Object.keys(shaderCode).filter((n) => shaderCode[n].type === 'water');
+  }
+
+  /** The parameters (uniforms with a default in a comment) of a shader: [{ name, type, color, def, min?, max? }]. */
+  debugShaderParams(name) {
+    return parseShaderParams(shaderCode[name]?.code ?? '');
+  }
+
+  /** While a parameter of the water is dragged: change the uniforms of the water that is drawn, without rebuilding anything. */
+  debugLiveWater(defs) {
+    const params = defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.water?.params ?? {};
+    if (this.waterSel) this.waterSel.params = params;
+    this.mainGroup?.traverse((o) => {
+      const m = o.material;
+      if (!m?.userData?.waterParams) return;
+      for (const p of m.userData.waterParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
+      m.userData.rebake?.(); // (a baked picture may depend on the parameters)
+    });
+  }
+
+  /** While a setting of a block shader is dragged: change the uniforms of the blocks that are drawn, without rebuilding anything. */
+  debugLiveBlocks(defs) {
+    for (const m of this.blockMats) {
+      const params = defs?.materials?.[m.userData.materialKey]?.shaderParams ?? {};
+      for (const p of m.userData.blockParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
+    }
+  }
+
+  #setParam(u, p, v) {
+    const val = paramValue(p, v);
+    if (p.color) u.value.copy(rawColor(val));
+    else if (p.def.length === 1) u.value = val;
+    else u.value.set(...val);
   }
 
   // ── the shader studio (debug): what it needs from the view ──
@@ -1203,11 +1336,14 @@ class BalanceView {
    * Compile `code` (what comes after the common part) in a scratch WebGL context, without drawing anything.
    * @returns {{ ok: boolean, errors: { line: number, text: string }[] }} the lines are lines of `code` (line 1 = its first line)
    */
-  debugCheckShader(code) {
-    const gl = (this.scratchGl ??= document.createElement('canvas').getContext('webgl'));
+  debugCheckShader(code, type = 'opaque') {
+    const gl = (this.scratchGl ??= document.createElement('canvas').getContext('webgl2')); // (WebGL 2 = GLSL ES 3.00: what the game's own context speaks)
     if (!gl) return { ok: true, errors: [] }; // (no way to check here: the game will say)
-    gl.getExtension('OES_standard_derivatives'); // (the bump maps use the difference between neighbouring pixels; the game's own context has it built in)
-    const src = `#extension GL_OES_standard_derivatives : enable${frag(code)}`.replace('precision highp float;', 'precision highp float; uniform vec3 cameraPosition;'); // (the directive shares line 1 with the empty first line of the shader: the line numbers stay right)
+    const water = type === 'water';
+    // the same few lines three.js puts above every shader (one line each, so that the line numbers can be worked out)
+    const head = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n#define varying in\nout highp vec4 pc_fragColor;\n#define gl_FragColor pc_fragColor\n#define texture2D texture\nuniform vec3 cameraPosition;\n';
+    const headLines = (head.match(/\n/g) ?? []).length;
+    const src = head + (water ? waterFrag(code) : frag(code)).replace('precision highp float;', '');
     const sh = gl.createShader(gl.FRAGMENT_SHADER);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
@@ -1215,14 +1351,16 @@ class BalanceView {
     const log = ok ? '' : gl.getShaderInfoLog(sh) ?? '';
     gl.deleteShader(sh);
     const errors = [];
-    for (const m of log.matchAll(/ERROR:\s*\d+:(\d+):\s*(.*)/g)) errors.push({ line: Math.max(1, +m[1] - PRELUDE_LINES), text: m[2].trim() });
+    for (const m of log.matchAll(/ERROR:\s*\d+:(\d+):\s*(.*)/g)) errors.push({ line: Math.max(1, +m[1] - headLines - (water ? WATER_PRELUDE_LINES : PRELUDE_LINES)), text: m[2].trim() });
     if (!ok && !errors.length) errors.push({ line: 1, text: log.trim() || 'the shader does not compile' });
     return { ok, errors };
   }
 
   /** A small stand-alone window that shows a sphere and a block with a shader made from `{ code, type }`: see shaderPreview3d. */
   debugShaderPreview(host) {
-    return shaderPreview3d(host, (entry) => this.#blockMaterial('stone1', 0.3, THREE.FrontSide, null, true, entry));
+    return shaderPreview3d(host, (entry) => (entry.type === 'water'
+      ? this.#waterMaterial({ water: { color: this.bowlDef?.water?.color ?? '#004585', opacity: 1 } }, true, null, entry)
+      : this.#blockMaterial('stone1', 0.3, THREE.FrontSide, null, true, entry)));
   }
 
   /** Orbit camera: drag = turn, right-drag = move, wheel = zoom. Off = the normal camera again. */
@@ -1446,6 +1584,10 @@ class BalanceView {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.autoClear = false;
+    this.renderer.debug.onShaderError = (gl, program, vs, fs) => { // a shader that does not compile in the game itself: say so (instead of a surface that silently does not show)
+      const log = (gl.getShaderInfoLog(fs) || gl.getProgramInfoLog(program) || 'does not compile').trim();
+      this.#report(`a shader does not compile: ${log.split('\n').slice(0, 3).join(' | ')}`);
+    };
     this.renderer.domElement.className = 'bb-canvas';
 
     this.scene.add(new THREE.AmbientLight('#ffffff', 0.9));
@@ -1563,6 +1705,7 @@ class BalanceView {
     const world = (this.world = new THREE.Group());
     this.scene.add(world);
     this.bowlDef = bowl;
+    this.waterSel = bg.water ?? null; // (which water shader the bowl's water uses, and its parameters: chosen in the background)
     this.groundY = groundYOf(bowl);
     const bowlH = bg.bowlHeight ?? TABLE.h; // how high the bowl (= the top of the table) stands above the floor
     const floorY = this.groundY - bowlH;
@@ -1668,7 +1811,7 @@ class BalanceView {
    * (`waveH`), the fragment shader works the slope out of the same function. The slope bends the reflection (the texture of #reflectPass), makes
    * the sun glitter, and the colour follows the light of the day. `foot` (the outline of the surface) is null for the sides of the water.
    */
-  #waterMaterial(bowl, plain = false, foot = null) {
+  #waterMaterial(bowl, plain = false, foot = null, draft = null) {
     const u = plain ? { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 }, ...this.#plainLight() } : { ...this.waterU, ...this.shadowU };
     const WAVES = /* glsl */ `
 float whash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
@@ -1686,16 +1829,17 @@ float waveH(vec2 p, float t) {
   h += (wnoise(p * 0.95 - vec2(t * 0.25, t * 0.20)) - 0.5) * 0.06;
   return h;
 }`;
-    return new THREE.ShaderMaterial({
-      uniforms: {
+    const uniforms = {
         uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: bowl.water.opacity }, uTime: this.uTime, ...u,
         uSky: { value: plain ? new THREE.Color('#cfd6e4') : this.mistNow }, // the colour of the sky (the mist, tinted by the time of day): the water mirrors it
         uGrid: { value: foot ? 1 : 0 },
         uFoot: { value: new THREE.Vector3(foot?.rw ?? 1, foot?.rz ?? 1, foot?.n ?? 2) },
-      },
-      vertexShader: /* glsl */ `
+    };
+    const vertexShader = /* glsl */ `
 varying vec3 vW;
 varying vec3 vWN;
+varying vec2 vUv; //  for the water shaders of _shaders.js: about 0..1 across the bowl
+varying vec3 vPos; // world position / 20
 uniform float uTime;
 uniform float uGrid;
 ${WAVES}
@@ -1703,9 +1847,17 @@ void main() {
   vec4 w = modelMatrix * vec4(position, 1.0);
   if (uGrid > 0.5) w.y += waveH(w.xz, uTime);
   vW = w.xyz;
+  vUv = w.xz / 40.0 + 0.5;
+  vPos = w.xyz * 0.05;
   vWN = normalize(mat3(modelMatrix) * normal);
   gl_Position = projectionMatrix * viewMatrix * w;
-}`,
+}`;
+    const sel = this.waterSel ?? {}; //  the water shader and its parameters come from the background of the level (see #buildWorld)
+    const ws = draft ?? (sel.shader && shaderCode[sel.shader]?.type === 'water' ? shaderCode[sel.shader] : null);
+    if (ws) return this.#customWaterMaterial(ws.code, draft ? {} : sel.params, uniforms, vertexShader);
+    return new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader,
       fragmentShader: /* glsl */ `
 precision highp float;
 varying vec3 vW;
@@ -1763,6 +1915,31 @@ void main() {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
+  }
+
+  /** The water of a bowl drawn by a water shader of _shaders.js (see WATER_PRELUDE in shaders.js); its parameters come from the bowl's water.params. */
+  #customWaterMaterial(code, params, uniforms, vertexShader) {
+    const list = parseShaderParams(code);
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { ...uniforms },
+      vertexShader,
+      fragmentShader: waterFrag(code),
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      extensions: { derivatives: true },
+    });
+    mat.uniforms.uNoiseTex = { value: noiseTexture() };
+    mat.uniforms.uSeed = { value: 0 };
+    mat.uniforms.uBake = { value: null }; // (a shader without bake() never reads it)
+    mat.uniforms.uResolution = { value: new THREE.Vector2(1, 1) };
+    for (const p of list) {
+      mat.uniforms[p.name] = { value: p.color ? new THREE.Color() : p.def.length === 1 ? 0 : new THREE[`Vector${p.def.length}`]() };
+      this.#setParam(mat.uniforms[p.name], p, params?.[p.name]);
+    }
+    if (hasBake(code)) attachBake(mat, code);
+    mat.userData.waterParams = list; // (debugLiveWater changes their values while a slider is dragged)
+    return mat;
   }
 
   #floorMaterial(bg, fog) {
@@ -1985,10 +2162,10 @@ void main() {
     return frag((shaderCode[name] ?? shaderCode.stone1)?.code ?? 'void main() { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); }'); // (an unknown name looks like stone1)
   }
 
-  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false, draft = null) {
+  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false, draft = null, params = null, materialKey = null) {
     const type = draft ? draft.type ?? 'opaque' : this.#shaderType(shaderName); // (`draft` = { code, type } of a shader that is being edited: the preview of the shader studio)
     const transparent = type !== 'opaque';
-    return new THREE.ShaderMaterial({
+    const mat = new THREE.ShaderMaterial({
       vertexShader: deformShaders.has(shaderName) ? waveVertexShader : vertexShader,
       fragmentShader: draft ? frag(draft.code) : this.#fragmentOf(shaderName),
       uniforms: {
@@ -1998,6 +2175,7 @@ void main() {
         uBad: { value: 0 },
         uQuality: this.qualityU,
         uAA: this.aaU,
+        uNoiseTex: { value: noiseTexture() },
         uCausOn: { value: 1 },
         uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
         uReveal: { value: 1 }, //     below 1 the block dissolves in (see finish() in shaders.js)
@@ -2012,6 +2190,19 @@ void main() {
       side,
       extensions: { derivatives: true }, // (the cheap bump map reads the difference between neighbouring pixels)
     });
+    // the settings of the shader: uniforms it declares with a default in a comment (see parseShaderParams); the values come from the material
+    const list = parseShaderParams(draft ? draft.code : shaderCode[shaderName]?.code ?? '');
+    for (const p of list) {
+      mat.uniforms[p.name] = { value: p.color ? new THREE.Color() : p.def.length === 1 ? 0 : new THREE[`Vector${p.def.length}`]() };
+      this.#setParam(mat.uniforms[p.name], p, params?.[p.name]);
+    }
+    if (list.length && materialKey) {
+      mat.userData.blockParams = list;
+      mat.userData.materialKey = materialKey;
+      this.blockMats.add(mat);
+      mat.addEventListener('dispose', () => this.blockMats.delete(mat));
+    }
+    return mat;
   }
 
   /**
@@ -2126,7 +2317,7 @@ void main() {
   #makeView(map, id, si, mi, opts) {
     const shapeKey = SHAPE_KEYS[si];
     const shaderName = materials[MATERIAL_KEYS[mi]].shader;
-    const mat = this.#blockMaterial(shaderName, (id * 0.6180339) % 1);
+    const mat = this.#blockMaterial(shaderName, (id * 0.6180339) % 1, THREE.FrontSide, null, false, null, materials[MATERIAL_KEYS[mi]].shaderParams, MATERIAL_KEYS[mi]);
 
     if (opts.table) mat.uniforms.uCausOn.value = 0; // (waiting on the table: no caustics)
     const group = new THREE.Group();

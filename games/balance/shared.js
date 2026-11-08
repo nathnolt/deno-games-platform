@@ -864,6 +864,10 @@ export function validateDefinitions(defs, extra = {}) {
     if (m.stackLimit !== undefined && !(Number.isInteger(m.stackLimit) && m.stackLimit >= 0 && m.stackLimit <= 20)) err(`material ${k}: stackLimit must be a whole number from 0 to 20`);
     if (m.explodesWith && !mats[m.explodesWith]) err(`material ${k}: explodesWith "${m.explodesWith}" is not a material`);
     shaderOk(m.shader, `material ${k}`);
+    if (m.shaderParams !== undefined) { // the settings of the shader (uniforms with a default in a comment)
+      if (!m.shaderParams || typeof m.shaderParams !== 'object' || Array.isArray(m.shaderParams)) err(`material ${k}: shaderParams must be an object`);
+      else for (const [pk, pv] of Object.entries(m.shaderParams)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`material ${k}: shaderParams.${pk} must be a number, a colour or a list of numbers`);
+    }
   }
 
   // shapes
@@ -920,6 +924,16 @@ export function validateDefinitions(defs, extra = {}) {
       if (b.light.time !== undefined && !(isNum(b.light.time) && b.light.time >= 0 && b.light.time <= 24)) err(`background ${k}: light.time (hour of the day) must be from 0 to 24`);
       if (b.light.shadow !== undefined && !(isNum(b.light.shadow) && b.light.shadow >= 0 && b.light.shadow <= 1)) err(`background ${k}: light.shadow must be from 0 to 1`);
     }
+    if (b.water !== undefined) { // the water shader of the bowl, picked in the background
+      if (!b.water || typeof b.water !== 'object' || Array.isArray(b.water)) err(`background ${k}: water must be { shader, params }`);
+      else {
+        if (b.water.shader !== undefined && b.water.shader !== '' && extra.waterShaderNames && !extra.waterShaderNames.includes(b.water.shader)) err(`background ${k}: water.shader "${b.water.shader}" is not a water shader (type 'water' in _shaders.js)`);
+        if (b.water.params !== undefined) {
+          if (!b.water.params || typeof b.water.params !== 'object' || Array.isArray(b.water.params)) err(`background ${k}: water.params must be an object`);
+          else for (const [pk, pv] of Object.entries(b.water.params)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`background ${k}: water.params.${pk} must be a number, a colour or a list of numbers`);
+        }
+      }
+    }
     if (b.ground?.style !== undefined && !['sand', 'wood', 'none'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand, wood or none`);
     if (b.light?.shadows !== undefined) shadowErrors(b.light.shadows, `background ${k}: light.shadows`, err);
     if (b.lights !== undefined) {
@@ -961,7 +975,7 @@ export function validateDefinitions(defs, extra = {}) {
     if (!/^[A-Za-z][\w-]{0,39}$/.test(k)) err(`shader "${k}": the name starts with a letter and has at most 40 letters, digits, - or _`);
     else if (!e || typeof e.code !== 'string' || !e.code.trim()) err(`shader ${k}: it has no code`);
     else if (e.code.length > 40000) err(`shader ${k}: the code is too long (40000 characters at most)`);
-    else if (e.type !== undefined && !['opaque', 'transparent', 'refract'].includes(e.type)) err(`shader ${k}: type must be opaque, transparent or refract`);
+    else if (e.type !== undefined && !['opaque', 'transparent', 'refract', 'water'].includes(e.type)) err(`shader ${k}: type must be opaque, transparent, refract or water`);
   }
 
   // shape categories
@@ -1076,7 +1090,7 @@ const SHAPES_HEAD = [
 const SHADERS_HEAD = [
   '// Runs on BOTH server and browser. Pure data: ALL the SHADERS of the game (edit them in the shader studio of the debug menu). _definitions.js re-exports them.',
   '//',
-  "//   export const shaderCode = { name: { type?: 'opaque' | 'transparent' | 'refract', code: `...GLSL...` }, ... }",
+  "//   export const shaderCode = { name: { type?: 'opaque' | 'transparent' | 'refract' | 'water', code: `...GLSL...` }, ... }",
   '//',
   '// EVERY shader of the game is here (shaders.js only has the common part that all of them start with). The name is what materials, bowls, models and backgrounds',
   '// pick; a new name is a new shader.',
@@ -1084,6 +1098,7 @@ const SHADERS_HEAD = [
   '// it has to define main() and end by setting gl_FragColor, usually with finish(colour, 1.0).',
   '// type: opaque (default) = a normal solid surface, transparent = drawn after the solid things without depth writes,',
   '//       refract = transparent AND it bends the picture behind it (needs the REFRACT_GLSL part: copy a glass shader to start).',
+  "//       water = the water of a bowl (picked in the bowl editor): a different common part (WATER_PRELUDE in shaders.js). A uniform it declares with a default in a comment, like  uniform float uGlitter; // 1.0 [0, 3]  or  uniform vec3 uC; // color 1 0.9 0.8,  becomes a parameter in the bowl editor.",
   '//',
   '// With `DEBUG = true` the shader studio writes this file for you when you press "Save shader" and confirm it (comments are not kept).',
   '// That needs write permission:',
@@ -1153,3 +1168,28 @@ export function serializeDefinitions(defs) {
 }
 
 syncDefinitions();
+
+// ── shader parameters ──
+// A uniform a shader declares with a default in a comment is a parameter:  uniform float uX; // 1.0 [0, 3]   uniform vec3 uC; // color 1.0 0.95 0.8   uniform vec2 uF; // 0.2 0.1
+// parseShaderParams(code) -> [{ name, type, color, def: [numbers], min?, max? }]. Values are stored as: a number (float), '#rrggbb' (color), [numbers] (vec2..4).
+export function parseShaderParams(code) {
+  const SIZE = { float: 1, int: 1, vec2: 2, vec3: 3, vec4: 4 };
+  const out = [];
+  for (const m of String(code ?? '').matchAll(/^[ \t]*uniform\s+(float|int|vec2|vec3|vec4)\s+(\w+)\s*;[ \t]*\/\/[ \t]*(.*)$/gm)) {
+    const [, type, name, note] = m;
+    const range = note.match(/\[\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*\]/);
+    const color = /^\s*colou?r\b/i.test(note) && SIZE[type] >= 3;
+    const nums = (note.replace(/\[[^\]]*\]/, '').replace(/^\s*colou?r\b/i, '').match(/-?\d*\.?\d+/g) ?? []).map(Number);
+    if (nums.length < SIZE[type]) continue; // no default in the comment: not a parameter
+    out.push({ name, type, color, def: nums.slice(0, SIZE[type]), ...(range ? { min: +range[1], max: +range[2] } : {}) });
+  }
+  return out;
+}
+/** '#rrggbb' of the first three numbers (0..1). */
+export const hexOfRgb = (d) => `#${d.slice(0, 3).map((c) => Math.round(Math.min(1, Math.max(0, c)) * 255).toString(16).padStart(2, '0')).join('')}`;
+/** The value of a parameter: the one given (when it has the right shape), else its default. */
+export function paramValue(p, v) {
+  if (p.color) return typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : hexOfRgb(p.def);
+  if (p.def.length === 1) return Number.isFinite(v) ? v : p.def[0];
+  return Array.isArray(v) && v.length === p.def.length && v.every(Number.isFinite) ? v : p.def;
+}

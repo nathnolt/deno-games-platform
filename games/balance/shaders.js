@@ -169,6 +169,148 @@ void main() {
 /** Shaders whose blocks are drawn with waveVertexShader and a geometry cut into 3 x 3 (the faces ripple, the edges stay). */
 export const deformShaders = new Set([]); // (the water block no longer uses it: no subdivided faces, the ripples are in the fragment shader only)
 
+// ── helpers every shader gets (block shaders and water shaders): the "Shader Studio helpers" ──
+const HELPERS_COMMON = /* glsl */ `
+const float PI = 3.14159265359;
+const float TAU = 6.28318530718;
+float saturate(float x) { return clamp(x, 0.0, 1.0); }
+vec2 saturate(vec2 x) { return clamp(x, 0.0, 1.0); }
+vec3 saturate(vec3 x) { return clamp(x, 0.0, 1.0); }
+float remap(float v, float a, float b, float c, float d) { return c + (v - a) * (d - c) / (b - a); }
+mat2 rot2(float a) { float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+float hash11(float p) { p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
+float hash21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+vec2 hash22(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973)); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.xx + p3.yz) * p3.zy); }
+float hash31(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
+vec3 hash33(vec3 p3) { p3 = fract(p3 * vec3(0.1031, 0.1030, 0.0973)); p3 += dot(p3, p3.yxz + 33.33); return fract((p3.xxy + p3.yxx) * p3.zyx); }
+vec3 voronoi(vec2 p) { // x = distance to the nearest point, y = (second nearest - nearest) = the edges of the cells, z = a random number per cell
+  vec2 i = floor(p), f = fract(p); float d1 = 8.0, d2 = 8.0, id = 0.0;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec2 g = vec2(float(x), float(y)); vec2 o = hash22(i + g); float d = length(g + o - f);
+    if (d < d1) { d2 = d1; d1 = d; id = hash21(i + g + 5.7); } else if (d < d2) d2 = d;
+  }
+  return vec3(d1, d2 - d1, id);
+}
+uniform sampler2D uNoiseTex; // 256 x 256 random numbers (green = red shifted by 37, 17 texels), repeating, linear: see noiseTexture() in client.js
+// ---- fast versions: read the random-number picture (uNoiseTex) instead of calculating hashes ----
+vec4 hashT(vec2 p) { return texture2D(uNoiseTex, (mod(floor(p), 256.0) + 0.5) * (1.0 / 256.0)); }
+float noiseT(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return texture2D(uNoiseTex, (i + f + 0.5) * (1.0 / 256.0)).r; }
+float noise3T(vec3 p) {
+  vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  vec2 t = texture2D(uNoiseTex, (i.xy + vec2(37.0, 17.0) * i.z + f.xy + 0.5) * (1.0 / 256.0)).rg;
+  return mix(t.x, t.y, f.z);
+}
+// (fbmT / fbm3T are FILTERED: an octave whose cells are smaller than a pixel is replaced by its average. Without this the finest layers are random from pixel to
+//  pixel, and a bump map made from them has a huge slope everywhere: it looks like noise and the strength setting seems to do nothing.)
+float fbmT(vec2 p) {
+  float w = min(length(dFdx(p)), length(dFdy(p))) * 0.9; float s = 0.0, a = 0.5; // (the SHORT side of the pixel's footprint, like anisotropic filtering: a face seen at a slant keeps its detail)
+  for (int i = 0; i < 5; i++) { s += a * mix(0.5, noiseT(p), 1.0 - smoothstep(0.25, 0.7, w)); p = p * 2.03 + vec2(17.1, 9.2); w *= 2.03; a *= 0.5; }
+  return s / 0.96875;
+}
+float fbm3T(vec3 p) {
+  float w = min(length(dFdx(p)), length(dFdy(p))) * 0.9; float s = 0.0, a = 0.5; // (the SHORT side of the pixel's footprint, like anisotropic filtering: a face seen at a slant keeps its detail)
+  for (int i = 0; i < 5; i++) { s += a * mix(0.5, noise3T(p), 1.0 - smoothstep(0.25, 0.7, w)); p = p * 2.03 + vec3(17.1, 9.2, 5.3); w *= 2.03; a *= 0.5; }
+  return s / 0.96875;
+}
+vec3 voronoiT(vec2 p) {
+  vec2 i = floor(p), f = fract(p); float d1 = 8.0, d2 = 8.0, id = 0.0;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec2 g = vec2(float(x), float(y)); vec4 h = hashT(i + g); float d = length(g + h.xy - f);
+    if (d < d1) { d2 = d1; d1 = d; id = h.z; } else if (d < d2) d2 = d;
+  }
+  return vec3(d1, d2 - d1, id);
+}
+// ---- tileable noise: repeats exactly every "period" cells, so a baked picture can scroll forever ----
+float noiseTile(vec2 p, float period) {
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  vec2 a = mod(i, period), b = mod(i + 1.0, period);
+  return mix(mix(hash21(a), hash21(vec2(b.x, a.y)), f.x), mix(hash21(vec2(a.x, b.y)), hash21(b), f.x), f.y);
+}
+float fbmTile(vec2 p, float period) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noiseTile(p, period); p *= 2.0; period *= 2.0; a *= 0.5; } return s / 0.96875; }
+vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) { return a + b * cos(6.28318 * (c * t + d)); }
+vec3 hsv2rgb(vec3 c) { vec3 p = abs(fract(c.xxx + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0); return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y); }
+vec3 rgb2hsv(vec3 c) {
+  vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y); float e = 1.0e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+float sdCircle(vec2 p, float r) { return length(p) - r; }
+float sdBox(vec2 p, vec2 b) { vec2 d = abs(p) - b; return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); }
+float sdRoundBox(vec2 p, vec2 b, float r) { return sdBox(p, b - r) - r; }
+float sdSegment(vec2 p, vec2 a, vec2 b) { vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h); }
+float sdRing(vec2 p, float r, float w) { return abs(length(p) - r) - w; }
+float sdHexagon(vec2 p, float r) {
+  const vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
+  p = abs(p); p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+  p -= vec2(clamp(p.x, -k.z * r, k.z * r), r);
+  return length(p) * sign(p.y);
+}
+float sdTriangle(vec2 p, float r) {
+  const float k = 1.7320508;
+  p.x = abs(p.x) - r; p.y = p.y + r / k;
+  if (p.x + k * p.y > 0.0) p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0;
+  p.x -= clamp(p.x, -2.0 * r, 0.0);
+  return -length(p) * sign(p.y);
+}
+float smin(float a, float b, float k) { float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h * h * k * 0.25; }
+float sdfFill(float d) { float w = max(fwidth(d), 1e-5); return 1.0 - smoothstep(-w, w, d); } // a distance -> 1 inside, 0 outside, with an edge exactly one pixel wide
+float checker(vec2 p) { vec2 q = floor(p); return mod(q.x + q.y, 2.0); }
+float plot(float v, float y) { // a one-pixel-wide line where v == y (graphs)
+  float px = max(fwidth(v), 1e-5);
+  float slope = min(abs(dFdx(y)) / px, 24.0);
+  float th = 2.0 * px * sqrt(1.0 + slope * slope);
+  return 1.0 - smoothstep(th - px, th, abs(v - y));
+}
+vec3 graphBG(vec2 uv) {
+  vec3 c = vec3(0.075, 0.085, 0.11);
+  vec2 g = abs(fract(uv * 4.0 + 0.5) - 0.5) / max(fwidth(uv * 4.0), vec2(1e-5));
+  c += vec3(0.055) * (1.0 - smoothstep(0.0, 1.2, min(g.x, g.y)));
+  return c;
+}
+vec3 surfNormal() { vec3 n = normalize(vWN); return gl_FrontFacing ? n : -n; }
+float lambert(vec3 n, vec3 l) { return max(dot(n, l), 0.0); }
+float blinn(vec3 n, vec3 l, vec3 v, float shininess) { vec3 h = normalize(l + v); return pow(max(dot(n, h), 0.0), shininess) * step(0.0, dot(n, l)); }
+`;
+// (block shaders only: the water prelude has its own versions of these)
+const HELPERS_BLOCK = /* glsl */ `
+float noise3(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash31(i), hash31(i + vec3(1.0, 0.0, 0.0)), f.x), mix(hash31(i + vec3(0.0, 1.0, 0.0)), hash31(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+             mix(mix(hash31(i + vec3(0.0, 0.0, 1.0)), hash31(i + vec3(1.0, 0.0, 1.0)), f.x), mix(hash31(i + vec3(0.0, 1.0, 1.0)), hash31(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+}
+float fbm3(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noise3(p); p = p * 2.03 + vec3(17.1, 9.2, 5.3); a *= 0.5; } return s / 0.96875; }
+vec3 viewDir() { return normalize(cameraPosition - vW); }
+float fresnel(vec3 n, vec3 v, float power) { return pow(1.0 - clamp(dot(n, v), 0.0, 1.0), power); }
+`;
+
+const PERLIN_GLSL = /* glsl */ `
+// PERLIN (gradient) noise in 3D, from -1 to 1: every lattice point has a random direction, smooth quintic blending. pfbm = several octaves of it.
+float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+vec3 pgrad(vec3 p) { return vec3(h13(p), h13(p + 19.19), h13(p + 47.77)) * 2.0 - 1.0; } // (a random direction: no sin / cos / sqrt, this runs 8 times per noise call)
+float perlin(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float n000 = dot(pgrad(i), f);
+  float n100 = dot(pgrad(i + vec3(1.0, 0.0, 0.0)), f - vec3(1.0, 0.0, 0.0));
+  float n010 = dot(pgrad(i + vec3(0.0, 1.0, 0.0)), f - vec3(0.0, 1.0, 0.0));
+  float n110 = dot(pgrad(i + vec3(1.0, 1.0, 0.0)), f - vec3(1.0, 1.0, 0.0));
+  float n001 = dot(pgrad(i + vec3(0.0, 0.0, 1.0)), f - vec3(0.0, 0.0, 1.0));
+  float n101 = dot(pgrad(i + vec3(1.0, 0.0, 1.0)), f - vec3(1.0, 0.0, 1.0));
+  float n011 = dot(pgrad(i + vec3(0.0, 1.0, 1.0)), f - vec3(0.0, 1.0, 1.0));
+  float n111 = dot(pgrad(i + vec3(1.0, 1.0, 1.0)), f - vec3(1.0, 1.0, 1.0));
+  return clamp(1.15 * mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z), -1.0, 1.0);
+}
+float pfbm(vec3 p) { // 0..1
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++) { s += a * perlin(p); p *= 2.02; a *= 0.5; }
+  return clamp(s * 1.0 + 0.5, 0.0, 1.0);
+}
+`;
+
 const prelude = /* glsl */ `
 precision highp float;
 varying vec2 vP;
@@ -215,27 +357,7 @@ float fbm(vec2 p) {
   }
   return s;
 }
-// PERLIN (gradient) noise in 3D, from -1 to 1: every lattice point has a random direction, smooth quintic blending. pfbm = several octaves of it.
-float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
-vec3 pgrad(vec3 p) { return vec3(h13(p), h13(p + 19.19), h13(p + 47.77)) * 2.0 - 1.0; } // (a random direction: no sin / cos / sqrt, this runs 8 times per noise call)
-float perlin(vec3 x) {
-  vec3 i = floor(x), f = fract(x);
-  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-  float n000 = dot(pgrad(i), f);
-  float n100 = dot(pgrad(i + vec3(1.0, 0.0, 0.0)), f - vec3(1.0, 0.0, 0.0));
-  float n010 = dot(pgrad(i + vec3(0.0, 1.0, 0.0)), f - vec3(0.0, 1.0, 0.0));
-  float n110 = dot(pgrad(i + vec3(1.0, 1.0, 0.0)), f - vec3(1.0, 1.0, 0.0));
-  float n001 = dot(pgrad(i + vec3(0.0, 0.0, 1.0)), f - vec3(0.0, 0.0, 1.0));
-  float n101 = dot(pgrad(i + vec3(1.0, 0.0, 1.0)), f - vec3(1.0, 0.0, 1.0));
-  float n011 = dot(pgrad(i + vec3(0.0, 1.0, 1.0)), f - vec3(0.0, 1.0, 1.0));
-  float n111 = dot(pgrad(i + vec3(1.0, 1.0, 1.0)), f - vec3(1.0, 1.0, 1.0));
-  return clamp(1.15 * mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z), -1.0, 1.0);
-}
-float pfbm(vec3 p) { // 0..1
-  float s = 0.0, a = 0.5;
-  for (int i = 0; i < 3; i++) { s += a * perlin(p); p *= 2.02; a *= 0.5; }
-  return clamp(s * 1.0 + 0.5, 0.0, 1.0);
-}
+${PERLIN_GLSL}
 // BUMP MAPS: a shader defines a height h(q) (any function of a position) and takes its slope: the surface normal then leans away from the slope.
 //   float e = 0.03; float h0 = h(q);  vec3 g = vec3(h(q + vec3(e,0,0)) - h0, h(q + vec3(0,e,0)) - h0, h(q + vec3(0,0,e)) - h0) / e;
 //   gNormal = bumpedNormal(g, 0.3, 1.0);  gHasN = 1.0;        (space: 1 = q is a position in the MESH (blocks that move), 0 = q is a position in the WORLD)
@@ -349,8 +471,96 @@ vec4 finish(vec3 c, float a) {
   c = mix(c, vec3(1.0, 0.98, 0.92), dissolveEdge * 0.85);
   return vec4(c, a);
 }
-`;
+#define vPos vP3 // (the shader studio calls the position glued to the mesh vPos)
+${HELPERS_COMMON}${HELPERS_BLOCK}`;
 
 export const frag = (body) => prelude + body;
 /** How many lines come before the code of a shader (what is shown in the shader studio starts after them): the line numbers of an error are corrected with it. */
 export const PRELUDE_LINES = (prelude.match(/\n/g) ?? []).length;
+
+// ── Water shaders (the water of a bowl; type 'water' in _shaders.js) ──
+// Their code is what comes after this common part, and has to define main() and set gl_FragColor (usually alpha 1: the opacity of the bowl's water is
+// multiplied in afterwards). Uniforms the shader declares with a default in a comment become PARAMETERS you can change in the bowl editor:
+//   uniform float uGlitter;      // 1.0 [0, 3]          (default, and optional [min, max] for the slider)
+//   uniform vec3 uHighlight;     // color 1.0 0.95 0.8  (a colour picker)
+//   uniform vec2 uFlow;          // 0.2 0.1             (one number box per component)
+export const WATER_PRELUDE = /* glsl */ `
+precision highp float;
+varying vec3 vW;   // world position
+varying vec3 vWN;  // world normal
+varying vec2 vUv;  // across the bowl, about 0..1 on the surface (the same scale for every bowl)
+varying vec3 vPos; // world position / 20: about -1..1 over the bowl
+uniform float uTime;
+uniform vec3 uColor;     // the colour of the water of the bowl
+uniform float uOpacity;  // its opacity (multiplied into the alpha of gl_FragColor afterwards)
+uniform float uGrid;
+uniform vec3 uFoot;
+uniform vec3 uLightDir;  // towards the sun (or the moon)
+uniform vec3 uLightCol;
+uniform vec3 uAmbSky;
+uniform vec3 uSky;       // the colour of the mist / sky
+uniform float uSeed;
+uniform vec2 uResolution; // the size of the baked picture (see bake below)
+uniform sampler2D uBake;  // the picture drawn ONCE by  vec4 bake(vec2 uv)  (when the shader has one; the first line  // bake 1024  sets its size)
+float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float whash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(whash(i), whash(i + vec2(1.0, 0.0)), f.x), mix(whash(i + vec2(0.0, 1.0)), whash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float fbm(vec2 p) {
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) { s += a * noise(p); p = p * 2.03 + 11.7; a *= 0.5; }
+  return s / 0.9375;
+}
+float whash3(vec3 p) { p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+float noise3(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = mix(mix(whash3(i), whash3(i + vec3(1, 0, 0)), f.x), mix(whash3(i + vec3(0, 1, 0)), whash3(i + vec3(1, 1, 0)), f.x), f.y);
+  float b = mix(mix(whash3(i + vec3(0, 0, 1)), whash3(i + vec3(1, 0, 1)), f.x), mix(whash3(i + vec3(0, 1, 1)), whash3(i + vec3(1, 1, 1)), f.x), f.y);
+  return mix(a, b, f.z);
+}
+float fbm3(vec3 p) {
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) { s += a * noise3(p); p = p * 2.03 + 11.7; a *= 0.5; }
+  return s / 0.9375;
+}
+${PERLIN_GLSL}
+vec3 viewDir() { return normalize(cameraPosition - vW); }             // from the surface towards the eye
+float fresnel(vec3 n, vec3 v, float power) { return pow(1.0 - clamp(dot(n, v), 0.0, 1.0), power); }
+// the surface normal tilted by the slope of a height h (read from the difference between neighbouring pixels); k = how much it tilts
+vec3 bumpFromHeight(float h, float k) {
+  vec3 N = normalize(vWN);
+  vec3 dpdx = dFdx(vW), dpdy = dFdy(vW);
+  vec3 r1 = cross(dpdy, N), r2 = cross(N, dpdx);
+  float det = dot(dpdx, r1);
+  vec3 grad = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  vec3 t = k * grad / max(abs(det), 1e-8);
+  float tl = length(t);
+  t *= min(1.0, 0.9 / max(tl, 1e-6));
+  return normalize(N - t);
+}
+${HELPERS_COMMON}`;
+export const WATER_PRELUDE_LINES = (WATER_PRELUDE.match(/\n/g) ?? []).length;
+/** The whole fragment shader of a water shader: the common part, its code (main() renamed), and a main() that cuts the surface to the bowl and applies the opacity. */
+export const waterFrag = (code, bake = false) => WATER_PRELUDE + String(code).replace(/\bvoid\s+main\s*\(\s*(void)?\s*\)/, 'void userMain()') + (bake ? /* glsl */ `
+void main() { gl_FragColor = bake(vUv); } // (the baking pass: the whole picture, once)
+` : /* glsl */ `
+void main() {
+  if (uGrid > 0.5) {
+    vec2 m = abs(vW.xz) / uFoot.xy;
+    if (pow(pow(m.x, uFoot.z) + pow(m.y, uFoot.z), 1.0 / uFoot.z) > 1.0) discard; // outside the bowl
+  }
+  userMain();
+  gl_FragColor.a *= uOpacity;
+}
+`);
+
+/** Does this water shader draw a picture once (a function  vec4 bake(vec2 uv)  )? And how big (a line  // bake 1024 ). */
+export const hasBake = (code) => /\bvec4\s+bake\s*\(\s*vec2\s+\w+\s*\)/.test(String(code));
+export const bakeSizeOf = (code) => {
+  const m = /^\s*\/\/\s*bake\s+(\d+)/m.exec(String(code));
+  return m ? Math.max(16, Math.min(2048, +m[1])) : 512;
+};

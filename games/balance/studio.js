@@ -19,6 +19,7 @@
 // After a confirmation they send that ONE level / shape to the server, which writes _levels.js / _shapes.js; every room then uses it.
 
 import * as S from './shared.js';
+import { waterControls } from './water-ui.js';
 import { shaderStudio } from './shader-studio.js';
 import { clone, h, svg } from './ui.js';
 
@@ -2297,6 +2298,8 @@ function backgroundStudio(view, api) {
           h('div', { class: 'bb-st-hint' }, 'Every model below picks none, light or heavy blur.'))),
       h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Shadows'),
         h('div', { class: 'bb-st-instbody' }, ...shadowUi(bg))),
+      h('div', { class: 'bb-st-sub' }, 'Water of the bowl'),
+      ...waterControls({ h, view, bg, touch: api.touch, draft: api.draft, rerender: renderBody }),
       h('div', { class: 'bb-st-sub' }, 'Table and bowl'),
       h('label', { class: 'bb-dbg-field' }, h('span', {}, 'bowl height above the floor'), numIn(() => bg.bowlHeight ?? 4, (v) => { if (v >= 0) { bg.bowlHeight = v; api.touch('backgrounds'); } }, 0.5)),
       bg.table ? null : h('div', { class: 'bb-st-instbody' },

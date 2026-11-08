@@ -27,6 +27,7 @@
 // Changes that touch the physics (shapes, bowls, materials, tuning, levels) take effect when the level restarts (or switch on "auto-restart").
 
 import * as S from './shared.js';
+import { blockShaderControls, waterControls } from './water-ui.js';
 import { createStudio } from './studio.js';
 import { clone, h, NS, svg } from './ui.js';
 
@@ -75,7 +76,7 @@ export function createDebugMenu(view) {
 
   // ── draft -> server ──────────────────────────────────────────────────────────────────────────────────────
   function validate() {
-    state.problems = S.validateDefinitions(draft, { shaderNames: shaderNames() });
+    state.problems = S.validateDefinitions(draft, { shaderNames: shaderNames(), waterShaderNames: view.waterShaderNames });
     renderStatus();
     return state.problems.length === 0;
   }
@@ -109,8 +110,13 @@ export function createDebugMenu(view) {
   const LOCAL_EVERY = 120; //      ms: the local game follows the draft at most this often (the last change always arrives)
 
   function touchLocal(kind) {
+    if (!state.local) { // an edit only shows in the local game: switch it on (instead of sliders that seem to do nothing)
+      if (!state.autoLocalBlocked && !studio.current && view.debugRoomLevel) { enterLocal({ startRoomLevel: true }); return; }
+      localKinds.add(kind);
+      return;
+    }
     localKinds.add(kind);
-    if (!state.local || localTimer) return;
+    if (localTimer) return;
     localTimer = setTimeout(() => syncLocalNow(), Math.max(40, localLast + LOCAL_EVERY - performance.now()));
   }
 
@@ -586,7 +592,8 @@ export function createDebugMenu(view) {
         num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),
         select('explodes when it touches', [['', '(nothing)'], ...Object.keys(draft.materials)], m, 'explodesWith', 'materials'),
         m.stackLimit !== undefined ? check('no lamp (looks cracked already)', m, 'noLamp', 'materials') : null,
-        select('shader', shaderNames(), m, 'shader', 'materials'),
+        select('shader', shaderNames(), m, 'shader', 'materials', () => { delete m.shaderParams; render(); }),
+        ...blockShaderControls({ h, view, mat: m, touch, draft: () => draft, rerender: render }),
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),
       note('Block shaders (wood, glass, crackedGlass, stone1, stone2, float) use the face of the block; 3D shaders (wood2, ceramic, bark ...) work everywhere.'),
     );
@@ -754,6 +761,7 @@ export function createDebugMenu(view) {
         num('table centre z', bg.box, 'z', 'backgrounds'),
         select('table shader', shaderNames(), bg.box, 'shader', 'backgrounds'),
         ),
+      section('Water of the bowl', ...waterControls({ h, view, bg, touch, draft: () => draft, rerender: render })),
       section('Light and time of day',
         slider('time of day (hour, 12 = noon, 0 = midnight)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
         note('A level can set its own time in the Levels tab; that overrides this one.'),
@@ -835,7 +843,7 @@ export function createDebugMenu(view) {
         ta, btn('Import (replaces the tables it contains)', () => {
           try {
             const next = { ...clone(draft), ...JSON.parse(ta.value) };
-            const probs = S.validateDefinitions(next, { shaderNames: shaderNames() });
+            const probs = S.validateDefinitions(next, { shaderNames: shaderNames(), waterShaderNames: view.waterShaderNames });
             if (probs.length) return msg.replaceChildren(err(probs.slice(0, 8).join('\n')));
             draft = next;
             PHYSICS.forEach((k) => touch(k));
@@ -883,7 +891,7 @@ export function createDebugMenu(view) {
 
   // the local game: a private copy of the game that only this page runs (see the top of this file)
   const localChk = h('input', { type: 'checkbox' });
-  localChk.addEventListener('change', () => (localChk.checked ? enterLocal({ startRoomLevel: true }) : leaveLocal()));
+  localChk.addEventListener('change', () => { state.autoLocalBlocked = !localChk.checked; localChk.checked ? enterLocal({ startRoomLevel: true }) : leaveLocal(); });
   const localLabel = h('label', { class: 'bb-dbg-chk', title: 'Show and play your draft in a private copy of the game that runs in this page. Nobody else sees it and nothing is sent to the room; the room goes on without you.' }, localChk, 'Local game');
   const header = h('div', { class: 'bb-dbg-head' },
     h('strong', {}, 'Debug'),
