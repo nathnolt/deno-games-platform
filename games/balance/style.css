@@ -293,3 +293,24 @@ button.bb-card:disabled { opacity: .6; cursor: default; }
 .bb-st-ord-row { display: flex; align-items: center; gap: .5rem; padding: 2px 4px; border-radius: 6px; }
 .bb-st-ord-row:hover { background: rgba(255,255,255,.05); }
 .bb-st-ord-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── shader studio (shader-studio.js) ── */
+.bb-sh-body { display: flex; flex-direction: column; gap: .5rem; padding: .6rem .7rem; overflow-y: auto; min-height: 0; flex: 1; }
+.bb-sh-pick { flex: 1; min-width: 0; }
+.bb-sh-preview { flex: none; }
+.bb-sh-code { flex: 1; min-height: 240px; width: 100%; box-sizing: border-box; resize: vertical; white-space: pre; overflow: auto; tab-size: 2; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #dbe4ff; background: #070a14; border: 1px solid #2b3550; border-radius: 6px; padding: .5rem .6rem; outline: none; }
+.bb-sh-code:focus { border-color: #4a5a94; }
+.bb-sh-errors { display: flex; flex-direction: column; gap: .25rem; }
+.bb-sh-err { text-align: left; font: 12px/1.35 ui-monospace, Menlo, Consolas, monospace; color: #fecaca; background: rgba(185, 28, 28, .22); border: 1px solid #b91c1c; border-radius: 6px; padding: .3rem .5rem; cursor: pointer; }
+.bb-sh-help { font-size: 12px; color: #94a3b8; }
+.bb-sh-help pre { white-space: pre-wrap; margin: .4rem 0 0; font: 11.5px/1.45 ui-monospace, Menlo, Consolas, monospace; color: #cbd5e1; }
+.bb-dbg-btn.bb-off { opacity: .45; pointer-events: none; }
+
+/* ── graphics menu ── */
+.bb-gfx-btn { position: absolute; right: .75rem; bottom: .75rem; z-index: 30; }
+.bb-gfx { display: none; position: absolute; right: .75rem; bottom: 3.3rem; z-index: 30; width: 15rem; padding: .7rem .8rem; background: rgba(13, 17, 30, .94); color: #e5e7eb; border: 1px solid #3b4668; border-radius: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, .4); font-size: 13px; pointer-events: auto; }
+.bb-gfx.bb-show { display: block; }
+.bb-gfx-title { font-weight: 700; margin-bottom: .4rem; }
+.bb-gfx-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .22rem 0; }
+.bb-gfx-row select { max-width: 9rem; }
+.bb-gfx-hint { margin-top: .4rem; color: #94a3b8; font-size: 12px; }

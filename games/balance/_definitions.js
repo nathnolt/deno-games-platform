@@ -56,7 +56,7 @@ export const materials = {
   wood:            { friction: 10, weight: 10, shader: 'wood' },
   glass:           { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
   crackedGlass:    { friction: 4, weight: 5, shader: 'crackedGlass', stackLimit: 0, noLamp: true }, // breaks as soon as one block rests on it
-  static:          { static: true, friction: 12, shader: 'stone2' },
+  static:          { static: true, friction: 12, shader: 'stone1' },
   waterBlock:      { static: true, friction: 0, hazard: true, shader: 'waterBlock' }, // a block of water that stays where it is: touch it and you lose
   floatBlock:      { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
   floatierBlock:   { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.9 },
@@ -66,6 +66,7 @@ export const materials = {
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────
 // The shapes live in their own file: ./_shapes.js (the shape studio rewrites it when you press "Add shape" / "Update shape").
 export * from './_shapes.js'; // (shapes, grouped by category)
+export * from './_shaders.js'; // (shaderCode: the shaders made or changed in the shader studio)
 
 // ── Bowls ────────────────────────────────────────────────────────────────────────────────────────────────────
 // The bowl is a bowl of revolution: a flat bottom, rounded corners and straight walls. The physics sees the slice through the middle

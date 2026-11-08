@@ -30,7 +30,9 @@ const shapeCategories = nestedShapes
   : (DEFS.shapeCategories ?? {});
 /** Every shape of every category, in order. */
 const shapes = nestedShapes ? Object.fromEntries(Object.values(shapeFile).flatMap((group) => Object.entries(group))) : shapeFile;
-export { backgrounds, bowls, levels, materials, models, shapes, shapeCategories, tuning, worlds };
+/** The shaders made or changed in the shader studio: { name: { type?, code } } (see _shaders.js). */
+const shaderCode = DEFS.shaderCode ?? {};
+export { backgrounds, bowls, levels, materials, models, shapes, shapeCategories, shaderCode, tuning, worlds };
 
 /** The category name of a shape. */
 export const categoryOf = (key, cats = shapeCategories) => (typeof cats[key] === 'string' && cats[key] ? cats[key] : OTHER_CATEGORY);
@@ -761,9 +763,9 @@ export const LOSE_TEXT = {
 };
 
 // ── Definitions: copy, replace, check, export ────────────────────────────────────────────────────────────────
-const TABLES = ['tuning', 'materials', 'shapes', 'shapeCategories', 'bowls', 'models', 'backgrounds', 'worlds', 'levels'];
+const TABLES = ['tuning', 'materials', 'shapes', 'shapeCategories', 'shaderCode', 'bowls', 'models', 'backgrounds', 'worlds', 'levels'];
 export const DEFINITION_TABLES = TABLES;
-const live = { tuning, materials, shapes, shapeCategories, bowls, models, backgrounds, worlds, levels };
+const live = { tuning, materials, shapes, shapeCategories, shaderCode, bowls, models, backgrounds, worlds, levels };
 
 /** A deep copy of all definitions (plain JSON data). */
 export function cloneDefinitions() {
@@ -953,6 +955,14 @@ export function validateDefinitions(defs, extra = {}) {
     });
   }
 
+  // shaders of the shader studio
+  for (const [k, e] of Object.entries(d.shaderCode ?? {})) {
+    if (!/^[A-Za-z][\w-]{0,39}$/.test(k)) err(`shader "${k}": the name starts with a letter and has at most 40 letters, digits, - or _`);
+    else if (!e || typeof e.code !== 'string' || !e.code.trim()) err(`shader ${k}: it has no code`);
+    else if (e.code.length > 40000) err(`shader ${k}: the code is too long (40000 characters at most)`);
+    else if (e.type !== undefined && !['opaque', 'transparent', 'refract'].includes(e.type)) err(`shader ${k}: type must be opaque, transparent or refract`);
+  }
+
   // shape categories
   for (const [k, c] of Object.entries(d.shapeCategories ?? {})) {
     if (!shp[k]) err(`shape category: there is no shape called "${k}"`);
@@ -1061,6 +1071,32 @@ const SHAPES_HEAD = [
   '',
 ].join('\n');
 
+/** The header comment of _shaders.js. */
+const SHADERS_HEAD = [
+  '// Runs on BOTH server and browser. Pure data: ALL the SHADERS of the game (edit them in the shader studio of the debug menu). _definitions.js re-exports them.',
+  '//',
+  "//   export const shaderCode = { name: { type?: 'opaque' | 'transparent' | 'refract', code: `...GLSL...` }, ... }",
+  '//',
+  '// EVERY shader of the game is here (shaders.js only has the common part that all of them start with). The name is what materials, bowls, models and backgrounds',
+  '// pick; a new name is a new shader.',
+  '// `code` is what comes after the common part of every shader (the varyings, uniforms, noise functions, lighting and finish(): see shaders.js);',
+  '// it has to define main() and end by setting gl_FragColor, usually with finish(colour, 1.0).',
+  '// type: opaque (default) = a normal solid surface, transparent = drawn after the solid things without depth writes,',
+  '//       refract = transparent AND it bends the picture behind it (needs the REFRACT_GLSL part: copy a glass shader to start).',
+  '//',
+  '// With `DEBUG = true` the shader studio writes this file for you when you press "Save shader" and confirm it (comments are not kept).',
+  '// That needs write permission:',
+  '//   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js,games/balance/_shaders.js     (on the "start" and "dev" tasks)',
+  '',
+].join('\n');
+
+/** The whole _shaders.js file for the table of shaders (the code goes in template literals so it stays readable). */
+export function serializeShaders(table) {
+  const esc = (t) => String(t).replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+  const items = Object.entries(table ?? {}).map(([k, e]) => `  ${IDENT.test(k) ? k : quote(k)}: {\n${e.type ? `    type: '${e.type}',\n` : ''}    code: \`${esc(e.code)}\`,\n  },`);
+  return `${SHADERS_HEAD}\nexport const shaderCode = {${items.length ? `\n${items.join('\n')}\n` : ''}};\n`;
+}
+
 /** The flat table of shapes as _shapes.js holds it: { Category: { shapeKey: [parts] } }. (Categories in order of first appearance, 'Other' last.) */
 export function nestShapes(table, categories = {}) {
   const out = {};
@@ -1111,8 +1147,8 @@ export function serializeDefinitions(defs) {
     '//   levels        (in their own file, _levels.js, grouped in worlds)',
     '',
   ];
-  const tables = TABLES.filter((n) => n !== 'levels' && n !== 'worlds' && n !== 'shapes' && n !== 'shapeCategories').map((n) => serializeTable(n, defs[n])).join('\n');
-  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes } from './_shapes.js';\nexport { levels } from './_levels.js';\n`;
+  const tables = TABLES.filter((n) => n !== 'levels' && n !== 'worlds' && n !== 'shapes' && n !== 'shapeCategories' && n !== 'shaderCode').map((n) => serializeTable(n, defs[n])).join('\n');
+  return `${head.join('\n')}\n${tables}\n// ── Shapes: in ./_shapes.js, levels: in ./_levels.js (the studios rewrite those files when you press Add / Update) ──\nexport { shapes } from './_shapes.js';\nexport { shaderCode } from './_shaders.js';\nexport { levels } from './_levels.js';\n`;
 }
 
 syncDefinitions();

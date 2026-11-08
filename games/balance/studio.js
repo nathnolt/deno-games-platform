@@ -1,4 +1,4 @@
-// CLIENT ONLY: the two studios of the debug menu (loaded by debug.js, so only with DEBUG on).
+// CLIENT ONLY: the studios of the debug menu (the shader studio is in shader-studio.js) (loaded by debug.js, so only with DEBUG on).
 //
 //   SHAPE STUDIO  A 2D board that shows EVERY shape at the same scale, side by side, next to the cross-section of a bowl, so you can judge
 //                 how they fit together. Drag corners to reshape, click an edge to add a corner, right-click a corner to remove it.
@@ -19,6 +19,7 @@
 // After a confirmation they send that ONE level / shape to the server, which writes _levels.js / _shapes.js; every room then uses it.
 
 import * as S from './shared.js';
+import { shaderStudio } from './shader-studio.js';
 import { clone, h, svg } from './ui.js';
 
 const KEY = /^[A-Za-z][\w-]*$/;
@@ -2485,8 +2486,9 @@ export function createStudio(view, api) {
   const shapesS = shapeStudio(view, api);
   const levelsS = levelStudio(view, api);
   const bgS = backgroundStudio(view, api);
-  const pane = (n) => (n === 'shapes' ? shapesS : n === 'backgrounds' ? bgS : levelsS);
-  const root = h('div', { class: 'bb-st-host' }, shapesS.el, levelsS.el, bgS.el);
+  const shaderS = shaderStudio(view, { ...api, confirmDialog });
+  const pane = (n) => (n === 'shapes' ? shapesS : n === 'backgrounds' ? bgS : n === 'shaders' ? shaderS : levelsS);
+  const root = h('div', { class: 'bb-st-host' }, shapesS.el, levelsS.el, bgS.el, shaderS.el);
   let current = null;
   return {
     el: root,
@@ -2516,6 +2518,7 @@ export function createStudio(view, api) {
       shapesS.dispose();
       levelsS.dispose();
       bgS.dispose();
+      shaderS.dispose();
       root.remove();
     },
   };

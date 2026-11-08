@@ -227,11 +227,21 @@ export function createDebugMenu(view) {
   function color(label, obj, key, kind) {
     const v = /^#[0-9a-f]{6}$/i.test(obj[key] ?? '') ? obj[key] : '#888888';
     const i = h('input', { type: 'color', value: v });
+    const code = h('code', {}, v);
+    // While the colour is dragged around only the colours of the sky and ground are updated (cheap: a few uniforms). Everything else (the local game gets the
+    // draft, the blocks and the scenery are rebuilt) waits until the colour is let go: dragging used to rebuild the whole game for every pixel of the picker.
     i.addEventListener('input', () => {
       obj[key] = i.value;
+      code.textContent = i.value;
+      touch(kind, true, true);
+      view.debugLiveColors(draft);
+    });
+    i.addEventListener('change', () => {
+      obj[key] = i.value;
+      code.textContent = i.value;
       touch(kind);
     });
-    return field(label, i, h('code', {}, v));
+    return field(label, i, code);
   }
   function slider(label, obj, key, kind, min, max, step) {
     const r = h('input', { type: 'range', min, max, step, value: obj[key] });
@@ -888,6 +898,7 @@ export function createDebugMenu(view) {
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
     btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
+    btn('Shader studio', () => openStudio('shaders'), 'bb-dbg-go'),
     btn('Reset completed levels', () => {
       if (!window.confirm('Forget which levels you have completed (kept in this browser) and reload?')) return;
       try { localStorage.removeItem('balance.done'); } catch { /* ignore */ }

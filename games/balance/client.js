@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, levels, LOSE_TEXT, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
@@ -10,7 +10,7 @@ const PRISTINE = DEBUG ? cloneDefinitions() : null;
 import { flatNormals, parseObj } from './obj.js';
 import { svg } from './ui.js';
 import { CURSOR_SIZE, handCanvas, handCursors, handHot } from './hands.js';
-import { deformShaders, SHADOW_GLSL, refractShaders, shaders, transparentShaders, vertexShader, waveVertexShader } from './shaders.js';
+import { deformShaders, frag, PRELUDE_LINES, SHADOW_GLSL, vertexShader, waveVertexShader } from './shaders.js';
 
 // All styling lives in ./style.css (static, prefixed bb-). It is attached once, the first time the game is mounted.
 function loadStyles() {
@@ -41,6 +41,13 @@ const rawColor = (hex) => {
 };
 const ROTATE_ANIM = 30; //      how fast the block in your hand turns to a new angle: it has turned 95% of the way in about 0.1 s
 const RELEASE_DELAY = 50;  //   ms between letting go of the mouse and the block really dropping (pressing again in that time picks it back up)
+const GFX_STORE = 'balance.gfx'; // localStorage: the graphics settings
+/** Graphics presets. filter: 0 = off, 1 = trilinear, 2 = anisotropic 4x, 3 = anisotropic 16x (sampled textures and the smoothing of fine procedural patterns at steep angles); detail: 0 = flat surfaces, 1 = roughness maps, 2 = roughness and bump maps; scale = the share of the screen's pixels that is drawn. */
+const GFX_PRESETS = {
+  low: { detail: 0, filter: 0, shadows: false, reflection: false, blur: false, refraction: false, scale: 0.6 },
+  medium: { detail: 1, filter: 1, shadows: true, reflection: true, blur: true, refraction: true, scale: 0.85 },
+  high: { detail: 2, filter: 3, shadows: true, reflection: true, blur: true, refraction: true, scale: 1 },
+};
 const STORE = 'balance.done'; // localStorage: the completed levels (world|name)
 const copyOf = (v) => JSON.parse(JSON.stringify(v));
 
@@ -386,6 +393,82 @@ function circleOutline(part, sides = 48) {
 const edgeRadius = () => Math.min(roundOf(), DEPTH / 2 - 0.02);
 
 /**
+ * A small stand-alone view of a shader, for the shader studio: a sphere and a block, with the shader on them, lit by a fixed daylight. Like the shape preview
+ * it only draws when something changes or when you drag it round, and dispose() gives the WebGL context back.
+ * `makeMaterial({ code, type })` makes the material (the view knows how). `update(entry)` shows a new version of the shader.
+ */
+function shaderPreview3d(host, makeMaterial) {
+  const H = 200;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(Math.max(260, host.clientWidth || 360), H, false);
+  const el = renderer.domElement;
+  el.style.cssText = `display:block;width:100%;height:${H}px;border-radius:6px;background:linear-gradient(#cfd6e4,#8c97ad);touch-action:none;cursor:grab`;
+  host.append(el);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(30, el.width / el.height, 0.1, 100);
+  camera.position.set(0, 0, 9.5);
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1.45, 64, 48));
+  const block = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.9, 1.9));
+  sphere.position.x = -1.7;
+  block.position.x = 1.8;
+  scene.add(sphere, block);
+  let material = null;
+  let yaw = 0.5;
+  let pitch = -0.25;
+  let error = '';
+  renderer.debug.onShaderError = (gl, program, vs, fs) => { error = gl.getShaderInfoLog(fs) || gl.getProgramInfoLog(program) || 'the shader does not compile'; };
+  const render = () => {
+    block.rotation.set(pitch, yaw, 0);
+    sphere.rotation.set(pitch * 0.5, yaw * 0.5, 0);
+    renderer.render(scene, camera);
+  };
+  let drag = null;
+  const down = (e) => { drag = { x: e.clientX, y: e.clientY }; el.setPointerCapture?.(e.pointerId); el.style.cursor = 'grabbing'; };
+  const move = (e) => {
+    if (!drag) return;
+    yaw += (e.clientX - drag.x) * 0.012;
+    pitch = Math.max(-1.5, Math.min(1.5, pitch + (e.clientY - drag.y) * 0.012));
+    drag = { x: e.clientX, y: e.clientY };
+    render();
+  };
+  const up = () => { drag = null; el.style.cursor = 'grab'; };
+  el.addEventListener('pointerdown', down);
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', up);
+  return {
+    /** Show this version. Returns an error text, or '' when it compiled. */
+    update(entry) {
+      error = '';
+      const old = material;
+      try {
+        material = makeMaterial(entry);
+        sphere.material = material;
+        block.material = material;
+        render();
+      } catch (e) {
+        error = `${e?.message ?? e}`;
+      }
+      old?.dispose();
+      return error;
+    },
+    dispose() {
+      el.removeEventListener('pointerdown', down);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      material?.dispose();
+      sphere.geometry.dispose();
+      block.geometry.dispose();
+      renderer.dispose();
+      renderer.forceContextLoss?.();
+      el.remove();
+    },
+  };
+}
+
+/**
  * A small stand-alone 3D view of one shape, for the shape studio: it is only created when the player asks for it, draws only when the shape changes or
  * the player drags it round (never in a loop), and dispose() gives the WebGL context back. `update(def)` rebuilds the block from a shape definition
  * (exactly as the game does) and returns an error text when the definition is not valid.
@@ -531,6 +614,11 @@ class BalanceView {
   markersOn = false;
   fogs = []; //      the mist colours of the world: { value, base }, tinted by the time of day
   mistNow = new THREE.Color('#e7e2d6');
+  aaU = { value: 1 }; //       uAA of every block shader: how strongly fine patterns fade out where they get smaller than a pixel (the texture filtering setting)
+  qualityU = { value: 1 }; // uQuality of every block shader: the surface detail setting of the graphics menu (0 low, 1 roughness maps, 2 roughness + bump maps)
+  gfx = null; //            the graphics settings (see GFX_PRESETS), kept in this browser
+  gfxPanel = null;
+  floorMat = null; //       the material of the floor (debugLiveColors changes its colours without rebuilding the world)
   waterU = { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 } };
   bgFx = { blur: 0, light: null };
   scenery = null; //  the part of the world that is blurred: the floor and the models of the background
@@ -624,6 +712,9 @@ class BalanceView {
     this.root = el('div', { class: 'bb-root' }, this.renderer.domElement, this.hud, this.cdEl, this.menu, this.result);
     ctx.container.append(this.root);
     this.hands = handCursors(meta.seatColors[ctx.me.slot] ?? '#ffffff'); // your cursor is a hand in YOUR colour
+    this.#loadGfx();
+    this.#buildGfx();
+    this.#applyGfx(false);
     this.#setScene(null);
 
     this.observer = new ResizeObserver(() => this.#resize());
@@ -896,6 +987,25 @@ class BalanceView {
     return shapePreview3d(host);
   }
 
+  /**
+   * The sky (mist) and ground colours of the draft, shown NOW and cheaply: only the colours change (a few uniforms), nothing is rebuilt. The debug menu calls this
+   * while a colour is being dragged; the full update (the local game gets the draft, everything is rebuilt) follows when the colour is let go.
+   */
+  debugLiveColors(defs) {
+    const bg = defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)];
+    if (!bg || !this.bgFx) return;
+    if (typeof bg.mist === 'string') {
+      this.bgFx.mist = bg.mist;
+      for (const f of this.fogs) f.base.copy(rawColor(bg.mist));
+    }
+    const u = this.floorMat?.uniforms;
+    if (u && bg.ground) {
+      if (typeof bg.ground.colorA === 'string') u.uA.value.copy(rawColor(bg.ground.colorA));
+      if (typeof bg.ground.colorB === 'string') u.uB.value.copy(rawColor(bg.ground.colorB));
+    }
+    this.#applyDay();
+  }
+
   /** Rebuild everything that is drawn from the definitions: the block geometry, the level cards and the world. */
   debugRefresh() {
     try {
@@ -1054,7 +1164,49 @@ class BalanceView {
   }
 
   get shaderNames() {
-    return Object.keys(shaders);
+    return Object.keys(shaderCode);
+  }
+
+  // ── the shader studio (debug): what it needs from the view ──
+  /** (There are no built-in shaders any more: all of them are in _shaders.js.) */
+  get debugBuiltinNames() {
+    return [];
+  }
+
+  /** The code of a built-in shader, the part you edit (what is in shaders.js, without the common part every shader starts with). */
+  debugShaderBody(name) {
+    return shaderCode[name]?.code ?? '';
+  }
+
+  /** The type ('opaque' | 'transparent' | 'refract') the built-in shader of that name has. */
+  debugBuiltinType(name) {
+    return shaderCode[name]?.type ?? 'opaque';
+  }
+
+  /**
+   * Compile `code` (what comes after the common part) in a scratch WebGL context, without drawing anything.
+   * @returns {{ ok: boolean, errors: { line: number, text: string }[] }} the lines are lines of `code` (line 1 = its first line)
+   */
+  debugCheckShader(code) {
+    const gl = (this.scratchGl ??= document.createElement('canvas').getContext('webgl'));
+    if (!gl) return { ok: true, errors: [] }; // (no way to check here: the game will say)
+    gl.getExtension('OES_standard_derivatives'); // (the bump maps use the difference between neighbouring pixels; the game's own context has it built in)
+    const src = `#extension GL_OES_standard_derivatives : enable${frag(code)}`.replace('precision highp float;', 'precision highp float; uniform vec3 cameraPosition;'); // (the directive shares line 1 with the empty first line of the shader: the line numbers stay right)
+    const sh = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    const ok = !!gl.getShaderParameter(sh, gl.COMPILE_STATUS);
+    const log = ok ? '' : gl.getShaderInfoLog(sh) ?? '';
+    gl.deleteShader(sh);
+    const errors = [];
+    for (const m of log.matchAll(/ERROR:\s*\d+:(\d+):\s*(.*)/g)) errors.push({ line: Math.max(1, +m[1] - PRELUDE_LINES), text: m[2].trim() });
+    if (!ok && !errors.length) errors.push({ line: 1, text: log.trim() || 'the shader does not compile' });
+    return { ok, errors };
+  }
+
+  /** A small stand-alone window that shows a sphere and a block with a shader made from `{ code, type }`: see shaderPreview3d. */
+  debugShaderPreview(host) {
+    return shaderPreview3d(host, (entry) => this.#blockMaterial('stone1', 0.3, THREE.FrontSide, null, true, entry));
   }
 
   /** Orbit camera: drag = turn, right-drag = move, wheel = zoom. Off = the normal camera again. */
@@ -1415,7 +1567,7 @@ class BalanceView {
     // the ground: raked sand or wooden planks. Ripples run around the table like around a rock, and the far end fades into mist.
     this.floorMesh = null;
     if (bg.ground?.style !== 'none') { // ('no floor': just the sky colour behind the table)
-      const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), this.#floorMaterial(bg, fog));
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), (this.floorMat = this.#floorMaterial(bg, fog)));
       floor.rotation.x = -Math.PI / 2;
       floor.position.y = floorY;
       floor.userData.blurLevel = blurLevelOf(bg.ground?.blur);
@@ -1521,6 +1673,7 @@ float waveH(vec2 p, float t) {
     return new THREE.ShaderMaterial({
       uniforms: {
         uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: bowl.water.opacity }, uTime: this.uTime, ...u,
+        uSky: { value: plain ? new THREE.Color('#cfd6e4') : this.mistNow }, // the colour of the sky (the mist, tinted by the time of day): the water mirrors it
         uGrid: { value: foot ? 1 : 0 },
         uFoot: { value: new THREE.Vector3(foot?.rw ?? 1, foot?.rz ?? 1, foot?.n ?? 2) },
       },
@@ -1552,6 +1705,7 @@ uniform float uReflStr;
 uniform vec3 uLightDir;
 uniform vec3 uLightCol;
 uniform vec3 uAmbSky;
+uniform vec3 uSky;
 ${WAVES}
 void main() {
   float top = 0.0;
@@ -1569,6 +1723,12 @@ void main() {
   vec3 col = uColor * ((uAmbSky * 0.7 + uLightCol * 0.35) * 1.28); // the colour of the water follows the light of the day
   float alpha = uOpacity;
   float fres = pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 3.0);
+  // the sky: the water mirrors its colour (the horizon is the mist, higher up it is a little bluer and darker), most at a low angle, and a bit even head-on
+  vec3 R = reflect(-V, N);
+  vec3 skyCol = mix(uSky, uAmbSky * 1.3 + uSky * 0.35, clamp(R.y, 0.0, 1.0) * 0.6);
+  float sk = (0.14 + 0.6 * fres) * top;
+  col = mix(col, skyCol, sk);
+  alpha = mix(alpha, 1.0, sk * 0.35);
   if (uReflStr > 0.0 && top > 0.0) {
     vec4 pr = uReflMat * vec4(vW, 1.0);
     vec2 uv = pr.xy / pr.w + N.xz * 0.12; // the waves bend the mirror image
@@ -1799,16 +1959,29 @@ void main() {
   }
 
   /** One ShaderMaterial per block; the time uniform is shared by all of them. */
-  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false) {
-    const transparent = transparentShaders.has(shaderName);
+  /** 'opaque' | 'transparent' | 'refract': what the blocks of this shader need (a shader of the shader studio brings its own type; a replaced built-in keeps the old one). */
+  #shaderType(name) {
+    return shaderCode[name]?.type ?? 'opaque';
+  }
+
+  /** The source of a shader: its entry in _shaders.js. */
+  #fragmentOf(name) {
+    return frag((shaderCode[name] ?? shaderCode.stone1)?.code ?? 'void main() { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); }'); // (an unknown name looks like stone1)
+  }
+
+  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false, draft = null) {
+    const type = draft ? draft.type ?? 'opaque' : this.#shaderType(shaderName); // (`draft` = { code, type } of a shader that is being edited: the preview of the shader studio)
+    const transparent = type !== 'opaque';
     return new THREE.ShaderMaterial({
       vertexShader: deformShaders.has(shaderName) ? waveVertexShader : vertexShader,
-      fragmentShader: shaders[shaderName] ?? shaders.stone1,
+      fragmentShader: draft ? frag(draft.code) : this.#fragmentOf(shaderName),
       uniforms: {
         uTime: this.uTime,
         uSeed: { value: seed },
         uGlow: { value: new THREE.Vector3() },
         uBad: { value: 0 },
+        uQuality: this.qualityU,
+        uAA: this.aaU,
         uCausOn: { value: 1 },
         uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
         uReveal: { value: 1 }, //     below 1 the block dissolves in (see finish() in shaders.js)
@@ -1821,6 +1994,7 @@ void main() {
       transparent,
       depthWrite: !transparent,
       side,
+      extensions: { derivatives: true }, // (the cheap bump map reads the difference between neighbouring pixels)
     });
   }
 
@@ -1934,8 +2108,8 @@ void main() {
     for (const { geo } of this.#geometries(shapeKey, deformShaders.has(shaderName))) {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.userData.id = id;
-      if (transparentShaders.has(shaderName)) mesh.renderOrder = 3;
-      if (refractShaders.has(shaderName)) mesh.layers.set(2); // layer 2 = glass: drawn in a pass of its own, after a copy of the picture has been made (#renderAll)
+      if (this.#shaderType(shaderName) !== 'opaque') mesh.renderOrder = 3;
+      if (this.#shaderType(shaderName) === 'refract') mesh.layers.set(2); // layer 2 = glass: drawn in a pass of its own, after a copy of the picture has been made (#renderAll)
       group.add(mesh);
     }
     this.scene.add(group);
@@ -1954,7 +2128,7 @@ void main() {
     }
 
     const v = {
-      glass: refractShaders.has(shaderName),
+      glass: this.#shaderType(shaderName) === 'refract',
       dot, limit, load: -1, // (limit also marks a block that shatters, with or without a lamp)
       id, group, mats: [mat], marker: null, size: getShape(shapeKey), shapeKey,
       table: !!opts.table, slot: opts.slot ?? 0, n: opts.n ?? 4,
@@ -2011,6 +2185,83 @@ void main() {
   }
 
   /** Another player's held block carries a small dot in their seat colour, so you can tell who holds what (the block itself is never tinted). */
+  // ── graphics menu: what a player can switch off to make the game run better ──
+  #loadGfx() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(GFX_STORE) ?? 'null'); } catch { /* ignore */ }
+    const g = { preset: 'medium', ...GFX_PRESETS.medium };
+    if (saved && typeof saved === 'object') {
+      if (saved.preset === 'custom' || GFX_PRESETS[saved.preset]) g.preset = saved.preset;
+      if (GFX_PRESETS[g.preset]) Object.assign(g, GFX_PRESETS[g.preset]);
+      if (g.preset === 'custom') {
+        if ([0, 1, 2].includes(saved.detail)) g.detail = saved.detail;
+        if ([0, 1, 2, 3].includes(saved.filter)) g.filter = saved.filter;
+        for (const k of ['shadows', 'reflection', 'blur', 'refraction']) if (typeof saved[k] === 'boolean') g[k] = saved[k];
+        if (typeof saved.scale === 'number' && saved.scale >= 0.4 && saved.scale <= 1) g.scale = saved.scale;
+      }
+    }
+    this.gfx = g;
+  }
+
+  /** Use the settings: the surface detail, the effects that are switched off, the resolution. */
+  #applyGfx(resize = true) {
+    const g = this.gfx;
+    this.qualityU.value = g.detail;
+    this.aaU.value = [0, 1, 1.5, 2][g.filter] ?? 1;
+    if (this.fx?.reflRT) { this.fx.reflRT.dispose(); this.fx.reflRT = null; } // (made again with the new texture filtering)
+    for (const k of ['shadows', 'reflection', 'blur', 'refraction']) this.debugFx(k, g[k]);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2) * g.scale);
+    if (resize) this.#resize();
+    try { localStorage.setItem(GFX_STORE, JSON.stringify(g)); } catch { /* ignore */ }
+  }
+
+  #buildGfx() {
+    const g = this.gfx;
+    const refs = {};
+    const set = (patch) => { // one setting changed by hand: the preset becomes "custom"
+      Object.assign(g, patch, { preset: 'custom' });
+      refs.preset.value = 'custom';
+      this.#applyGfx();
+    };
+    const select = (options, value, onchange) => {
+      const e = el('select');
+      for (const [v, l] of options) e.append(el('option', { value: String(v) }, l));
+      e.value = String(value);
+      e.addEventListener('change', () => onchange(e.value));
+      return e;
+    };
+    const check = (key, label) => {
+      const e = el('input', { type: 'checkbox' });
+      e.checked = g[key];
+      e.addEventListener('change', () => set({ [key]: e.checked }));
+      refs[key] = e;
+      return el('label', { class: 'bb-gfx-row' }, el('span', {}, label), e);
+    };
+    refs.preset = select([['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['custom', 'Custom']], g.preset, (v) => {
+      if (!GFX_PRESETS[v]) return;
+      Object.assign(g, GFX_PRESETS[v], { preset: v });
+      refs.detail.value = String(g.detail);
+      refs.filter.value = String(g.filter);
+      refs.scale.value = String(g.scale);
+      for (const k of ['shadows', 'reflection', 'blur', 'refraction']) refs[k].checked = g[k];
+      this.#applyGfx();
+    });
+    refs.detail = select([[0, 'Flat'], [1, 'Roughness'], [2, 'Roughness and bumps']], g.detail, (v) => set({ detail: +v }));
+    refs.filter = select([[0, 'Off'], [1, 'Trilinear'], [2, 'Anisotropic 4x'], [3, 'Anisotropic 16x']], g.filter, (v) => set({ filter: +v }));
+    refs.scale = select([[0.6, '60%'], [0.75, '75%'], [0.85, '85%'], [1, '100%']], g.scale, (v) => set({ scale: +v }));
+    this.gfxPanel = el('div', { class: 'bb-gfx' },
+      el('div', { class: 'bb-gfx-title' }, 'Graphics'),
+      el('label', { class: 'bb-gfx-row' }, el('span', {}, 'Preset'), refs.preset),
+      el('label', { class: 'bb-gfx-row' }, el('span', {}, 'Surface detail'), refs.detail),
+      el('label', { class: 'bb-gfx-row' }, el('span', {}, 'Texture filtering'), refs.filter),
+      el('label', { class: 'bb-gfx-row' }, el('span', {}, 'Resolution'), refs.scale),
+      check('shadows', 'Shadows'), check('reflection', 'Water reflections'), check('blur', 'Background blur'), check('refraction', 'Glass bending'),
+      el('div', { class: 'bb-gfx-hint' }, 'If the game runs badly, pick Low.'));
+    const btn = el('button', { type: 'button', class: 'bb-btn bb-gfx-btn', title: 'Graphics settings' }, 'Graphics');
+    btn.addEventListener('click', () => this.gfxPanel.classList.toggle('bb-show'));
+    this.root.append(btn, this.gfxPanel);
+  }
+
   /** Your hand: closed while a block is in it, pointing over a block you can pick up, open otherwise. */
   #syncCursor() {
     if (!this.hands) return;
@@ -2635,7 +2886,10 @@ void main() {
     const w = Math.max(16, Math.round(size.x / 2));
     const h = Math.max(16, Math.round(size.y / 2));
     if (!fx.reflRT) {
-      fx.reflRT = new THREE.WebGLRenderTarget(w, h);
+      const f = this.gfx?.filter ?? 1; // texture filtering: mipmaps (trilinear) and anisotropy, so the reflection stays sharp at a steep angle
+      fx.reflRT = new THREE.WebGLRenderTarget(w, h, f > 0
+        ? { generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter, anisotropy: f === 1 ? 1 : Math.min(f === 2 ? 4 : 16, r.capabilities.getMaxAnisotropy?.() ?? 1) }
+        : {});
       fx.reflCam = new THREE.PerspectiveCamera();
     } else if (fx.reflRT.width !== w || fx.reflRT.height !== h) {
       fx.reflRT.setSize(w, h);

@@ -9,7 +9,7 @@
 // The gameplay is 2D (x, y); the 3D look is purely client-side.
 import {
   applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, groundYOf, inDrop, levels, LOSE,
-  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, orderLevels, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, isPlayerColor, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
+  materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, orderLevels, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, serializeShaders, isPlayerColor, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
 let planck = null;
@@ -310,7 +310,7 @@ export class BalanceGame {
     activate(this.defs);
     const next = cloneDefinitions();
     const add = req.op === 'add';
-    if (!add && req.op !== 'update') return fail('unknown request');
+    if (!add && req.op !== 'update' && !(req.kind === 'shader' && req.op === 'delete')) return fail('unknown request');
     let file;
     let text;
     let more = null; // a second file to write: [name, text]
@@ -384,6 +384,20 @@ export class BalanceGame {
       else delete next.shapeCategories[key];
       file = '_shapes.js';
       text = serializeShapes(next.shapes, next.shapeCategories);
+    } else if (req.kind === 'shader') {
+      const key = req.key;
+      if (typeof key !== 'string' || !/^[A-Za-z][\w-]{0,39}$/.test(key)) return fail('a shader name starts with a letter and has at most 40 letters, digits, - or _');
+      next.shaderCode ??= {};
+      if (req.op === 'delete') {
+        if (!Object.hasOwn(next.shaderCode, key)) return fail(`there is no shader called ${key} in _shaders.js`);
+        delete next.shaderCode[key];
+      } else {
+        const v = req.value;
+        if (!v || typeof v !== 'object' || typeof v.code !== 'string') return fail('that is not a shader');
+        next.shaderCode[key] = { ...(v.type ? { type: v.type } : {}), code: v.code };
+      }
+      file = '_shaders.js';
+      text = serializeShaders(next.shaderCode);
     } else {
       return fail('unknown request');
     }
@@ -396,7 +410,7 @@ export class BalanceGame {
     } catch (e) {
       const denied = /permission|capable|--allow-write|requires write/i.test(`${e?.name} ${e?.message}`);
       return fail(denied
-        ? `${file} could not be written: Deno has no write permission. Add --allow-write=games/balance/_levels.js,games/balance/_shapes.js to the "start" (and "dev") task in deno.json, then restart the server.`
+        ? `${file} could not be written: Deno has no write permission. Add --allow-write=games/balance/_levels.js,games/balance/_shapes.js,games/balance/_shaders.js to the "start" (and "dev") task in deno.json, then restart the server.`
         : `${file} could not be written: ${e?.message ?? e}`);
     }
     activate(this.defs);

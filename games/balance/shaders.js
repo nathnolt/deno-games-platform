@@ -70,6 +70,8 @@ float shadowAt(vec3 wp, vec3 n) {
   float k2 = float(2 * uShadowK + 1);
   return lit / (k2 * k2);
 }
+float gDirect = 0.0; // how much the sun lights the surface (wrap diffuse times shadow): the last sceneLight() call leaves it here, for the blown-out look
+float gSh = 1.0; // how much of the sun reaches the surface (1 = fully lit, lower in shadow): the last sceneLight() call leaves it here, for the shine
 vec3 sceneLight(vec3 wp, vec3 n) {
   float ndl = dot(n, uLightDir);
   float wrap = clamp((ndl + 0.35) / 1.35, 0.0, 1.0);
@@ -77,6 +79,7 @@ vec3 sceneLight(vec3 wp, vec3 n) {
   float k = clamp(uShadowStr * 1.8, 0.0, 1.0); // (the strength in definitions.js: 0 = no shadows, 0.55+ = fully dark)
   sh = 1.0 - k * (1.0 - sh);
   sh = mix(1.0, sh, smoothstep(-0.05, 0.25, ndl)); // the side turned away from the light is dark anyway: no map noise there
+  gSh = sh;
   vec3 amb = mix(uAmbGround, uAmbSky, n.y * 0.5 + 0.5);
   vec3 lamps = vec3(0.0);
   for (int i = 0; i < 8; i++) { // point lights: no shadows, they fade out smoothly at their range
@@ -87,6 +90,7 @@ vec3 sceneLight(vec3 wp, vec3 n) {
     float w = clamp((dot(n, d / max(dist, 0.001)) + 0.35) / 1.35, 0.0, 1.0);
     lamps += uLCol[i] * (w * att * att);
   }
+  gDirect = wrap * sh;
   return amb + uLightCol * (wrap * sh) + lamps;
 }
 `;
@@ -98,7 +102,12 @@ varying vec3 vN;
 varying vec3 vW;
 varying vec3 vWN;
 varying float vDist;
+varying vec3 vRX; // the mesh's own x / y / z axes in the world (its rotation): a bump map made in the mesh's space is turned into the world with them
+varying vec3 vRY;
+varying vec3 vRZ;
 void main() {
+  mat3 R = mat3(modelMatrix);
+  vRX = R[0]; vRY = R[1]; vRZ = R[2];
   vP = uv; //   texture coordinates made by the client: the front face is (x, y), the sides run along the outline and up the depth
   vP3 = position;
   vW = (modelMatrix * vec4(position, 1.0)).xyz;
@@ -123,6 +132,9 @@ varying vec3 vN;
 varying vec3 vW;
 varying vec3 vWN;
 varying float vDist;
+varying vec3 vRX; // the mesh's own x / y / z axes in the world (its rotation): a bump map made in the mesh's space is turned into the world with them
+varying vec3 vRY;
+varying vec3 vRZ;
 uniform float uTime;
 uniform float uSeed;
 float vhash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
@@ -140,6 +152,8 @@ float swell(vec2 p, float t) { // slow waves, about -0.3 .. 0.3
   return h;
 }
 void main() {
+  mat3 R = mat3(modelMatrix);
+  vRX = R[0]; vRY = R[1]; vRZ = R[2];
   vP = uv;
   vP3 = position;
   float still = smoothstep(0.2, 1.3, edge); // 0 on the outline and the bevel, 1 well inside
@@ -163,6 +177,9 @@ varying vec3 vN;
 varying vec3 vW;
 varying vec3 vWN;
 varying float vDist;
+varying vec3 vRX;
+varying vec3 vRY;
+varying vec3 vRZ;
 uniform vec3 uFogColor;
 uniform vec2 uFog;
 uniform float uTime;
@@ -175,6 +192,8 @@ uniform float uCausOn; // 0 = this block gets no caustics (it is held, or waits 
 uniform float uCausInward;
 uniform float uReveal; // 1 = the block is whole; below 1 it is dissolving in (a block that just came out of its outline on the table)
 uniform vec2 uBowlHalf;
+uniform float uAA; // graphics setting (texture filtering): 0 = off, 1 = trilinear, 1.5 = anisotropic 4x, 2 = anisotropic 16x: how early fine patterns fade out
+uniform float uQuality; // graphics setting: 0 = low (no extra surface detail), 1 = medium (roughness maps), 2 = high (roughness maps and bump maps)
 
 ${SHADOW_GLSL}
 float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
@@ -183,10 +202,80 @@ float noise(vec2 p) {
   f = f * f * (3.0 - 2.0 * f);
   return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
+// fbm is FILTERED: an octave whose cells are smaller than a pixel (steep camera angles, far away) is replaced by its average, so nothing shimmers or
+// turns into streaks. (fwidth = how far p moves across one screen pixel; uAA = the texture filtering setting, 0 = off but still a little smoothing.)
 float fbm(vec2 p) {
+  vec2 fw = fwidth(p);
+  float w = max(fw.x, fw.y) * (0.6 + 0.4 * uAA);
   float s = 0.0, a = 0.5;
-  for (int i = 0; i < 4; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; }
+  for (int i = 0; i < 4; i++) {
+    float keep = 1.0 - smoothstep(0.25, 0.7, w); // 1 while a cell covers several pixels, 0 when it is smaller than one
+    s += a * mix(0.5, noise(p), keep);
+    p *= 2.03; w *= 2.03; a *= 0.5;
+  }
   return s;
+}
+// PERLIN (gradient) noise in 3D, from -1 to 1: every lattice point has a random direction, smooth quintic blending. pfbm = several octaves of it.
+float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+vec3 pgrad(vec3 p) { return vec3(h13(p), h13(p + 19.19), h13(p + 47.77)) * 2.0 - 1.0; } // (a random direction: no sin / cos / sqrt, this runs 8 times per noise call)
+float perlin(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float n000 = dot(pgrad(i), f);
+  float n100 = dot(pgrad(i + vec3(1.0, 0.0, 0.0)), f - vec3(1.0, 0.0, 0.0));
+  float n010 = dot(pgrad(i + vec3(0.0, 1.0, 0.0)), f - vec3(0.0, 1.0, 0.0));
+  float n110 = dot(pgrad(i + vec3(1.0, 1.0, 0.0)), f - vec3(1.0, 1.0, 0.0));
+  float n001 = dot(pgrad(i + vec3(0.0, 0.0, 1.0)), f - vec3(0.0, 0.0, 1.0));
+  float n101 = dot(pgrad(i + vec3(1.0, 0.0, 1.0)), f - vec3(1.0, 0.0, 1.0));
+  float n011 = dot(pgrad(i + vec3(0.0, 1.0, 1.0)), f - vec3(0.0, 1.0, 1.0));
+  float n111 = dot(pgrad(i + vec3(1.0, 1.0, 1.0)), f - vec3(1.0, 1.0, 1.0));
+  return clamp(1.15 * mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z), -1.0, 1.0);
+}
+float pfbm(vec3 p) { // 0..1
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++) { s += a * perlin(p); p *= 2.02; a *= 0.5; }
+  return clamp(s * 1.0 + 0.5, 0.0, 1.0);
+}
+// BUMP MAPS: a shader defines a height h(q) (any function of a position) and takes its slope: the surface normal then leans away from the slope.
+//   float e = 0.03; float h0 = h(q);  vec3 g = vec3(h(q + vec3(e,0,0)) - h0, h(q + vec3(0,e,0)) - h0, h(q + vec3(0,0,e)) - h0) / e;
+//   gNormal = bumpedNormal(g, 0.3, 1.0);  gHasN = 1.0;        (space: 1 = q is a position in the MESH (blocks that move), 0 = q is a position in the WORLD)
+vec3 toWorld(vec3 o) { return vRX * o.x + vRY * o.y + vRZ * o.z; }
+vec3 bumpedNormal(vec3 grad, float k, float space) {
+  vec3 n0 = normalize(vWN);
+  if (!gl_FrontFacing) n0 = -n0;
+  vec3 g = space > 0.5 ? toWorld(grad) : grad;
+  return normalize(n0 - k * (g - dot(g, n0) * n0));
+}
+// The CHEAP bump map, from the height you already have: the slope of h across the screen (derivatives of neighbouring pixels) tilts the normal. It needs
+// no extra samples of the height (the 4-sample way above costs four times as much), and any pattern can be a height: the grain of a wood, the lumps of a stone.
+//   if (uQuality > 1.5) { gNormal = bumpFromHeight(height, 0.045); gHasN = 1.0; }
+vec3 bumpFromHeight(float h, float k) {
+  vec3 n0 = normalize(vWN);
+  if (!gl_FrontFacing) n0 = -n0;
+  vec3 dpdx = dFdx(vW), dpdy = dFdy(vW);
+  vec3 r1 = cross(dpdy, n0), r2 = cross(n0, dpdx);
+  float det = dot(dpdx, r1);
+  vec3 grad = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  vec3 t = k * grad / max(abs(det), 1e-8);
+  float tl = length(t);
+  t *= min(1.0, 0.35 / max(tl, 1e-6)); // cap the tilt: derivative noise can't produce harsh spikes
+  return normalize(n0 - t);
+}
+// A roughness map: base plus a bit of Perlin noise around the position q (medium quality and up; at low quality it is just base).
+float roughMap(vec3 q, float base, float amt) { return uQuality < 0.5 ? base : clamp(base + amt * perlin(q), 0.05, 1.0); }
+// Anti-aliasing for procedural patterns: pass how many pattern cycles fit in one screen pixel (e.g. fwidth(p.y) * frequency); returns 1 while the
+// pattern is still readable and fades to 0 where it is finer than a pixel (steep viewing angles, far away), so it blends to its average instead of shimmering.
+float aaFade(float cyclesPerPixel) { return 1.0 - smoothstep(0.12, 0.45, cyclesPerPixel * (0.6 + 0.4 * uAA)); }
+// two ready-made heights: wood (fine grain stretched along x) and rock (lumps, bumps, grain)
+float woodHeight(vec3 q) { return 0.5 * perlin(q * vec3(0.6, 3.2, 0.6)) + 0.25 * perlin(q * vec3(1.5, 9.0, 1.5)) + 0.1 * perlin(q * 24.0); }
+float rockHeight(vec3 q) { return 0.55 * perlin(q * 1.5) + 0.3 * perlin(q * 4.6) + 0.16 * perlin(q * 13.0) + 0.07 * perlin(q * 31.0); }
+vec3 woodBump(vec3 q, float k, float space) {
+  float e = 0.03, h0 = woodHeight(q);
+  return bumpedNormal(vec3(woodHeight(q + vec3(e, 0.0, 0.0)) - h0, woodHeight(q + vec3(0.0, e, 0.0)) - h0, woodHeight(q + vec3(0.0, 0.0, e)) - h0) / e, k, space);
+}
+vec3 rockBump(vec3 q, float k, float space) {
+  float e = 0.03, h0 = rockHeight(q);
+  return bumpedNormal(vec3(rockHeight(q + vec3(e, 0.0, 0.0)) - h0, rockHeight(q + vec3(0.0, e, 0.0)) - h0, rockHeight(q + vec3(0.0, 0.0, e)) - h0) / e, k, space);
 }
 // caustics: the bright net the ripples of the water throw on whatever is under it (a tiling pattern of folded sines)
 float caustic(vec2 uv, float t) {
@@ -202,6 +291,13 @@ float caustic(vec2 uv, float t) {
   c = 1.17 - pow(c, 1.4);
   return min(pow(abs(c), 8.0), 1.5);
 }
+vec3 gNormal = vec3(0.0, 1.0, 0.0); // a shader can light the block with its OWN normal (a bump map): set gNormal and gHasN = 1.0 before finish()
+float gHasN = 0.0;
+vec3 gSpec = vec3(0.0); //  and add shine on top of the lighting (highlights are not multiplied by the colour of the surface)
+vec3 gGlint = vec3(0.0); // like gSpec, but only where the sun is not in shadow (multiplied by how lit the surface is)
+float gBlow = 0.0; //    where the sun hits the surface it gets brighter and a little blown out (0 = not at all, 1 = a lot)
+float gShine = 0.0; //   strength of the highlight of this surface (0 = none: the shader does not shine)
+float gRough = 0.6; //    how rough it is: 0 = a small hard highlight, 1 = a wide dull glow. A shader may change it from place to place (non-uniform shine)
 vec4 finish(vec3 c, float a) {
   float dissolveEdge = 0.0;
   if (uReveal < 1.0) { // dissolve: the block appears out of noise, with a pale rim where it is just appearing
@@ -210,8 +306,10 @@ vec4 finish(vec3 c, float a) {
     if (d > k) discard;
     dissolveEdge = smoothstep(k - 0.07, k, d);
   }
+  vec3 albedo = c;
   vec3 wn = normalize(vWN);
   if (!gl_FrontFacing) wn = -wn; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
+  if (gHasN > 0.5) wn = gNormal;
   vec3 L = sceneLight(vW, wn);
   float depth = uWaterY - vW.y;
   if (uCaus * uCausOn > 0.0 && depth > 0.0) { // under the water, inside the bowl
@@ -226,6 +324,23 @@ vec4 finish(vec3 c, float a) {
     c = mix(c, c * vec3(0.8, 0.93, 1.0), 0.55 * fade);
   }
   c *= L * 0.86;
+  c += gSpec + gGlint * gSh;
+  if (gBlow > 0.0) { // overexposure: the part the sun lights up pushes towards white
+    float lit = smoothstep(0.45, 1.0, gDirect);
+    c *= 1.0 + gBlow * 0.75 * lit;
+    c = mix(c, vec3(1.0, 0.97, 0.9), gBlow * 0.5 * lit * lit);
+  }
+  if (gShine > 0.0) { // where the sun hits the surface it brightens the colour of the surface itself; the rougher, the wider and duller the bright part
+    vec3 V = normalize(cameraPosition - vW);
+    vec3 H = normalize(uLightDir + V);
+    float nh = clamp(dot(wn, H), 0.0, 1.0);
+    float nl = clamp(dot(wn, uLightDir), 0.0, 1.0);
+    float r = clamp(gRough, 0.05, 1.0);
+    float lobe = pow(nh, mix(160.0, 4.0, r * r)) * mix(1.0, 0.25, r);
+    float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(wn, V), 0.0, 1.0), 5.0);
+    vec3 tint = mix(vec3(1.0), clamp(albedo * 2.2, 0.0, 1.4), 0.6);
+    c += uLightCol * tint * (lobe * gShine * (0.55 + fres) * gSh * smoothstep(0.0, 0.2, nl));
+  }
   float rim = pow(1.0 - clamp(dot(wn, normalize(cameraPosition - vW)), 0.0, 1.0), 3.0);
   c += uAmbSky * (rim * 0.16);
   c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
@@ -236,331 +351,6 @@ vec4 finish(vec3 c, float a) {
 }
 `;
 
-const frag = (body) => prelude + body;
-
-/** name -> fragment shader source. */
-// What glass needs to bend the picture behind it. uRefr = a copy of the picture drawn so far (see #refractPass in client.js), uRefrOn = 0 when there is none.
-const REFRACT_GLSL = /* glsl */ `
-uniform sampler2D uRefr;
-uniform float uRefrOn;
-uniform vec2 uRefrRes;
-// rgb = what the glass shows: the picture behind it, bent (a little more at the edges and by waves in the glass), tinted, with a bit of the glass's own colour (keep).
-vec4 glassOut(vec3 own, vec2 p, float keep, vec2 piece) { // piece: extra bend for this part of the glass (a shard of cracked glass)
-  if (uRefrOn < 0.5) return vec4(own, 0.2 + keep * 0.6); // no picture to look through: a pale pane
-  vec2 warp = vec2(fbm(p * 0.9), fbm(p * 0.9 + 4.3)) - 0.5;
-  vec2 off = warp * 0.05 + normalize(vN).xy * 0.035 + piece;
-  vec2 uv = gl_FragCoord.xy / uRefrRes;
-  vec3 bg = vec3(
-    texture2D(uRefr, clamp(uv + off * 0.9, 0.002, 0.998)).r, // (the three colours bend a tiny bit differently)
-    texture2D(uRefr, clamp(uv + off, 0.002, 0.998)).g,
-    texture2D(uRefr, clamp(uv + off * 1.1, 0.002, 0.998)).b);
-  bg *= vec3(0.9, 0.97, 1.0);
-  return vec4(mix(bg, own, clamp(keep, 0.0, 1.0)), 1.0);
-}
-`;
-
-export const shaders = {
-  wood: frag(/* glsl */ `
-void main() {
-  vec2 p = vP + uSeed * 17.0;
-  float warp = fbm(p * vec2(0.5, 1.6));
-  float rings = sin((p.y * 3.2 + warp * 5.0) * 3.14159);
-  vec3 c = mix(vec3(0.64, 0.42, 0.21), vec3(0.45, 0.27, 0.12), 0.5 + 0.3 * rings);
-  c *= 0.9 + 0.2 * fbm(p * 6.0);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // the wooden bowl: darker, turned-wood bands that follow the curve all the way round
-  bowlwood: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float warp = fbm(q.xz * 0.3 + vec2(q.y * 0.25, 3.0));
-  float rings = sin((q.y * 1.7 + warp * 4.0) * 3.14159);
-  vec3 c = mix(vec3(0.50, 0.30, 0.14), vec3(0.34, 0.19, 0.08), 0.5 + 0.4 * rings);
-  c *= 0.88 + 0.24 * fbm(vec2(q.x + q.z, q.y * 3.0) * 1.5);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // the table: wide planks running left to right
-  floorwood: frag(/* glsl */ `
-void main() {
-  vec2 p = vec2(vP3.x, vP3.z + vP3.y) + uSeed * 9.0;
-  float plank = floor(p.y / 3.2);
-  vec2 q = vec2(p.x * 0.35 + hash(vec2(plank, 3.0)) * 40.0, p.y);
-  float warp = fbm(vec2(q.x * 0.5, q.y * 2.5));
-  float grain = sin((q.y * 2.0 + warp * 6.0) * 3.14159);
-  vec3 base = mix(vec3(0.60, 0.40, 0.20), vec3(0.44, 0.27, 0.12), hash(vec2(plank, 7.0)));
-  vec3 c = mix(base, base * 0.8, 0.5 + 0.3 * grain);
-  c *= 0.9 + 0.2 * fbm(q * vec2(1.0, 4.0));
-  float f = fract(p.y / 3.2);
-  c *= 1.0 - smoothstep(0.03, 0.0, min(f, 1.0 - f)) * 0.5;
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // dark red-brown mahogany: long straight grain with darker streaks (3D: works on any mesh)
-  mahogany: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float warp = fbm(vec2(q.x * 0.15 + q.z * 0.1, q.y * 0.9));
-  float grain = sin((q.y * 2.6 + q.z * 1.3 + warp * 7.0) * 3.14159);
-  float streak = fbm(vec2(q.x * 0.5 + q.z * 0.5, q.y * 6.0));
-  vec3 c = mix(vec3(0.36, 0.12, 0.07), vec3(0.20, 0.06, 0.04), 0.5 + 0.35 * grain);
-  c = mix(c, vec3(0.50, 0.19, 0.10), smoothstep(0.55, 0.9, streak) * 0.6);
-  c *= 0.9 + 0.18 * fbm(vec2(q.x + q.z, q.y * 14.0));
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // small black pebbles: dark, smooth, with a few pale flecks
-  blackstone: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3 * 2.0;
-  float n = fbm(q.xy + q.z * 0.7);
-  vec3 c = mix(vec3(0.05, 0.05, 0.06), vec3(0.17, 0.17, 0.19), n);
-  c += step(0.965, hash(floor(q.xy * 9.0 + q.z * 5.0))) * 0.25;
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // plain warm plaster for indoor walls
-  plaster: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  vec3 c = vec3(0.80, 0.72, 0.60) * (0.95 + 0.07 * fbm(q.xy * 0.6 + q.z));
-  c *= 0.97 + 0.03 * hash(floor(q.xy * 6.0));
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // GLASS: mostly see-through, and what is behind it is BENT (the client copies the picture drawn so far to uRefr and draws the glass blocks after it).
-  // Where the copy is not available (uRefrOn = 0: a little preview window, a reflection) it is simply a pale transparent pane.
-  glass: frag(/* glsl */ `${REFRACT_GLSL}
-void main() {
-  vec2 p = vP + uSeed * 5.0;
-  vec3 c = mix(vec3(0.55, 0.80, 0.93), vec3(0.82, 0.95, 1.0), 0.5 + 0.5 * sin(p.x * 0.7 + p.y * 0.5));
-  float streak = smoothstep(0.0, 0.35, sin((p.x - p.y) * 1.2 + 1.0));
-  c += streak * 0.16;
-  vec4 f = finish(c, 1.0);
-  float rim = pow(1.0 - abs(normalize(vN).z), 2.0); // the bevelled edges catch more light and are less clear
-  gl_FragColor = glassOut(f.rgb, p, 0.1 + 0.4 * rim + streak * 0.06, vec2(0.0));
-}`),
-
-  // CRACKED GLASS: the glass has been hit at one point. Cracks run out from it and are joined by cracks in rings, so the glass falls apart in shards that
-  // are narrow near the hit and bigger further away. The cracks are thin and black. Every shard is tilted a little differently, so each one bends the picture
-  // behind it in its own direction (that is what makes it look broken), and a few of the outer shards are missing.
-  crackedGlass: frag(/* glsl */ `${REFRACT_GLSL}
-vec3 cells(vec2 p, float per) { // nearest and second nearest point of a jittered grid (sideways it repeats after per cells), and a random number for the nearest cell
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  float d1 = 8.0;
-  float d2 = 8.0;
-  float id = 0.0;
-  for (int y = -1; y <= 1; y++) {
-    for (int x = -1; x <= 1; x++) {
-      vec2 g = vec2(float(x), float(y));
-      vec2 k = vec2(mod(i.x + g.x + per, per), i.y + g.y);
-      vec2 o = vec2(hash(k), hash(k + 17.3));
-      float d = length(g + o - f);
-      if (d < d1) { d2 = d1; d1 = d; id = hash(k + 31.7); } else if (d < d2) { d2 = d; }
-    }
-  }
-  return vec3(d1, d2, id);
-}
-void main() {
-  vec2 p = vP + uSeed * 13.0;
-  vec2 hit = (vec2(hash(vec2(uSeed, 1.0)), hash(vec2(uSeed, 2.0))) - 0.5) * 2.4; // where it was hit
-  vec2 v = vP - hit;
-  vec2 w = v + 0.35 * vec2(fbm(v * 1.1 + uSeed), fbm(v * 1.1 + 6.0 + uSeed)); // crooked cracks
-  float r = length(w) + 0.001;
-  float ang = atan(w.y, w.x) * 14.0 / 6.2831853; // 14 cracks run out from the hit
-  vec3 big = cells(vec2(ang, r * 0.55), 14.0);        // shards: narrow at the hit, longer further out
-  vec3 fine = cells(vec2(ang * 2.0, r * 1.1 + 3.0), 28.0); // smaller cracks inside the shards
-  float edge = big.y - big.x;
-  float crack = 1.0 - smoothstep(0.0, 0.05, edge); // thin lines
-  float hair = (1.0 - smoothstep(0.0, 0.03, fine.y - fine.x)) * step(0.45, hash(vec2(fine.z * 7.0, big.z))); // some of the small ones, not all
-  if (big.z > 0.94 && r > 2.8 && edge > 0.06) discard; // a missing shard, only away from the hit
-  vec2 q = vP + uSeed * 5.0;
-  vec3 c = mix(vec3(0.55, 0.80, 0.93), vec3(0.82, 0.95, 1.0), 0.5 + 0.5 * sin(q.x * 0.7 + q.y * 0.5));
-  c *= 0.94 + 0.12 * big.z;                                   // every shard is a little lighter or darker
-  c += smoothstep(0.16, 0.06, edge) * (1.0 - crack) * 0.12;    // the rim of a shard catches light, next to the crack
-  vec4 f = finish(c, 1.0);
-  float line = clamp(max(crack, hair * 0.7), 0.0, 1.0);
-  vec3 own = mix(f.rgb, vec3(0.02, 0.03, 0.05), line);         // the cracks are black
-  vec2 tilt = (vec2(hash(vec2(big.z, 3.7)), hash(vec2(big.z, 8.1))) - 0.5) * 0.09; // each shard bends the light its own way
-  float rim = pow(1.0 - abs(normalize(vN).z), 2.0);
-  gl_FragColor = glassOut(own, p * 1.7, max(0.1 + 0.4 * rim, line * 0.95), tilt);
-}`),
-
-  // A BLOCK OF WATER: made like the water in the bowl, with the colour and the see-through-ness of THAT water (uWaterColor, uWaterOpacity from the bowl of the level),
-  // its light of the day, its waves (here on the face of the block) that bend what is behind it, the glitter of the sun and the stronger mirror at a low angle.
-  // No caustics. It never moves: you must keep away from it.
-  waterBlock: frag(/* glsl */ `${REFRACT_GLSL}
-uniform vec3 uWaterColor;
-uniform float uWaterOpacity;
-vec2 grad2(vec2 i) { float a = hash(i) * 6.2831853; return vec2(cos(a), sin(a)); }
-float perlin(vec2 p) { // gradient (Perlin) noise, about -0.7 .. 0.7
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-  return mix(mix(dot(grad2(i), f), dot(grad2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
-             mix(dot(grad2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)), dot(grad2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x), u.y);
-}
-float wh(vec2 p, float t) { // the wave height of the water of the bowl (waveH in client.js) plus finer Perlin ripples, on the face of the block
-  float h = 0.0;
-  h += 0.10 * sin(dot(p, vec2(0.95, 0.31)) * 0.55 + t * 1.0);
-  h += 0.05 * sin(dot(p, vec2(-0.37, 0.93)) * 0.90 + t * 1.3);
-  h += 0.02 * sin(dot(p, vec2(0.71, 0.71)) * 1.70 + t * 1.9);
-  h += (noise(p * 0.35 + vec2(t * 0.15, -t * 0.10)) - 0.5) * 0.20;
-  h += (noise(p * 0.95 - vec2(t * 0.25, t * 0.20)) - 0.5) * 0.06;
-  h += perlin(p * 0.65 + vec2(t * 0.22, t * 0.17)) * 0.34; // ripples (twice as large)
-  h += perlin(p * 1.55 - vec2(t * 0.38, t * 0.12)) * 0.16; // finer ones (twice as large)
-  return h;
-}
-void main() {
-  vec2 p = vP + uSeed * 7.0;
-  float t = uTime;
-  float h0 = wh(p, t);
-  vec2 slope = vec2(wh(p + vec2(0.1, 0.0), t) - h0, wh(p + vec2(0.0, 0.1), t) - h0) / 0.1;
-  float front = smoothstep(0.6, 0.95, abs(normalize(vWN).z)); // the big flat faces (the front of the block): the ripples are strongest there
-  vec3 N = normalize(normalize(vWN) + vec3(-slope, 0.0) * (2.0 + 2.5 * front)); // the waves tilt the surface
-  vec3 V = normalize(cameraPosition - vW);
-  float fres = pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 3.0);
-  vec3 col = uWaterColor * ((uAmbSky * 0.7 + uLightCol * 0.35) * 1.28); // the colour of the water follows the light of the day
-  col *= 0.8 + 0.4 * (perlin(p * 0.225 + vec2(t * 0.08, -t * 0.05)) + 0.5);  // deeper and shallower patches drifting through the water
-  float rip = perlin(p * 1.1 + vec2(t * 0.3, -t * 0.2));
-  col *= 1.0 + front * (0.5 * rip + 0.28 * smoothstep(0.35, 0.7, abs(perlin(p * 0.8 - vec2(t * 0.18, t * 0.25))) )); // visible light and dark ripples, with bright lines
-  // reflection: the sky (and the ground) as the tilted surface mirrors it, stronger at a low angle
-  vec3 R = reflect(-V, N);
-  vec3 sky = mix(uAmbGround, uAmbSky, smoothstep(-0.2, 0.7, R.y)) * 1.15;
-  float refl = clamp(0.12 + 0.75 * fres, 0.0, 0.85);
-  col = mix(col, sky, refl * 0.55);
-  float glint = pow(max(dot(N, normalize(uLightDir + V)), 0.0), 140.0);   // sun (or moon) glitter on the ripples
-  col += uLightCol * (glint * 0.9);
-  col *= 0.94 + 0.12 * N.x;
-  float keep = clamp(uWaterOpacity + fres * 0.12 + refl * 0.2 + glint * 0.6, 0.0, 1.0);
-  gl_FragColor = glassOut(col, p, keep, slope * (0.03 + 0.03 * front));
-}`),
-
-  // A CHALK OUTLINE, like the one the police draw round a body on the floor: a white line with a slightly rough edge and some chalk dust,
-  // nothing else. It is meant for a flat strip lying on a surface (the game draws the outline of a block that is still to come on the table
-  // with it): vP.x = distance along the line, vP.y = 0 on the inside of the line .. 1 on the outside. Not lit, no shadow.
-  outline: frag(/* glsl */ `
-void main() {
-  vec2 p = vP + uSeed * 17.0;
-  float across = smoothstep(0.0, 0.3, vP.y) * smoothstep(1.0, 0.7, vP.y); // soft edges on both sides of the line
-  float rough = 0.55 + 0.45 * fbm(vec2(p.x * 2.2, vP.y * 2.5));             // the chalk is thicker and thinner along the line
-  float dust = step(0.82, hash(floor(vec2(p.x * 9.0, vP.y * 4.0)))) * 0.25; // grains
-  float a = clamp(across * (rough - dust) * 1.15, 0.0, 1.0) * 0.92 * uReveal; // (uReveal: the line fades in and out)
-  gl_FragColor = vec4(vec3(0.97, 0.97, 0.94), a);
-}`),
-
-  stone1: frag(/* glsl */ `
-void main() {
-  vec2 p = vP + uSeed * 11.0;
-  vec3 c = vec3(0.52, 0.53, 0.58) * (0.72 + 0.5 * fbm(p * 3.0));
-  c += step(0.93, hash(floor(p * 14.0))) * 0.22;
-  float vein = smoothstep(0.02, 0.0, abs(fbm(p * 1.3) - 0.5));
-  c = mix(c, vec3(0.78, 0.8, 0.86), vein * 0.5);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // fixed, unmovable material: darker slate with chiselled lines, clearly different from anything you can pick up
-  stone2: frag(/* glsl */ `
-void main() {
-  vec2 p = vP + uSeed * 3.0;
-  vec3 c = vec3(0.30, 0.34, 0.43) * (0.8 + 0.4 * fbm(p * 2.5));
-  float rows = smoothstep(0.03, 0.0, abs(fract(p.y * 0.8) - 0.5) - 0.47);
-  float hatch = step(0.5, fract((p.x + p.y) * 2.2)) * 0.035;
-  c = c * (1.0 - rows * 0.35) + hatch;
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // buoyant block: orange / cream stripes like a lifebuoy
-  float: frag(/* glsl */ `
-void main() {
-  vec2 p = vP;
-  float s = step(0.5, fract(p.x * 0.42 + 0.1));
-  vec3 c = mix(vec3(0.95, 0.42, 0.18), vec3(0.97, 0.94, 0.88), s);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // ── 3D shaders (they use vP3, so they fit bowls and models) ──
-
-  // pale ash / beech: lighter than 'bowlwood', bands that follow the height
-  wood2: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3 + uSeed * 9.0;
-  float warp = fbm(q.xz * 0.3 + vec2(q.y * 0.25, 7.0));
-  float rings = sin((q.y * 2.2 + warp * 3.5) * 3.14159);
-  vec3 c = mix(vec3(0.84, 0.68, 0.46), vec3(0.72, 0.54, 0.33), 0.5 + 0.35 * rings);
-  c *= 0.92 + 0.16 * fbm(vec2(q.x + q.z, q.y * 4.0) * 1.2);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // white glaze with a cobalt band round the rim and a wavy line lower down
-  ceramic: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float a = atan(q.z, q.x);
-  float rim = smoothstep(0.06, 0.0, abs(q.y - 0.0) - 0.5);
-  float wave = smoothstep(0.08, 0.0, abs(q.y + 2.6 + 0.5 * sin(a * 7.0)) - 0.18);
-  vec3 c = mix(vec3(0.95, 0.95, 0.92), vec3(0.20, 0.36, 0.60), clamp(rim + wave, 0.0, 1.0) * 0.92);
-  c *= 0.96 + 0.06 * noise(q.xz * 5.0 + q.y * 2.0);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  bark: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float a = atan(q.z, q.x);
-  float streak = fbm(vec2(a * 3.0, q.y * 0.9));
-  vec3 c = mix(vec3(0.24, 0.17, 0.12), vec3(0.44, 0.32, 0.21), streak);
-  c *= 0.82 + 0.3 * noise(vec2(a * 9.0, q.y * 3.0));
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  leaves: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float n = fbm(q.xy * 1.2 + q.zy * 0.8);
-  vec3 c = mix(vec3(0.20, 0.42, 0.20), vec3(0.47, 0.66, 0.28), n);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  blossom: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float n = fbm(q.xy * 1.4 + q.zy * 0.9);
-  vec3 c = mix(vec3(0.93, 0.68, 0.76), vec3(1.0, 0.90, 0.92), n);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  bamboo: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float knot = smoothstep(0.05, 0.0, abs(fract(q.y) - 0.92) - 0.06);
-  vec3 c = mix(vec3(0.40, 0.58, 0.26), vec3(0.56, 0.70, 0.34), noise(vec2(q.y * 2.0, q.x * 9.0 + q.z * 9.0)));
-  c = mix(c, vec3(0.28, 0.40, 0.18), knot * 0.8);
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // paper lantern light: warm and brighter than everything around it
-  paper: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  vec3 c = vec3(1.18, 0.98, 0.66) * (0.9 + 0.1 * noise(q.xy * 8.0));
-  gl_FragColor = finish(c, 1.0);
-}`),
-
-  // grey-blue rock turning to snow near the top (made for mountain.obj: 40 units tall)
-  mountain: frag(/* glsl */ `
-void main() {
-  vec3 q = vP3;
-  float snow = smoothstep(27.0 + 3.0 * fbm(q.xz * 0.15), 36.0, q.y);
-  vec3 c = mix(vec3(0.46, 0.53, 0.60), vec3(0.62, 0.68, 0.72), fbm(q.xz * 0.12 + q.y * 0.05));
-  c = mix(c, vec3(0.95, 0.96, 0.97), snow);
-  gl_FragColor = finish(c, 1.0);
-}`),
-};
-
-/** Shaders whose blocks are see-through (drawn after the opaque ones, no depth writes). */
-export const transparentShaders = new Set(['glass', 'crackedGlass', 'waterBlock', 'outline']);
-/** Shaders that look through to a copy of the picture behind them (the client draws them last, on their own layer). */
-export const refractShaders = new Set(['glass', 'crackedGlass', 'waterBlock']);
+export const frag = (body) => prelude + body;
+/** How many lines come before the code of a shader (what is shown in the shader studio starts after them): the line numbers of an error are corrected with it. */
+export const PRELUDE_LINES = (prelude.match(/\n/g) ?? []).length;
