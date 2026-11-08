@@ -34,6 +34,78 @@ void main() {
   gl_FragColor = finish(c, 1.0);
 }`,
   },
+  woodBaked: {
+    code: `
+// Wood, baked and seamlessly tiling, with NO knots. Curviness is adjustable:
+//   uCurl   = how much the grain flows and wanders (0 = ruler-straight, like quarter-sawn wood)
+//   uArch   = flat-sawn "cathedral" arches: nested peaks along the board
+//   uCurls  = how many waves fit along one tile
+// uSize makes the whole grain bigger or smaller (no re-baking needed); uRings sets how many rings fit in a tile.
+uniform vec3 uWoodLight;   // color 0.80 0.62 0.40
+uniform vec3 uWoodDark;    // color 0.42 0.25 0.12
+uniform float uRings;      // 10.0 [2, 40]
+uniform float uCurl;       // 0.7 [0, 1.5]
+uniform float uArch;       // 0.5 [0, 1]
+uniform float uShine;      // 1.2 [0, 3]
+uniform float uCurls;      // 2.0 [1, 6]
+uniform float uSize;       // 1.0 [0.3, 6]
+uniform float uBump;       // 0.07 [0, 0.3]
+uniform vec2 uTiles;       // 1.0 1.0 [1, 8]
+
+const vec2 TILE = vec2(2.0, 1.0);     // one tile covers 2 units along the board and 1 unit across
+
+// ring coordinate: ring lines along the board, bent by (1) a slow flowing wobble and (2) nested arches.
+// Everything here repeats with the tile, and r grows by exactly 1 from the bottom of the tile to the top.
+float trunk(vec2 q) {
+  float w = floor(uCurls + 0.5);                          // waves per tile along the board (a whole number so it tiles)
+  vec2 p = vec2(q.x * w * 0.5, q.y * 2.0);
+  float r = q.y;
+  r += uCurl * 0.3 * fbmTile(p, vec2(w, 2.0));            // slow flowing wobble
+  r += uCurl * 0.04 * noiseTile(vec2(p.x * 3.0, p.y * 4.0), vec2(w * 3.0, 8.0));   // smaller ripples
+  // arches: every ring is the same peak shape shifted, so the peaks nest like a cathedral window
+  float a = 0.5 + 0.5 * cos(6.28318 * (p.x + 0.35 * noiseTile(p, vec2(w, 2.0))));
+  r -= uArch * 0.3 * a * a * (0.8 + 0.2 * sin(6.28318 * q.y));
+  r += 0.012 * noiseTile(vec2(q.x * 3.0, q.y * 14.0), vec2(6.0, 14.0));
+  return r;
+}
+
+// ---------------------------------------------------------------- runs ONCE
+// bake 2048
+vec4 bake(vec2 tuv) {
+  vec2 uv = tuv * TILE;
+  float rings = floor(uRings + 0.5);                    // a whole number of rings per tile, so they line up at the seam
+  float r = trunk(uv);
+
+  // growth rings: slow darkening, then a sharp edge; every ring has its own tone
+  float x = r * rings;
+  float tone = pow(fract(x), 4.0);
+  float ringTone = hash11(mod(floor(x), rings)) - 0.5;
+
+  // fibres and pores along the grain (they follow the rings, and tile)
+  float fibre = 0.65 * noiseTile(vec2(uv.x * 2.0, r * 110.0), vec2(4.0, 110.0)) + 0.35 * noiseTile(vec2(uv.x * 7.0, r * 240.0), vec2(14.0, 240.0));
+  float pore = smoothstep(0.86, 0.97, noiseTile(vec2(uv.x * 45.0, r * 150.0), vec2(90.0, 150.0)));
+
+  float t = clamp(tone * 0.75 + ringTone * 0.25 + (0.5 - fibre) * 0.32, 0.0, 1.0);
+  vec3 col = mix(uWoodLight, uWoodDark, t);
+  col *= 1.0 - 0.28 * pore;
+
+  float h = tone * 0.18 + fibre * 0.1 - pore * 0.08;      // height for the bump map
+  return vec4(col, h);
+}
+
+// ---------------------------------------------------------------- every frame
+void main() {
+  vec4 b = texture(uBake, vUv * uTiles / uSize + uSeed * vec2(0.37, 0.61)); // (a seed: every block has its own piece of the board)       // colour (rgb) and height (a); repeats past 0..1
+  gNormal = bumpFromHeight(b.a, uBump);
+  gHasN = 1.0;
+
+  gShine = uShine;
+  gRough = 0.3;
+  gBlow = 0.1;
+  gl_FragColor = finish(b.rgb, 1.0);
+}
+`,
+  },
   bowlwood: {
     code: `
 void main() {

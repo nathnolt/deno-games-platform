@@ -55,7 +55,22 @@ export const tuning = {
 // noLamp:   no coloured dot on a block with a stackLimit (for blocks that look cracked already)
 // shader:   name of a GLSL shader in client/shaders.js
 export const materials = {
-  wood:            { friction: 10, weight: 10, shader: 'wood' },
+    wood: {
+    friction: 10,
+    weight: 10,
+    shader: 'woodBaked',
+    shaderParams: {
+      uRings: 4.47,
+      uCurl: 0.465,
+      uArch: 0.15,
+      uShine: 1.26,
+      uCurls: 1,
+      uSize: 1.041,
+      uBump: 0.1395,
+      uWoodLight: '#d2aa79',
+      uWoodDark: '#754a29',
+    },
+  },
   glass:           { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
   crackedGlass:    { friction: 4, weight: 5, shader: 'crackedGlass', stackLimit: 0, noLamp: true }, // breaks as soon as one block rests on it
   static: { static: true, friction: 12, shader: 'stone1', shaderParams: { uBump: 0.255, uScale: 3.945, uColor: '#6e6e6e' } },
@@ -67,6 +82,7 @@ export const materials = {
   noBuildZone:     { static: true, friction: 0, noBuild: true, shader: 'noBuildZone' }, // a zone you cannot build in: a bright red outline with a see-through red inside (the shape is the zone)
   oxidizerBlock:   { friction: 8, weight: 8, shader: 'oxidizer', explodesWith: 'fuelBlock' },
 };
+
 
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────

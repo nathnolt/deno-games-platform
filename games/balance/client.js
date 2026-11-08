@@ -428,65 +428,98 @@ function noiseTexture() {
 }
 
 /**
- * The picture a water shader draws ONCE (its  vec4 bake(vec2 uv)  ): the material reads it as uBake. Every renderer that draws the material gets its own
- * copy, drawn just before the first time it is needed (and again after material.userData.rebake() : a parameter changed).
+ * The picture a shader draws ONCE (its  vec4 bake(vec2 uv)  ): the material reads it as uBake. The picture is shared: every material with the same code and the
+ * same settings uses the same one (a hundred blocks of wood bake once). Every renderer that draws the material gets its own copy, drawn just before the first
+ * time it is needed, and drawn again after material.userData.rebake() when a setting changed.
+ *   spec = { code, fragment (the source of the baking pass), vertex (its vertex shader) }
  */
-function attachBake(mat, code, uniforms, vertexShader) {
-  const size = bakeSizeOf(code);
+const bakePrograms = new Map(); // fragment source -> { scene, mat }  (one program per shader)
+const bakeCaches = new WeakMap(); // renderer -> Map(key -> { rt, refs })
+function attachBake(mat, spec, list) {
+  const size = bakeSizeOf(spec.code);
   mat.uniforms.uBake = { value: null };
   mat.uniforms.uResolution = { value: new THREE.Vector2(size, size) };
-  const bakeVertex = /* glsl */ `
+  const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const keyOf = () => `${spec.code}\u0001${JSON.stringify(list.map((p) => { const v = mat.uniforms[p.name].value; return v?.toArray ? v.toArray() : v; }))}`;
+  const held = new Map(); // renderer -> the cache entry this material uses now
+  let version = 0;
+  let seen = -1;
+  const release = (renderer, key) => {
+    const cache = bakeCaches.get(renderer);
+    const e = cache?.get(key);
+    if (e && --e.refs <= 0) { e.rt.dispose(); cache.delete(key); }
+  };
+  mat.userData.rebake = () => { version++; };
+  mat.onBeforeRender = (renderer) => {
+    let cache = bakeCaches.get(renderer);
+    if (!cache) bakeCaches.set(renderer, (cache = new Map()));
+    let cur = held.get(renderer);
+    if (!cur || seen !== version) {
+      const key = keyOf();
+      if (!cur || cur.key !== key) {
+        let e = cache.get(key);
+        if (!e) {
+          const rt = new THREE.WebGLRenderTarget(size, size, {
+            type: THREE.HalfFloatType, minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter, // (mipmaps: far away or at a slant the picture does not shimmer)
+            wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping, depthBuffer: false, generateMipmaps: true,
+            anisotropy: Math.min(8, renderer.capabilities.getMaxAnisotropy()),
+          });
+          e = { rt, refs: 0 };
+          cache.set(key, e);
+          let prog = bakePrograms.get(spec.fragment);
+          if (!prog) {
+            const uniforms = {};
+            for (const k of Object.keys(mat.uniforms)) uniforms[k] = { value: mat.uniforms[k].value };
+            prog = { scene: new THREE.Scene(), mat: new THREE.ShaderMaterial({ uniforms, vertexShader: spec.vertex, fragmentShader: spec.fragment, depthTest: false, depthWrite: false }) };
+            prog.scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), prog.mat));
+            prog.mat.uniforms.uSeed && (prog.mat.uniforms.uSeed.value = 0); // (the picture is the same for every block: no seed, no time)
+            prog.mat.uniforms.uTime && (prog.mat.uniforms.uTime.value = 0);
+            bakePrograms.set(spec.fragment, prog);
+          }
+          for (const k of Object.keys(prog.mat.uniforms)) if (mat.uniforms[k] && k !== 'uSeed' && k !== 'uTime' && k !== 'uBake') prog.mat.uniforms[k].value = mat.uniforms[k].value;
+          const prev = renderer.getRenderTarget();
+          const auto = renderer.autoClear;
+          const shadowAuto = renderer.shadowMap.autoUpdate;
+          renderer.shadowMap.autoUpdate = false;
+          renderer.autoClear = true;
+          renderer.setRenderTarget(rt);
+          renderer.render(prog.scene, cam);
+          renderer.setRenderTarget(prev);
+          renderer.autoClear = auto;
+          renderer.shadowMap.autoUpdate = shadowAuto;
+        }
+        e.refs++;
+        if (cur) release(renderer, cur.key);
+        cur = { key, e };
+        held.set(renderer, cur);
+      }
+      seen = version;
+    }
+    mat.uniforms.uBake.value = cur.e.rt.texture;
+  };
+  mat.addEventListener('dispose', () => {
+    for (const [renderer, cur] of held) release(renderer, cur.key);
+    held.clear();
+  });
+}
+
+const BAKE_VERTEX_WATER = /* glsl */ `
 varying vec3 vW;
 varying vec3 vWN;
 varying vec2 vUv;
 varying vec3 vPos;
 void main() { vUv = uv; vW = vec3(0.0); vWN = vec3(0.0, 1.0, 0.0); vPos = vec3(0.0); gl_Position = vec4(position.xy, 0.0, 1.0); }`;
-  let version = 0;
-  let quad = null;
-  const per = new Map(); // renderer -> { rt, version }
-  mat.userData.rebake = () => { version++; };
-  mat.onBeforeRender = (renderer) => {
-    let e = per.get(renderer);
-    if (!e) {
-      const rt = new THREE.WebGLRenderTarget(size, size, {
-        type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
-        wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping, depthBuffer: false, generateMipmaps: false,
-      });
-      e = { rt, version: -1 };
-      per.set(renderer, e);
-    }
-    if (e.version !== version) {
-      e.version = version;
-      if (!quad) {
-        const shared = { ...mat.uniforms, uBake: { value: null }, uTime: { value: 0 } }; // (the same uniform objects: the parameters follow the sliders)
-        quad = {
-          scene: new THREE.Scene(),
-          cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1),
-          mat: new THREE.ShaderMaterial({ uniforms: shared, vertexShader: bakeVertex, fragmentShader: waterFrag(code, true), depthTest: false, depthWrite: false }),
-        };
-        quad.scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quad.mat));
-        quad.scene.frustumCulled = false;
-      }
-      const prev = renderer.getRenderTarget();
-      const auto = renderer.autoClear;
-      const shadowAuto = renderer.shadowMap.autoUpdate;
-      renderer.shadowMap.autoUpdate = false;
-      renderer.autoClear = true;
-      renderer.setRenderTarget(e.rt);
-      renderer.render(quad.scene, quad.cam);
-      renderer.setRenderTarget(prev);
-      renderer.autoClear = auto;
-      renderer.shadowMap.autoUpdate = shadowAuto;
-    }
-    mat.uniforms.uBake.value = e.rt.texture;
-  };
-  mat.addEventListener('dispose', () => {
-    for (const e of per.values()) e.rt.dispose();
-    per.clear();
-    quad?.mat.dispose();
-    quad = null;
-  });
-}
+const BAKE_VERTEX_BLOCK = /* glsl */ `
+varying vec2 vP;
+varying vec3 vP3;
+varying vec3 vN;
+varying vec3 vW;
+varying vec3 vWN;
+varying float vDist;
+varying vec3 vRX;
+varying vec3 vRY;
+varying vec3 vRZ;
+void main() { vP = uv * 4.0; vP3 = vec3(0.0); vN = vec3(0.0, 0.0, 1.0); vW = vec3(0.0); vWN = vN; vDist = 1.0; vRX = vec3(1.0, 0.0, 0.0); vRY = vec3(0.0, 1.0, 0.0); vRZ = vN; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
 /**
  * A small stand-alone view of a shader, for the shader studio: a sphere and a block, with the shader on them, lit by a fixed daylight. Like the shape preview
@@ -1306,6 +1339,7 @@ class BalanceView {
     for (const m of this.blockMats) {
       const params = defs?.materials?.[m.userData.materialKey]?.shaderParams ?? {};
       for (const p of m.userData.blockParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
+      m.userData.rebake?.(); // (a baked picture may depend on the settings; the same settings share one picture)
     }
   }
 
@@ -1937,7 +1971,7 @@ void main() {
       mat.uniforms[p.name] = { value: p.color ? new THREE.Color() : p.def.length === 1 ? 0 : new THREE[`Vector${p.def.length}`]() };
       this.#setParam(mat.uniforms[p.name], p, params?.[p.name]);
     }
-    if (hasBake(code)) attachBake(mat, code);
+    if (hasBake(code)) attachBake(mat, { code, fragment: waterFrag(code, true), vertex: BAKE_VERTEX_WATER }, list);
     mat.userData.waterParams = list; // (debugLiveWater changes their values while a slider is dragged)
     return mat;
   }
@@ -2196,6 +2230,8 @@ void main() {
       mat.uniforms[p.name] = { value: p.color ? new THREE.Color() : p.def.length === 1 ? 0 : new THREE[`Vector${p.def.length}`]() };
       this.#setParam(mat.uniforms[p.name], p, params?.[p.name]);
     }
+    const bakeCode = draft ? draft.code : shaderCode[shaderName]?.code ?? '';
+    if (hasBake(bakeCode)) attachBake(mat, { code: bakeCode, fragment: frag(bakeCode, true), vertex: BAKE_VERTEX_BLOCK }, list);
     if (list.length && materialKey) {
       mat.userData.blockParams = list;
       mat.userData.materialKey = materialKey;

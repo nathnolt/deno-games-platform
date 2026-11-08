@@ -227,6 +227,12 @@ float noiseTile(vec2 p, float period) {
   vec2 a = mod(i, period), b = mod(i + 1.0, period);
   return mix(mix(hash21(a), hash21(vec2(b.x, a.y)), f.x), mix(hash21(vec2(a.x, b.y)), hash21(b), f.x), f.y);
 }
+float noiseTile(vec2 p, vec2 period) { // (a different period along x and y)
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  vec2 a = mod(i, period), b = mod(i + 1.0, period);
+  return mix(mix(hash21(a), hash21(vec2(b.x, a.y)), f.x), mix(hash21(vec2(a.x, b.y)), hash21(b), f.x), f.y);
+}
+float fbmTile(vec2 p, vec2 period) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noiseTile(p, period); p *= 2.0; period *= 2.0; a *= 0.5; } return s / 0.96875; }
 float fbmTile(vec2 p, float period) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noiseTile(p, period); p *= 2.0; period *= 2.0; a *= 0.5; } return s / 0.96875; }
 vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) { return a + b * cos(6.28318 * (c * t + d)); }
 vec3 hsv2rgb(vec3 c) { vec3 p = abs(fract(c.xxx + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0); return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y); }
@@ -335,6 +341,8 @@ uniform float uCausInward;
 uniform float uReveal; // 1 = the block is whole; below 1 it is dissolving in (a block that just came out of its outline on the table)
 uniform vec2 uBowlHalf;
 uniform float uAA; // graphics setting (texture filtering): 0 = off, 1 = trilinear, 1.5 = anisotropic 4x, 2 = anisotropic 16x: how early fine patterns fade out
+uniform sampler2D uBake;  // a shader with  vec4 bake(vec2 uv)  : the picture it draws ONCE (// bake 1024 on a line of its own sets the size). vUv = texture coordinates 0..1 (the block's vP / 4)
+uniform vec2 uResolution; // the size of the baked picture
 uniform float uQuality; // graphics setting: 0 = low (no extra surface detail), 1 = medium (roughness maps), 2 = high (roughness maps and bump maps)
 
 ${SHADOW_GLSL}
@@ -472,9 +480,10 @@ vec4 finish(vec3 c, float a) {
   return vec4(c, a);
 }
 #define vPos vP3 // (the shader studio calls the position glued to the mesh vPos)
+#define vUv (vP * 0.25)
 ${HELPERS_COMMON}${HELPERS_BLOCK}`;
 
-export const frag = (body) => prelude + body;
+export const frag = (body, bake = false) => prelude + (bake ? String(body).replace(/\bvoid\s+main\s*\(\s*(void)?\s*\)/, 'void userMain()') + '\nvoid main() { gl_FragColor = bake(vUv); } // (the baking pass: the whole picture, once)\n' : body);
 /** How many lines come before the code of a shader (what is shown in the shader studio starts after them): the line numbers of an error are corrected with it. */
 export const PRELUDE_LINES = (prelude.match(/\n/g) ?? []).length;
 
