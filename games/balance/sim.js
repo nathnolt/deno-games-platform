@@ -678,7 +678,7 @@ export class BalanceGame {
       angularDamping: 0.05,
       linearDamping: 0.02,
     });
-    const def = { density: densityOf(item.material), friction: frictionOf(item.material), restitution: isStatic ? 0 : 0.04, isSensor: held || (isStatic && !!mat.hazard) }; // (a hazard block, like the water block, is not solid: blocks fall straight through it, and touching it still loses, see #rules)
+    const def = { density: densityOf(item.material), friction: frictionOf(item.material), restitution: isStatic ? 0 : 0.04, isSensor: held || (isStatic && (!!mat.hazard || !!mat.noBuild)) }; // (a hazard block, like the water block, is not solid: blocks fall straight through it, and touching it still loses, see #rules)
     const floatPolys = [];
     for (const part of shape.parts) {
       if (part.type === 'circle') {

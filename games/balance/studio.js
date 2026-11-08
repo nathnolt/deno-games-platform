@@ -1812,7 +1812,7 @@ function levelStudio(view, api) {
       const row = h('div', { class: `bb-st-seq bb-st-start${i === st.sel ? ' bb-on' : ''}` },
         h('span', { class: 'bb-dbg-idx' }, i + 1),
         shapeField(b), mini(matList, b, 'material'),
-        ...[['x', 0.25], ['y', 0.25], ['rot', 5]].map(([k, step]) => h('label', { class: 'bb-st-mini' }, k, numIn(b, k, step, scheduleDraw))),
+        ...[['x', 0.25], ['y', 0.25], ['z', 0.25], ['rot', 5]].map(([k, step]) => h('label', { class: 'bb-st-mini' }, k, numIn(b, k, step, scheduleDraw))),
         btn('⧉', () => { l.initialBlocks.push({ ...b, x: b.x + 1, y: b.y + 1 }); st.sel = l.initialBlocks.length - 1; api.touch('levels'); renderBody(); scheduleDraw(); }),
         btn('✕', () => { l.initialBlocks.splice(i, 1); st.sel = -1; api.touch('levels'); renderBody(); scheduleDraw(); }, 'bb-dbg-danger'));
       // touching a row selects that block on the blueprint (without rebuilding the rows: that would drop the focus of the field being edited)

@@ -501,7 +501,7 @@ export function createDebugMenu(view) {
         btn('↓', () => { if (i < list.length - 1) { [list[i + 1], list[i]] = [list[i], list[i + 1]]; touch('levels'); render(); } }),
       ]),
       btn('✕', () => { list.splice(i, 1); touch('levels'); render(); }, 'bb-dbg-danger'));
-    return h('div', { class: 'bb-dbg-block' }, top, withPose ? h('div', { class: 'bb-dbg-row bb-dbg-pose' }, n('rot'), n('x'), n('y')) : null);
+    return h('div', { class: 'bb-dbg-block' }, top, withPose ? h('div', { class: 'bb-dbg-row bb-dbg-pose' }, n('rot'), n('x'), n('y'), n('z')) : null);
   }
 
   function tabShapes() {
@@ -580,6 +580,7 @@ export function createDebugMenu(view) {
         slider('weight', m, 'weight', 'materials', 0, 40, 0.5),
         check('static (never moves)', m, 'static', 'materials'),
         m.static ? check('hazard (touching it loses)', m, 'hazard', 'materials') : null,
+        m.static ? check('no-build zone (cannot build in it)', m, 'noBuild', 'materials') : null,
         check('float (buoyant)', m, 'float', 'materials', () => render()),
         m.float ? slider('float level (part under water)', m, 'floatLevel', 'materials', 0.1, 1, 0.05) : null,
         num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),

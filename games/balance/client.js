@@ -894,6 +894,11 @@ class BalanceView {
     let mine = null;
     for (const [id, si, mi, x, y, a, st, owner, load] of s.b) {
       const v = this.bodyViews.get(id) ?? this.#makeView(this.bodyViews, id, si, mi, { x, y, a, st, owner });
+      if (v.zoff === undefined) { // a start block can be moved towards or away from the camera (the z of the level's start layout; ids 1.. are the start blocks in order)
+        const start = levels[s.lv]?.initialBlocks;
+        v.zoff = start && id >= 1 && id <= start.length ? (start[id - 1].z ?? 0) : 0;
+        v.cur.z = PLAY_Z + v.zoff;
+      }
       Object.assign(v, { tx: x, ty: y, ta: a, st, owner });
       this.#setLoad(v, load ?? 0);
       v.static = st === BODY.STATIC;
@@ -2131,6 +2136,28 @@ void main() {
       if (this.#shaderType(shaderName) === 'refract') mesh.layers.set(2); // layer 2 = glass: drawn in a pass of its own, after a copy of the picture has been made (#renderAll)
       group.add(mesh);
     }
+    const zone = materials[MATERIAL_KEYS[mi]].noBuild;
+    const extra = [];
+    const extraGeos = [];
+    if (zone) { // a NO-BUILD ZONE: the see-through red inside (the block itself) and a bright red chalk outline on its front
+      group.children.forEach((m) => m.layers.set(1)); // (layer 1 = seen by the camera, but no shadows)
+      const shape = getShape(shapeKey);
+      const line = Math.min(0.4, Math.max(0.15, Math.min(shape.w, shape.h) * 0.09));
+      const lineMat = this.#blockMaterial('noBuildLine', (id * 0.37 + 0.1) % 1, THREE.DoubleSide);
+      Object.assign(lineMat, { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+      extra.push(lineMat);
+      for (const o of shapeOutlines(shape, tuning.mergeParts !== false)) {
+        const geo = outlineRibbon(o.pts, o.holes ?? [], line);
+        extraGeos.push(geo);
+        for (const zz of [DEPTH / 2 + 0.05, -DEPTH / 2 - 0.05]) { // (on the front and on the back)
+          const mesh = new THREE.Mesh(geo, lineMat);
+          mesh.position.z = zz;
+          mesh.layers.set(1);
+          mesh.renderOrder = 4;
+          group.add(mesh);
+        }
+      }
+    }
     this.scene.add(group);
 
     // blocks with a stack limit (glass) carry a lamp: green = nothing on it, orange = something, red = at the limit (one more breaks it)
@@ -2149,7 +2176,7 @@ void main() {
     const v = {
       glass: this.#shaderType(shaderName) === 'refract',
       dot, limit, load: -1, // (limit also marks a block that shatters, with or without a lamp)
-      id, group, mats: [mat], marker: null, size: getShape(shapeKey), shapeKey,
+      id, group, mats: [mat, ...extra], extraGeos, marker: null, size: getShape(shapeKey), shapeKey,
       table: !!opts.table, slot: opts.slot ?? 0, n: opts.n ?? 4,
       tx: opts.x ?? 0, ty: opts.y ?? 0, ta: opts.a ?? 0, st: opts.st ?? BODY.NORMAL, owner: opts.owner ?? -1,
       static: opts.st === BODY.STATIC,
@@ -2313,6 +2340,7 @@ void main() {
 
   #dispose(v) {
     v.group.removeFromParent();
+    v.extraGeos?.forEach((g) => g.dispose());
     v.mats.forEach((m) => m.dispose());
     v.dot?.material.dispose();
     this.#dropMarker(v);
@@ -2545,7 +2573,7 @@ void main() {
       const rest = this.groundY + (DEPTH / 2) * Math.cos(phi) + tall * Math.sin(phi); //          lowest centre that keeps it out of the table while it turns up
       return { x: c.x + (x - c.x) * t, y: Math.max(c.y + (y - c.y) * t, rest), z, s: 1, a, tl };
     }
-    return { x: v.tx, y: v.ty, z: PLAY_Z, s: 1, a: v.ta, tl: 1 };
+    return { x: v.tx, y: v.ty, z: PLAY_Z + (v.zoff ?? 0), s: 1, a: v.ta, tl: 1 };
   }
 
   // ── UI (DOM) ──  (nobody is in charge: every player may press every button)

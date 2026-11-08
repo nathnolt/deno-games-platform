@@ -12,7 +12,7 @@
 // name, difficulty     shown in the menu (easy | medium | hard)
 // bowl, background     keys of `bowls` / `backgrounds` (the first one of each when left out)
 // time                 optional hour of the day (0-24): overrides the background
-// initialBlocks        present from the start: { shape, material, rot (degrees), x, y }  (x,y = centre, y=0 is the water surface)
+// initialBlocks        present from the start: { shape, material, rot (degrees), x, y, z? }  (x,y = centre, y=0 is the water surface; z = how far it is moved towards the camera, 0 = in the play plane: only for looks, the physics is flat)
 //                      'static' material = fixed to the world. Anything else is a normal physics body.
 // chooseShapes         how many blocks lie on the table at once = how many can be held at the same time (4 = all four players)
 // shapes               the ordered list of blocks you must place: { shape, material }. Rotate with Q / E while holding.
