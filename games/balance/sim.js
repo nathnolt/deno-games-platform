@@ -195,7 +195,7 @@ export class BalanceGame {
       tbl,
       ...(nx.length ? { nx } : {}),
       n: this.table.length,
-      w: this.rowSize,
+      w: this.table.filter(Boolean).length + nx.filter((q) => q[2] >= 0).length, // places that are in use (blocks and outlines): the row is centred on THESE, so it stays centred as it closes up
       left: this.#remaining(),
       total: this.total,
       why: this.why,
@@ -566,13 +566,19 @@ export class BalanceGame {
     const fallen = this.#makeBlock(item, pos.x, pos.y, angle, false); // same id, now a normal falling body
     fallen.landed = false;
     if (!item.lab) { // (blocks made in the level lab were never on the table)
-      // Nothing on the table moves. The next block appears where its OUTLINE was (the outline turns into the block), the place that was just
-      // freed stays empty, unless there is another block to come into view: it gets its outline there.
-      const free = item.slot;
-      this.table[free] = null;
+      // The row closes up: the blocks (and outlines) behind the freed place each move one place along (the client animates it). The next block comes
+      // out of its outline into the last place of the blocks, the following outlines move up, and a new outline appears at the end.
+      this.table.splice(item.slot, 1);
+      this.table.push(null);
+      this.table.forEach((it, i) => { if (it) it.slot = i; });
       const next = this.queue.shift() ?? null;
-      if (next) this.table[next.slot] = next;
-      for (const q of this.queue.slice(0, PREVIEW_COUNT)) if (q.slot < 0) q.slot = free;
+      if (next) {
+        const at = this.table.indexOf(null);
+        this.table[at] = next;
+        next.slot = at;
+      }
+      const base = this.table.indexOf(null) < 0 ? this.rowSize : this.table.indexOf(null);
+      this.queue.forEach((q, k) => { q.slot = k < PREVIEW_COUNT && base + k < this.rowSize ? base + k : -1; });
     }
     this.settle = 0;
   }

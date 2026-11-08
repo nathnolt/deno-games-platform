@@ -2033,11 +2033,18 @@ void main() {
     const w = s.w ?? s.n;
     const here = new Set(s.tbl.map((r) => r[0])); // (also the ones that are being held)
     for (const g of this.ghosts) {
+      g.w = w;
       if (g.out) continue;
       if (here.has(g.id) || !want.some(([id]) => id === g.id)) { // it became a block (or the level changed under it): it fades away
-        g.out = true;
-        g.t = 0;
+        if (!g.out) { g.out = true; g.t = 0; }
+        const row = s.tbl.find((r) => r[0] === g.id);
+        if (row) g.spot = row[3]; //                          (while it fades it slides to the place of its block)
       }
+      g.w = w;
+    }
+    for (const [id, , spot] of want) { // the row closed up: an outline that is still to come moves one place along
+      const g = this.ghosts.find((x) => x.id === id && !x.out);
+      if (g && spot >= 0) g.spot = spot;
     }
     for (const [id, si, spot] of want) {
       if (this.ghosts.some((g) => g.id === id) || !(spot >= 0)) continue;
@@ -2061,7 +2068,7 @@ void main() {
       group.position.set(p.x, this.groundY + 0.05, FRONT_Z); // on the surface of the table, exactly where a block of this shape would lie
       group.rotation.x = -Math.PI / 2; //                      (flat, the same way up as a waiting block)
       const reuse = this.ghosts.some((g) => g.out && g.spot === spot); // the place was only just freed: wait until the old outline has gone
-      const g = { id, spot, group, geos, mat, t: first ? GHOST_IN : reuse ? -GHOST_OUT : 0, out: false };
+      const g = { id, spot, w, shapeKey, group, geos, mat, t: first ? GHOST_IN : reuse ? -GHOST_OUT : 0, out: false };
       mat.uniforms.uReveal.value = first ? 1 : 0;
       group.visible = first;
       this.scene.add(group);
@@ -2072,6 +2079,8 @@ void main() {
   /** Fade the outlines in and out (every frame). */
   #animateGhosts(dt) {
     for (const g of this.ghosts) {
+      const px = slotPos(g.spot, g.w, g.shapeKey, this.groundY).x; // slides along when the row closes up
+      g.group.position.x += (px - g.group.position.x) * (1 - Math.exp(-4 * dt));
       g.t += dt;
       const reveal = g.out ? 1 - Math.min(1, g.t / GHOST_OUT) : smooth(g.t / GHOST_IN);
       g.mat.uniforms.uReveal.value = reveal;
@@ -2624,10 +2633,10 @@ void main() {
     }
 
     const TAU = Math.PI * 2;
-    const draw = (v, rate, rotRate = rate) => { // (rotRate: how fast the angle follows its target; 30 = it has turned 95% of the way in 0.1 s)
+    const draw = (v, rate, rotRate = rate, glide = false) => { // (rotRate: how fast the angle follows its target; 30 = it has turned 95% of the way in 0.1 s)
       const t = this.#target(v);
       const c = v.cur;
-      const k = rate >= 1 ? 1 : 1 - Math.exp(-rate * dt);
+      const k = rate >= 1 && !glide ? 1 : 1 - Math.exp(-rate * dt); // (glide: a smooth follow at any rate)
       c.x += (t.x - c.x) * k;
       c.y += (t.y - c.y) * k;
       c.z += (t.z - c.z) * k;
@@ -2645,7 +2654,7 @@ void main() {
       const mineHeld = v.owner === this.ctx.me.slot && (v.st === BODY.HELD || v.st === BODY.HELD_BAD) && this.#carrying();
       draw(v, v.static ? 1 : mineHeld ? 45 : 24, mineHeld ? ROTATE_ANIM : undefined);
     }
-    for (const v of this.tableViews.values()) draw(v, 14);
+    for (const v of this.tableViews.values()) draw(v, 4, undefined, true); // (the row closing up: 95% of the way in about 0.75 s)
     this.#animateGhosts(dt);
     for (const v of this.tableViews.values()) {
       if (v.reveal === undefined || v.reveal >= 1) continue; // a block that just came out of its outline dissolves in
