@@ -41,6 +41,7 @@ const rawColor = (hex) => {
 };
 const ROTATE_ANIM = 30; //      how fast the block in your hand turns to a new angle: it has turned 95% of the way in about 0.1 s
 const RELEASE_DELAY = 50;  //   ms between letting go of the mouse and the block really dropping (pressing again in that time picks it back up)
+const NO_BUILD_LINE = 0.12; // world units: the thickness of the red line around a no-build zone (the same for every zone)
 const GFX_STORE = 'balance.gfx'; // localStorage: the graphics settings
 /** Graphics presets. filter: 0 = off, 1 = trilinear, 2 = anisotropic 4x, 3 = anisotropic 16x (sampled textures and the smoothing of fine procedural patterns at steep angles); detail: 0 = flat surfaces, 1 = roughness maps, 2 = roughness and bump maps; scale = the share of the screen's pixels that is drawn. */
 const GFX_PRESETS = {
@@ -2142,20 +2143,18 @@ void main() {
     if (zone) { // a NO-BUILD ZONE: the see-through red inside (the block itself) and a bright red chalk outline on its front
       group.children.forEach((m) => m.layers.set(1)); // (layer 1 = seen by the camera, but no shadows)
       const shape = getShape(shapeKey);
-      const line = Math.min(0.4, Math.max(0.15, Math.min(shape.w, shape.h) * 0.09));
+      const line = NO_BUILD_LINE; // the same thickness for every zone
       const lineMat = this.#blockMaterial('noBuildLine', (id * 0.37 + 0.1) % 1, THREE.DoubleSide);
       Object.assign(lineMat, { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
       extra.push(lineMat);
       for (const o of shapeOutlines(shape, tuning.mergeParts !== false)) {
         const geo = outlineRibbon(o.pts, o.holes ?? [], line);
         extraGeos.push(geo);
-        for (const zz of [DEPTH / 2 + 0.05, -DEPTH / 2 - 0.05]) { // (on the front and on the back)
-          const mesh = new THREE.Mesh(geo, lineMat);
-          mesh.position.z = zz;
-          mesh.layers.set(1);
-          mesh.renderOrder = 4;
-          group.add(mesh);
-        }
+        const mesh = new THREE.Mesh(geo, lineMat); // (one line, in the middle of the zone's depth)
+        mesh.position.z = 0;
+        mesh.layers.set(1);
+        mesh.renderOrder = 4;
+        group.add(mesh);
       }
     }
     this.scene.add(group);

@@ -35,6 +35,7 @@ export const shapes = {
     what: [{ type: 'circle', diameter: 2 }, { type: 'circle', diameter: 2, x: 6, y: 1 }],
   },
   Basic: { triangle: [{ type: 'poly', points: '0,0 6,6 6,0' }], circle: [{ type: 'circle', diameter: 5 }] },
+  nobuild: { LargeRect: [{ type: 'poly', points: '0,0 15,0 15,75 0,75' }] },
   Other: {
     cutcorner: [{ type: 'poly', points: '0,5 5,0 0,0' }, { type: 'poly', points: '5,5 2.5,2.5 5,0' }],
     halfcircle: [{ type: 'circle', diameter: 6, x: 3, y: 3 }, { type: 'poly', points: '0,3 6,3 6,0 0,0', cut: true }],

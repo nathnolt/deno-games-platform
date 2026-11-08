@@ -477,7 +477,7 @@ void main() {
   noBuildZone: {
     type: 'transparent',
     code: `
-// NO-BUILD ZONE (the inside): a mostly see-through red, with a faint slow hatching so it does not look like a stain. The red chalk line is 'noBuildLine'.
+// NO-BUILD ZONE (the inside): a mostly see-through red, with a faint slow hatching so it does not look like a stain. The red line around it is 'noBuildLine'.
 void main() {
   float hatch = 0.5 + 0.5 * sin((vP.x + vP.y) * 1.3 - uTime * 0.9);
   gl_FragColor = vec4(1.0, 0.1, 0.08, 0.13 + 0.05 * hatch);
@@ -486,15 +486,11 @@ void main() {
   noBuildLine: {
     type: 'transparent',
     code: `
-// NO-BUILD ZONE (the outline): the same chalk line as the outline of the blocks that are still to come, but a bright, slightly pulsing red.
+// NO-BUILD ZONE (the outline): a thin, solid, bright red line (a hair of softness at its two edges so it does not look jagged), pulsing a little.
 void main() {
-  vec2 p = vP + uSeed * 17.0;
-  float across = smoothstep(0.0, 0.3, vP.y) * smoothstep(1.0, 0.7, vP.y);
-  float rough = 0.7 + 0.3 * fbm(vec2(p.x * 2.2, vP.y * 2.5));
-  float dust = step(0.86, hash(floor(vec2(p.x * 9.0, vP.y * 4.0)))) * 0.2;
-  float pulse = 0.9 + 0.1 * sin(uTime * 2.5);
-  float a = clamp(across * (rough - dust) * 1.25, 0.0, 1.0) * pulse;
-  gl_FragColor = vec4(1.0, 0.1, 0.08, a);
+  float across = smoothstep(0.0, 0.18, vP.y) * smoothstep(1.0, 0.82, vP.y);
+  float pulse = 0.92 + 0.08 * sin(uTime * 2.5);
+  gl_FragColor = vec4(1.0, 0.1, 0.08, across * pulse);
 }`,
   },
 };
