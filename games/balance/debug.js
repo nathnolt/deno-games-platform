@@ -583,6 +583,7 @@ export function createDebugMenu(view) {
         check('float (buoyant)', m, 'float', 'materials', () => render()),
         m.float ? slider('float level (part under water)', m, 'floatLevel', 'materials', 0.1, 1, 0.05) : null,
         num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),
+        select('explodes when it touches', [['', '(nothing)'], ...Object.keys(draft.materials)], m, 'explodesWith', 'materials'),
         m.stackLimit !== undefined ? check('no lamp (looks cracked already)', m, 'noLamp', 'materials') : null,
         select('shader', shaderNames(), m, 'shader', 'materials'),
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),

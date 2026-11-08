@@ -669,6 +669,10 @@ class BalanceView {
   ptr = null; //             pointer position in the play plane while carrying
   tableViews = new Map(); // blockId -> view of a block lying on the table
   bodyViews = new Map(); //  blockId -> view of a block in the play area (static, floating, falling, or held by somebody)
+  exSeen = new Set(); //     ids of the explosions already drawn (the server repeats an explosion in its snapshots for a moment)
+  fxList = []; //           running explosion effects: { sprite, t, life, step(k) }
+  fxTex = null; //          the textures of the explosion (a soft glow and a ring)
+  shakeT = 0; //            seconds of camera shake left
   poseMem = new Map(); //    blockId -> last drawn pose of a removed view (a block picked up / put back moves from there)
   geoCache = new Map(); //   shape key -> [{ geo }]
   ghosts = []; //           the chalk outlines of the blocks still to come, on fixed places of the row: [{ id, spot, group, geos, mat, t, out }]
@@ -849,6 +853,12 @@ class BalanceView {
       this.onRun?.(s);
     }
     if (s.ph !== this.phase) this.#onPhase(s.ph, s);
+
+    for (const [id, x, y, chain] of s.ex ?? []) { // fuel met oxidizer
+      if (this.exSeen.has(id)) continue;
+      this.exSeen.add(id);
+      this.#explosion(x, y, !!chain);
+    }
 
     // 1. drop views whose block is gone (remembering where they were, so the block can move on smoothly from there)
     const inBody = new Set(s.b.map((r) => r[0]));
@@ -2172,6 +2182,121 @@ void main() {
     }
   }
 
+  /** Soft glow and ring textures for the explosion (drawn once on a canvas). */
+  #explosionTextures() {
+    if (this.fxTex) return this.fxTex;
+    const make = (draw) => {
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = 128;
+      draw(cv.getContext('2d'));
+      const t = new THREE.CanvasTexture(cv);
+      t.colorSpace = THREE.SRGBColorSpace;
+      return t;
+    };
+    const glow = make((g) => {
+      const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+      gr.addColorStop(0, 'rgba(255,255,255,1)');
+      gr.addColorStop(0.25, 'rgba(255,255,255,0.75)');
+      gr.addColorStop(0.6, 'rgba(255,255,255,0.22)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr;
+      g.fillRect(0, 0, 128, 128);
+    });
+    const ring = make((g) => {
+      const gr = g.createRadialGradient(64, 64, 34, 64, 64, 64);
+      gr.addColorStop(0, 'rgba(255,255,255,0)');
+      gr.addColorStop(0.72, 'rgba(255,255,255,0.95)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr;
+      g.fillRect(0, 0, 128, 128);
+    });
+    return (this.fxTex = { glow, ring });
+  }
+
+  /**
+   * Fuel and oxidizer touched: a big, unmistakable explosion at (x, y) of the play plane: a white flash that fills the screen for a moment, a fireball,
+   * a shockwave ring, sparks that fly out and fall, dark smoke, and a shake of the camera.
+   */
+  #explosion(x, y, chain = false) {
+    const tex = this.#explosionTextures();
+    const z = 6; // a bit in front of the play plane
+    const sc = chain ? 0.7 : 1; //   an explosion that came from another one is a bit smaller, without the flash of the screen
+    const add = (map, color, life, from, to, opacity, step) => {
+      const mat = new THREE.SpriteMaterial({ map, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, opacity });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(x, y, z);
+      sprite.renderOrder = 60;
+      this.frontScene.add(sprite);
+      const fx = { sprite, t: 0, life, step: (k) => { const e = 1 - (1 - k) * (1 - k); sprite.scale.setScalar((from + (to - from) * e) * sc); mat.opacity = opacity * (1 - k) ** 1.5; step?.(k); } };
+      this.fxList.push(fx);
+      return fx;
+    };
+    add(tex.glow, '#fffbe0', 0.35, 6, 46, 1);                    // the white-hot flash
+    add(tex.glow, '#ff8a1a', 0.8, 5, 34, 1);                     // the fireball
+    add(tex.glow, '#ff3b0a', 1.1, 8, 40, 0.7);                   // its red edge
+    add(tex.ring, '#ffe2a0', 0.6, 3, 56, 0.95);                  // the shockwave
+    add(tex.ring, '#9fdcff', 0.8, 2, 40, 0.7);                   // a second, bluer one (the oxidizer)
+    for (let i = 0; i < 44; i++) { // sparks
+      const a = Math.random() * Math.PI * 2;
+      const sp = 14 + Math.random() * 34;
+      const life = 0.7 + Math.random() * 0.8;
+      const hot = Math.random() < 0.5;
+      const size = 0.9 + Math.random() * 1.8;
+      const vx = Math.cos(a) * sp;
+      const vy = Math.sin(a) * sp + 6;
+      const fx = add(tex.glow, hot ? '#ffd24a' : '#ff6a1a', life, size, size * 0.4, 1);
+      fx.vx = vx; fx.vy = vy; fx.grav = true;
+    }
+    for (let i = 0; i < 12; i++) { // smoke (normal blending, so it is dark)
+      const mat = new THREE.SpriteMaterial({ map: tex.glow, color: '#2a2220', transparent: true, depthWrite: false, depthTest: false, opacity: 0.55 });
+      const sprite = new THREE.Sprite(mat);
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.random() * 5;
+      sprite.position.set(x + Math.cos(a) * r, y + Math.sin(a) * r, z - 0.5);
+      sprite.renderOrder = 55;
+      this.frontScene.add(sprite);
+      const size = 7 + Math.random() * 8;
+      this.fxList.push({ sprite, t: 0, life: 1.6 + Math.random() * 0.8, vx: (Math.random() - 0.5) * 6, vy: 3 + Math.random() * 5, step: (k) => { sprite.scale.setScalar(size * (0.5 + k)); mat.opacity = 0.55 * (1 - k) * Math.min(1, k * 8); } });
+    }
+    if (this.root && !chain) { // the whole screen flashes
+      const flash = el('div', { class: 'bb-boom' });
+      this.root.append(flash);
+      requestAnimationFrame(() => { flash.style.opacity = '0'; });
+      setTimeout(() => flash.remove(), 700);
+    }
+    this.shakeT = chain ? Math.max(this.shakeT, 0.35) : 0.6;
+  }
+
+  /** Move the explosion effects along (every frame). */
+  #animateExplosions(dt) {
+    for (let i = this.fxList.length - 1; i >= 0; i--) {
+      const f = this.fxList[i];
+      f.t += dt;
+      const k = Math.min(1, f.t / f.life);
+      if (f.vx !== undefined) {
+        if (f.grav) f.vy -= 38 * dt;
+        f.sprite.position.x += f.vx * dt;
+        f.sprite.position.y += f.vy * dt;
+      }
+      f.step(k);
+      if (k >= 1) {
+        f.sprite.removeFromParent();
+        f.sprite.material.dispose();
+        this.fxList.splice(i, 1);
+      }
+    }
+    if (this.shakeT > 0) this.shakeT = Math.max(0, this.shakeT - dt);
+  }
+
+  #clearExplosions() {
+    for (const f of this.fxList) {
+      f.sprite.removeFromParent();
+      f.sprite.material.dispose();
+    }
+    this.fxList = [];
+    this.shakeT = 0;
+  }
+
   #clearShards() {
     for (const sh of this.shards) {
       sh.mesh.removeFromParent();
@@ -2346,6 +2471,8 @@ void main() {
 
   #clearViews() {
     this.#clearShards();
+    this.#clearExplosions();
+    this.exSeen.clear();
     this.#clearGhosts();
     for (const v of this.bodyViews.values()) this.#dispose(v);
     for (const v of this.tableViews.values()) this.#dispose(v);
@@ -2656,6 +2783,7 @@ void main() {
     }
     for (const v of this.tableViews.values()) draw(v, 4, undefined, true); // (the row closing up: 95% of the way in about 0.75 s)
     this.#animateGhosts(dt);
+    this.#animateExplosions(dt);
     for (const v of this.tableViews.values()) {
       if (v.reveal === undefined || v.reveal >= 1) continue; // a block that just came out of its outline dissolves in
       v.reveal = Math.min(1, v.reveal + dt / 0.55);
@@ -2687,6 +2815,9 @@ void main() {
       }
     }
 
+    const shake = this.shakeT > 0 ? this.shakeT / 0.6 : 0; // the camera shakes for a moment after an explosion
+    const cam0 = shake ? this.camera.position.clone() : null;
+    if (shake) this.camera.position.add(new THREE.Vector3((Math.random() - 0.5) * 2.2 * shake, (Math.random() - 0.5) * 2.2 * shake, 0));
     try {
       this.#renderAll();
     } catch (e) {
@@ -2694,6 +2825,8 @@ void main() {
       this.#report(`drawing failed: ${e?.message ?? e}`, e);
       this.renderer.setRenderTarget(null);
       this.#showAll();
+    } finally {
+      if (cam0) { this.camera.position.copy(cam0); this.camera.updateMatrixWorld(true); }
     }
   };
 

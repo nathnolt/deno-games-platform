@@ -45,6 +45,10 @@ const DEFS_BURST = 0.3; //        debug: seconds the new definitions ride along 
 const LAB_ID_START = 100000; //   ids of blocks spawned in the level lab (they never clash with the ids of a level's own blocks)
 const LAB_MAX_BLOCKS = 300;
 const LAND_MAX = 8; //             seconds after which a dropped block counts as having landed anyway (the countdown never waits for ever)
+const EXPLODE_RADIUS = 17; //     world units: blocks this close to an explosion are blown away (the closer, the harder)
+const EXPLODE_SPEED = 30; //     units / s: the speed a block right next to an explosion gets
+const CHAIN_DELAY = 0.18; //      seconds between a block exploding and the fuel / oxidizer blocks touching it exploding in turn
+const EXPLODE_SHOW = 1.5; //     seconds an explosion stays in the snapshots (so a client that missed one frame still sees it)
 const FRAGILE_KEEP = 0.6; //      seconds a block that stopped touching a fragile one still counts (a block that lands and bounces must not flip the lamp back to green)
 const FRAGILE_REST = 0.2; //      seconds a block must rest on a fragile one before it counts
 const START_GRACE = 0.8; //       seconds after a level starts during which start / restart clicks are ignored (two players clicking the same button)
@@ -112,6 +116,8 @@ export class BalanceGame {
     this.table = []; //           the row of places on the table: each an item (a block that waits), or null (empty, or the outline of a block that is still to come)
     this.queue = []; //           blocks that have not appeared on the table yet, in order; the first PREVIEW_COUNT of them show as an outline on a place of the row (item.slot)
     this.floaters = [];
+    this.explosions = []; //      [{ id, x, y, age }]: recent explosions (fuel meeting oxidizer), told to the clients so they draw them
+    this.exId = 0;
     this.total = 0;
     this.settle = 0;
     this.endedFor = 0;
@@ -199,6 +205,7 @@ export class BalanceGame {
       left: this.#remaining(),
       total: this.total,
       why: this.why,
+      ...(this.explosions.length ? { ex: this.explosions.map((e) => [e.id, round2(e.x), round2(e.y), e.chain ? 1 : 0]) } : {}),
       still: round2(clamp(this.settle / (tuning.countdown ?? 3), 0, 1)), // progress of the countdown after the last block (0 = not running)
       ...(DEBUG ? { lab: this.lab.on ? (this.lab.paused ? 2 : 1) : 0, lr: this.lab.rules ? 1 : 0, drev: this.defsRev, ...(this.saveResult ? { sv: this.saveResult } : {}), ...(this.defsBurst > 0 ? { defs: this.#defs() } : {}) } : {}),
     };
@@ -642,6 +649,8 @@ export class BalanceGame {
     this.recs.clear();
     this.recOf.clear();
     this.floaters = [];
+    this.explosions = [];
+    this.exId = 0;
     this.table = [];
     this.queue = [];
     for (const p of this.players.values()) p.held = null;
@@ -700,6 +709,7 @@ export class BalanceGame {
       held,
       owner,
       bad: false,
+      explodesWith: mat.explodesWith ? MATERIAL_KEYS.indexOf(mat.explodesWith) : -1, // (a block of this material explodes when it touches a block of that one, see #reactions)
       hazard: !!mat.hazard, // (a static block that loses the level when another block touches it)
       stackLimit: mat.stackLimit ?? null, // blocks that may rest on this one; one more and it breaks (see #glass)
       landed: true, //      false from the moment a block is dropped until it has hit something (the win countdown waits for that)
@@ -757,6 +767,9 @@ export class BalanceGame {
       if (inside) p.held.rec.armed = true;
       p.held.rec.bad = (!this.lab.on || !p.held.item.lab) && this.#overlaps(p.held.rec); // red = it overlaps another block (and only then) // red = you have taken it out of the drop zone again (letting go sends it back to the table)
     }
+    for (const e of this.explosions) e.age += dt;
+    this.explosions = this.explosions.filter((e) => e.age < EXPLODE_SHOW);
+    if (this.phase === PHASE.PLAY && !this.lab.paused) this.#reactions(dt);
     if (this.phase === PHASE.PLAY && !this.lab.paused) this.#fragile(dt);
     if (this.phase === PHASE.PLAY && (!this.lab.on || this.lab.rules)) this.#rules(dt); // (the level lab can switch the rules back on to test failing)
   }
@@ -798,6 +811,94 @@ export class BalanceGame {
       }
       rec.load = n;
     }
+  }
+
+  /**
+   * Blocks of two materials that react (fuel and oxidizer, like the two components of hypergolic rocket propellant: they ignite the moment they touch):
+   * when a block that is not held touches one it reacts with, both blow up. They vanish, and everything near them is thrown away from the blast.
+   * The explosion spreads: every fuel or oxidizer block that touches a block that explodes catches fire and explodes a moment later (CHAIN_DELAY),
+   * and so on, so a heap of them goes off one after the other.
+   */
+  #reactions(dt) {
+    for (const rec of [...this.recs.values()]) { // the fuses that were lit
+      if (rec.fuse === undefined || !this.recs.has(rec.id)) continue;
+      rec.fuse -= dt;
+      if (rec.fuse <= 0) this.#detonate(rec);
+    }
+    for (const rec of [...this.recs.values()]) { // a fuel and an oxidizer block that touch
+      if (rec.explodesWith < 0 || rec.held || !this.recs.has(rec.id)) continue;
+      for (let ce = rec.body.getContactList(); ce; ce = ce.next) {
+        const other = this.recOf.get(ce.other);
+        if (!other || other.kind !== 'block' || other.held || other.mi !== rec.explodesWith || !ce.contact.isTouching()) continue;
+        this.#explode(rec, other);
+        break;
+      }
+    }
+  }
+
+  /** The blocks of a reactive material (fuel or oxidizer) that touch this one right now, and are not on fire already. */
+  #reactiveNeighbours(rec) {
+    const out = [];
+    for (let ce = rec.body.getContactList(); ce; ce = ce.next) {
+      const o = this.recOf.get(ce.other);
+      if (o && o.kind === 'block' && !o.held && o.explodesWith >= 0 && o.fuse === undefined && ce.contact.isTouching() && !out.includes(o)) out.push(o);
+    }
+    return out;
+  }
+
+  /** Set a block on fire: it explodes after `delay` seconds. The blocks that touch it now will catch fire from it. */
+  #ignite(rec, delay) {
+    if (rec.fuse !== undefined) return;
+    rec.fuse = delay;
+    rec.chain = this.#reactiveNeighbours(rec).map((o) => o.id);
+  }
+
+  /** The first explosion: a fuel and an oxidizer block that touched, as one blast at the middle between them. */
+  #explode(a, b) {
+    const pa = a.body.getPosition();
+    const pb = b.body.getPosition();
+    const x = (pa.x + pb.x) / 2;
+    const y = (pa.y + pb.y) / 2;
+    const next = new Set([...this.#reactiveNeighbours(a), ...this.#reactiveNeighbours(b)].filter((o) => o !== a && o !== b));
+    this.#removeBlock(a);
+    this.#removeBlock(b);
+    this.#blast(x, y, false);
+    for (const o of next) this.#ignite(o, CHAIN_DELAY);
+  }
+
+  /** A block whose fuse has run out explodes on its own, and sets the reactive blocks that touched it on fire. */
+  #detonate(rec) {
+    const p = rec.body.getPosition();
+    const x = p.x;
+    const y = p.y;
+    const chain = rec.chain ?? [];
+    this.#removeBlock(rec);
+    this.#blast(x, y, true);
+    for (const id of chain) {
+      const o = this.recs.get(id);
+      if (o && !o.held) this.#ignite(o, CHAIN_DELAY);
+    }
+  }
+
+  /** The blast itself: the clients draw it, and every loose block near it is thrown away from it. */
+  #blast(x, y, chain) {
+    this.explosions.push({ id: ++this.exId, x, y, age: 0, chain });
+    for (const rec of this.recs.values()) {
+      if (rec.kind !== 'block' || rec.static || rec.held) continue;
+      const p = rec.body.getPosition();
+      const dx = p.x - x;
+      const dy = p.y - y;
+      const d = Math.hypot(dx, dy);
+      if (d >= EXPLODE_RADIUS) continue;
+      const f = (1 - d / EXPLODE_RADIUS) * (chain ? 0.7 : 1);
+      const nx = d > 0.01 ? dx / d : 0;
+      const ny = d > 0.01 ? dy / d : 1;
+      const speed = EXPLODE_SPEED * f * f + 4 * f; // (falls off quickly with the distance)
+      const m = rec.body.getMass();
+      rec.body.applyLinearImpulse(new Vec2(nx * speed * m, (ny * speed + 5 * f) * m), rec.body.getWorldCenter(), true);
+      rec.body.applyAngularImpulse((nx >= 0 ? -1 : 1) * rec.body.getInertia() * 3 * f, true);
+    }
+    this.settle = 0;
   }
 
   /** Is `upper` resting on `lower` in this contact (the contact normal points up from lower to upper)? */

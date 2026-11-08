@@ -50,6 +50,7 @@ export const tuning = {
 //           The block wears a coloured dot: green = nothing on it, orange = 1, red = 2 (= the limit), and it shatters at limit + 1.
 // (the 'waterBlock' shader takes the colour and see-through-ness of the water of the bowl of the level)
 // hazard:   (with static) touching this block loses the level, like the water does
+// explodesWith: key of another material: when a block of this material touches a block of that one, both explode (they vanish and throw nearby blocks away)
 // noLamp:   no coloured dot on a block with a stackLimit (for blocks that look cracked already)
 // shader:   name of a GLSL shader in client/shaders.js
 export const materials = {
@@ -61,6 +62,8 @@ export const materials = {
   floatBlock:      { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
   floatierBlock:   { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.9 },
   floatBlockHeavy: { float: true, friction: 8, weight: 30, shader: 'float', floatLevel: 0.5 },
+  fuelBlock:       { friction: 8, weight: 8, shader: 'fuel', explodesWith: 'oxidizerBlock' }, // fuel and oxidizer, like the two parts of a hypergolic rocket propellant: the moment they touch, both blow up
+  oxidizerBlock:   { friction: 8, weight: 8, shader: 'oxidizer', explodesWith: 'fuelBlock' },
 };
 
 // ── Shapes ───────────────────────────────────────────────────────────────────────────────────────────────────

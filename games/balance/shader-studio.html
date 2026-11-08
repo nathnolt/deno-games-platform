@@ -1,0 +1,3047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shader Studio — node editor for GLSL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  --bg: #15171c; --panel: #1b1e25; --panel2: #20242c; --line: #2c313b; --text: #d6dae3; --dim: #8a92a3; --accent: #5aa2ff; --good: #5fcf80; --bad: #ef6a6a;
+  --left: 400px; --right: 440px;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; color: var(--text);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 9px; cursor: pointer; }
+button:hover { border-color: #46506a; background: #262b35; }
+button.on { background: #27406b; border-color: var(--accent); }
+button:disabled { opacity: .4; cursor: default; }
+select { background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 3px 5px; }
+input[type=text], input:not([type]), input[type=search], input[type=number] { background: #12141a; border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; min-width: 0; }
+input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+#app { display: flex; flex-direction: column; height: 100%; }
+#top { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+#top .logo { font-weight: 700; letter-spacing: .02em; }
+#top .logo span { color: var(--accent); }
+#top .sep { width: 1px; height: 20px; background: var(--line); margin: 0 2px; }
+#curName { font-weight: 600; color: #fff; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status { margin-left: auto; font-size: 12px; padding: 3px 9px; border-radius: 99px; background: #1f2a22; color: var(--good); }
+#status.err { background: #3a2022; color: var(--bad); }
+#main { flex: 1; display: flex; min-height: 0; }
+#left { width: var(--left); display: flex; flex-direction: column; background: var(--panel); min-width: 260px; }
+#right { width: var(--right); display: flex; flex-direction: column; background: var(--panel); min-width: 240px; }
+#right.hidden, #rsplit.hidden { display: none; }
+.split { width: 5px; cursor: col-resize; background: var(--line); flex: none; }
+.split:hover { background: var(--accent); }
+#center { flex: 1; min-width: 200px; position: relative; display: flex; }
+
+/* preview */
+#pvwrap { position: relative; height: 300px; flex: none; background: #000; }
+#gl { width: 100%; height: 100%; display: block; cursor: grab; }
+#gl:active { cursor: grabbing; }
+#pvmsg { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 20px; color: var(--bad); }
+#shapes { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--line); align-items: center; }
+#shapes button { padding: 2px 7px; font-size: 12px; }
+#shapes .grow { flex: 1; }
+#tabs { display: flex; border-bottom: 1px solid var(--line); }
+#tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; padding: 7px 4px; color: var(--dim); border-bottom: 2px solid transparent; }
+#tabs button.on { color: #fff; border-bottom-color: var(--accent); background: transparent; }
+#tabbody { flex: 1; overflow: auto; padding: 8px; }
+.pane { display: none; }
+.pane.on { display: block; }
+.btnrow { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.btnrow button { font-size: 12px; padding: 3px 8px; }
+#libFilter { width: 100%; margin-bottom: 6px; }
+#libList { display: flex; flex-direction: column; gap: 1px; max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; }
+.libitem { padding: 4px 8px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; }
+.libitem:hover { background: #242a35; }
+.libitem.on { background: #27406b; }
+.libitem small { color: var(--dim); }
+.libitem .mod { color: #e6b450; }
+.field { display: grid; grid-template-columns: 110px 1fr auto; gap: 6px; align-items: center; margin: 5px 0; }
+.field label { color: var(--dim); }
+.field input[type=range] { width: 100%; }
+.field .v { color: var(--dim); font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
+.hint { color: var(--dim); font-size: 12px; line-height: 1.45; margin: 6px 0; }
+h4 { margin: 12px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+
+/* graph */
+#graph { position: absolute; inset: 0; overflow: hidden; background-color: #181b21; background-image: radial-gradient(#2e343f 1px, transparent 1.2px); background-size: 24px 24px; cursor: default; user-select: none; }
+#world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+#wires { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+#wires path { fill: none; stroke-width: 2.2; opacity: .85; }
+#wires path.hl { stroke-width: 3.2; opacity: 1; }
+#wires path.tmp { stroke-dasharray: 5 4; opacity: .9; }
+#nodes { position: absolute; left: 0; top: 0; }
+#boxsel { position: absolute; border: 1px dashed var(--accent); background: rgba(90,162,255,.12); display: none; pointer-events: none; }
+#gbar { position: absolute; left: 10px; top: 10px; display: flex; gap: 6px; z-index: 5; }
+#gbar button { background: rgba(27,30,37,.92); }
+#banner { position: absolute; left: 50%; transform: translateX(-50%); top: 10px; z-index: 6; background: #3a2f12; border: 1px solid #8a6d1c; color: #ffd982; padding: 5px 12px; border-radius: 99px; display: none; cursor: pointer; }
+#toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; z-index: 6; background: #232a38; border: 1px solid #3a4560; padding: 6px 14px; border-radius: 6px; display: none; max-width: 70%; }
+#graphMsg { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: var(--bad); padding: 30px; text-align: center; }
+#hintbar { position: absolute; right: 10px; bottom: 8px; color: #5f6778; font-size: 11px; pointer-events: none; z-index: 4; }
+
+.node { position: absolute; background: #262a33; border: 1px solid #3a404d; border-radius: 7px; box-shadow: 0 3px 10px rgba(0,0,0,.35); font-size: 12px; }
+.node.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 3px 12px rgba(0,0,0,.5); }
+.node.pv { border-color: #e6b450; box-shadow: 0 0 0 2px #e6b450; }
+.nh { display: flex; align-items: center; gap: 5px; padding: 4px 6px 4px 9px; border-radius: 6px 6px 0 0; cursor: grab; font-weight: 600; background: #3a404d; }
+.nh .nt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nh .nbtn { opacity: .55; cursor: pointer; padding: 0 3px; font-size: 13px; line-height: 1; }
+.nh .nbtn:hover { opacity: 1; }
+.node.pv .nh .eye { color: #ffd982; opacity: 1; }
+.k-input .nh { background: #404a5c; } .k-decl .nh { background: #1f5f66; } .k-assign .nh { background: #5a3d78; }
+.k-op .nh, .k-unary .nh, .k-ternary .nh, .k-index .nh { background: #7a4f1e; } .k-call .nh { background: #2c5a94; }
+.k-member .nh { background: #4a5870; } .k-vec .nh { background: #6c6320; } .k-raw .nh { background: #7a2e2e; }
+.k-surface .nh, .k-fragout .nh { background: #2f7a45; }
+.nb { padding: 4px 0 6px; }
+.note { padding: 0 9px 3px; color: #7f889b; font-style: italic; font-size: 11px; white-space: pre-wrap; }
+.row { position: relative; display: flex; align-items: center; gap: 6px; min-height: 22px; padding: 1px 12px; }
+.row.out { justify-content: flex-end; }
+.row .lbl { color: #aab1c0; white-space: nowrap; }
+.row .fld { flex: 1; min-width: 0; height: 20px; padding: 0 5px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; cursor: ew-resize; }
+.row .fld:focus { cursor: text; }
+.row.body { padding-top: 3px; padding-bottom: 3px; }
+.sock { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: #20232b; border: 2px solid #8a92a3; top: 50%; margin-top: -6px; cursor: crosshair; z-index: 2; }
+.sock::after { content: ''; position: absolute; inset: -5px; }
+.sock.in { left: -6px; } .sock.out { right: -6px; }
+.sock:hover { transform: scale(1.35); background: #fff; }
+.node select, .node .tin { height: 20px; padding: 0 3px; font-size: 11.5px; }
+.node .tin { flex: 1; min-width: 0; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.node textarea { width: 100%; background: #14161b; border: 1px solid #333a47; border-radius: 4px; color: #e8c9a0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; resize: vertical; padding: 4px 6px; min-height: 52px; white-space: pre; overflow: auto; }
+.node .vals { display: flex; gap: 3px; flex: 1; }
+.node .vals input { flex: 1; width: 0; height: 20px; padding: 0 3px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; text-align: center; cursor: ew-resize; }
+.node .vals input:focus { cursor: text; }
+.node input[type=color] { width: 26px; height: 20px; padding: 0; border: 1px solid var(--line); background: none; cursor: pointer; }
+.node .mini { padding: 0 6px; height: 18px; line-height: 16px; font-size: 12px; }
+
+/* code */
+#codeHead { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+#codeHead b { flex: 1; }
+#codeWrap { flex: 1; display: flex; min-height: 0; position: relative; background: #12141a; }
+#gutter { width: 40px; flex: none; overflow: hidden; text-align: right; color: #566074; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 8px 6px 8px 0; background: #14171c; user-select: none; }
+#gutter div.err { color: #fff; background: #7a2e2e; }
+#code { flex: 1; resize: none; border: 0; background: transparent; color: #d9dde6; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 8px; white-space: pre; overflow: auto; tab-size: 2; }
+#errs { max-height: 140px; overflow: auto; border-top: 1px solid var(--line); font: 11.5px/1.45 ui-monospace, Menlo, Consolas, monospace; }
+#errs div { padding: 3px 8px; color: #ffb0b0; cursor: pointer; border-bottom: 1px solid #2a2326; }
+#errs div:hover { background: #2d2225; }
+#errs div.ok { color: var(--good); cursor: default; }
+
+/* add menu */
+#menu { position: fixed; z-index: 50; width: 260px; background: #1e222a; border: 1px solid #46506a; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.6); display: none; }
+#menu input { width: calc(100% - 12px); margin: 6px; }
+#menuList { max-height: 340px; overflow: auto; padding-bottom: 6px; }
+#menuList .cat { padding: 6px 10px 2px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: #6f788b; }
+#menuList .it { padding: 4px 12px; cursor: pointer; }
+#menuList .it.on, #menuList .it:hover { background: #27406b; }
+#dropzone { position: fixed; inset: 0; z-index: 99; display: none; align-items: center; justify-content: center; background: rgba(10,14,22,.8); font-size: 22px; border: 3px dashed var(--accent); }
+dialog { background: var(--panel); color: var(--text); border: 1px solid #46506a; border-radius: 10px; padding: 16px; max-width: 560px; }
+dialog::backdrop { background: rgba(0,0,0,.55); }
+dialog h3 { margin: 0 0 8px; }
+dialog textarea { width: 100%; height: 160px; background: #12141a; border: 1px solid var(--line); border-radius: 6px; font: 12px ui-monospace, monospace; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="top">
+    <div class="logo">Shader <span>Studio</span></div>
+    <div class="sep"></div>
+    <span id="curName">—</span>
+    <select id="typeSel" title="Material type of this shader"><option value="opaque">opaque</option><option value="transparent">transparent</option><option value="refract">refract</option></select>
+    <div class="sep"></div>
+    <button id="bUndo" title="Ctrl+Z">Undo</button><button id="bRedo" title="Ctrl+Shift+Z">Redo</button>
+    <button id="bLayout" title="Arrange the nodes left to right">Auto-layout</button>
+    <button id="bFit" title="F">Fit view</button>
+    <button id="bAdd" title="Shift+A, or double-click the canvas">+ Add node</button>
+    <button id="bCode" class="on">Code</button>
+    <span id="status">…</span>
+  </div>
+  <div id="main">
+    <aside id="left">
+      <div id="pvwrap"><canvas id="gl"></canvas><div id="pvmsg"></div></div>
+      <div id="shapes"></div>
+      <div id="tabs"><button data-tab="shaders" class="on">Shaders</button><button data-tab="scene">Scene</button><button data-tab="uniforms">Uniforms</button><button data-tab="help">Help</button></div>
+      <div id="tabbody">
+        <div class="pane on" id="tab-shaders">
+          <input id="libFilter" type="search" placeholder="Filter shaders…">
+          <div id="libList"></div>
+          <div class="btnrow"><button id="bNew">New</button><button id="bDup">Duplicate</button><button id="bRen">Rename</button><button id="bDel">Delete</button><button id="bResetOne" title="Restore this shader to the version that came with the app">Reset to default</button></div>
+          <h4>Game files</h4>
+          <div class="btnrow"><button id="bImport">Import _shaders.js…</button><button id="bExport">Download _shaders.js</button><button id="bCopyAll">Copy as text</button></div>
+          <div class="btnrow"><button id="bPrelude" title="Use the lighting and helper functions from your current shaders.js">Load shaders.js (prelude)…</button><button id="bResetLib">Reset everything</button></div>
+          <div class="hint">Everything is stored in this browser (localStorage). Drop a <code>_shaders.js</code> or <code>shaders.js</code> file anywhere on the page to load it.</div>
+          <input type="file" id="file" accept=".js,.mjs,.txt" hidden>
+        </div>
+        <div class="pane" id="tab-scene"></div>
+        <div class="pane" id="tab-uniforms"></div>
+        <div class="pane" id="tab-help"></div>
+      </div>
+    </aside>
+    <div class="split" id="lsplit"></div>
+    <section id="center">
+      <div id="graph">
+        <div id="world"><svg id="wires"></svg><div id="nodes"></div></div>
+        <div id="boxsel"></div>
+      </div>
+      <div id="banner"></div>
+      <div id="toast"></div>
+      <div id="graphMsg"></div>
+      <div id="hintbar">drag background to pan · wheel to zoom · shift-drag to box select · drag from a socket to connect · right-click a socket to disconnect</div>
+    </section>
+    <div class="split" id="rsplit"></div>
+    <aside id="right">
+      <div id="codeHead"><b>GLSL (after the common prelude)</b><button id="bReparse" title="Rebuild the nodes from this code">Code → nodes</button><button id="bCopyCode">Copy</button></div>
+      <div id="codeWrap"><div id="gutter"></div><textarea id="code" spellcheck="false" wrap="off"></textarea></div>
+      <div id="errs"></div>
+    </aside>
+  </div>
+</div>
+<div id="menu"><input id="menuIn" type="search" placeholder="Search nodes…" autocomplete="off"><div id="menuList"></div></div>
+<div id="dropzone">Drop _shaders.js / shaders.js</div>
+<dialog id="dlg"></dialog>
+
+<script>/* ===== core.js : GLSL tokenizer / parser / graph builder / code generator (no DOM) ===== */
+(function (root) {
+'use strict';
+
+const TYPE_NAMES = new Set(['void','float','int','uint','bool','vec2','vec3','vec4','ivec2','ivec3','ivec4','bvec2','bvec3','bvec4','uvec2','uvec3','uvec4','mat2','mat3','mat4','sampler2D','samplerCube']);
+const QUALS = new Set(['const', 'highp', 'mediump', 'lowp']);
+const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '%=']);
+const KEYWORDS = new Set(['if','else','for','while','do','return','break','continue','discard','true','false','switch','case','default','struct','precision','const','in','out','inout','uniform','varying','attribute','highp','mediump','lowp']);
+const OPPREC = { '||': 20, '^^': 25, '&&': 30, '==': 45, '!=': 45, '<': 50, '>': 50, '<=': 50, '>=': 50, '+': 60, '-': 60, '*': 70, '/': 70, '%': 70 };
+const LEVELS = [['||'], ['^^'], ['&&'], ['==', '!='], ['<', '>', '<=', '>='], ['+', '-'], ['*', '/', '%']];
+const VEC_N = { vec2: 2, vec3: 3, vec4: 4 };
+const CTORS = new Set(['float','int','uint','bool','vec2','vec3','vec4','ivec2','ivec3','ivec4','bvec2','bvec3','bvec4','uvec2','uvec3','uvec4','mat2','mat3','mat4']);
+
+/** The inputs of the Surface node: the globals that finish() reads, plus the bump height. `def` is the text of an unconnected port ('' = not emitted). */
+const SURFACE_PORTS = [
+  { name: 'color', label: 'Color', type: 'vec3', def: 'vec3(0.8)' },
+  { name: 'alpha', label: 'Alpha', type: 'float', def: '1.0' },
+  { name: 'shine', label: 'Shine', type: 'float', def: '', g: 'gShine' },
+  { name: 'rough', label: 'Roughness', type: 'float', def: '', g: 'gRough' },
+  { name: 'blow', label: 'Blow-out', type: 'float', def: '', g: 'gBlow' },
+  { name: 'spec', label: 'Spec', type: 'vec3', def: '', g: 'gSpec' },
+  { name: 'glint', label: 'Glint', type: 'vec3', def: '', g: 'gGlint' },
+  { name: 'bump', label: 'Bump height', type: 'float', def: '' },
+  { name: 'bumpk', label: 'Bump strength', type: 'float', def: '0.045' },
+];
+const G_PORT = {}; SURFACE_PORTS.forEach(p => { if (p.g) G_PORT[p.g] = p.name; });
+const G_NAMES = new Set(['gNormal', 'gHasN', 'gSpec', 'gGlint', 'gBlow', 'gShine', 'gRough']);
+
+/** GLSL built-in functions: argument names, return type rule. */
+const BUILTIN = {};
+(function () {
+  const add = (names, args, ret, defs) => names.split(' ').forEach(n => { BUILTIN[n] = { args, ret, defs }; });
+  add('radians degrees sin cos tan asin acos sinh cosh tanh asinh acosh atanh exp log exp2 log2 sqrt inversesqrt abs sign floor ceil fract round trunc normalize dFdx dFdy fwidth', ['x'], 'first');
+  add('atan', ['y', 'x'], 'first');
+  add('pow', ['x', 'y'], 'first', ['1.0', '2.0']);
+  add('mod', ['x', 'y'], 'first', ['1.0', '1.0']);
+  add('min max', ['x', 'y'], 'maxof');
+  add('clamp', ['x', 'minVal', 'maxVal'], 'first', ['0.5', '0.0', '1.0']);
+  add('mix', ['x', 'y', 'a'], 'first', ['0.0', '1.0', '0.5']);
+  add('step', ['edge', 'x'], 'second', ['0.5', '0.5']);
+  add('smoothstep', ['edge0', 'edge1', 'x'], 'third', ['0.0', '1.0', '0.5']);
+  add('length', ['x'], 'float');
+  add('distance dot', ['x', 'y'], 'float');
+  add('cross', ['x', 'y'], 'vec3', ['vec3(1.0, 0.0, 0.0)', 'vec3(0.0, 1.0, 0.0)']);
+  add('reflect', ['I', 'N'], 'first');
+  add('refract', ['I', 'N', 'eta'], 'first', ['0.0', '0.0', '0.75']);
+  add('faceforward', ['N', 'I', 'Nref'], 'first');
+  add('texture2D texture', ['sampler', 'coord'], 'vec4', ['uRefr', 'vec2(0.5)']);
+})();
+
+// ---------------------------------------------------------------- tokenizer
+const NUM_RE = /(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[fFuU]?/y;
+const ID_RE = /[A-Za-z_]\w*/y;
+const OPS2 = new Set(['==', '!=', '<=', '>=', '&&', '||', '^^', '+=', '-=', '*=', '/=', '%=', '++', '--', '<<', '>>']);
+
+function tokenize(src) {
+  const toks = [], comments = [];
+  let i = 0, line = 1;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    if (c === '\n') { line++; i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\r') { i++; continue; }
+    if (c === '/' && src[i + 1] === '/') {
+      let j = src.indexOf('\n', i); if (j < 0) j = n;
+      comments.push({ line, pos: i, text: src.slice(i + 2, j).trim() });
+      i = j; continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      let j = src.indexOf('*/', i + 2); j = j < 0 ? n : j + 2;
+      const body = src.slice(i, j);
+      comments.push({ line, pos: i, text: body.replace(/^\/\*|\*\/$/g, '').replace(/\s*\n\s*/g, ' ').trim() });
+      for (const ch of body) if (ch === '\n') line++;
+      i = j; continue;
+    }
+    if (c === '#') {
+      let j = src.indexOf('\n', i); if (j < 0) j = n;
+      toks.push({ t: 'pp', v: src.slice(i, j), s: i, e: j, line });
+      i = j; continue;
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] || ''))) {
+      NUM_RE.lastIndex = i;
+      const m = NUM_RE.exec(src);
+      if (m) { toks.push({ t: 'num', v: m[0], s: i, e: i + m[0].length, line }); i += m[0].length; continue; }
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      ID_RE.lastIndex = i;
+      const m = ID_RE.exec(src);
+      toks.push({ t: 'id', v: m[0], s: i, e: i + m[0].length, line });
+      i += m[0].length; continue;
+    }
+    const two = src.substr(i, 2);
+    if (OPS2.has(two)) { toks.push({ t: 'op', v: two, s: i, e: i + 2, line }); i += 2; continue; }
+    toks.push({ t: 'op', v: c, s: i, e: i + 1, line });
+    i++;
+  }
+  return { toks, comments };
+}
+
+// ---------------------------------------------------------------- expression parser -> AST
+function exprParser(toks, lo, hi) {
+  let p = lo;
+  const peek = () => (p < hi ? toks[p] : null);
+  const isOp = v => { const t = peek(); return !!t && t.t === 'op' && t.v === v; };
+  const eat = v => { if (isOp(v)) { p++; return true; } return false; };
+  const expect = v => { if (!eat(v)) throw new Error('expected ' + v); };
+  function ternary() {
+    const c = bin(0);
+    if (eat('?')) { const a = ternary(); expect(':'); const b = ternary(); return { k: 'tern', c, a, b }; }
+    return c;
+  }
+  function bin(l) {
+    if (l >= LEVELS.length) return unary();
+    let a = bin(l + 1);
+    for (;;) {
+      const t = peek();
+      if (t && t.t === 'op' && LEVELS[l].includes(t.v)) { p++; const b = bin(l + 1); a = { k: 'bin', op: t.v, a, b }; } else break;
+    }
+    return a;
+  }
+  function unary() {
+    const t = peek();
+    if (t && t.t === 'op' && (t.v === '-' || t.v === '+' || t.v === '!')) {
+      p++; const a = unary();
+      return t.v === '+' ? a : { k: 'un', op: t.v, a };
+    }
+    if (t && t.t === 'op' && (t.v === '++' || t.v === '--')) throw new Error('unsupported');
+    return postfix();
+  }
+  function postfix() {
+    let a = primary();
+    for (;;) {
+      if (isOp('.')) { p++; const t = peek(); if (!t || t.t !== 'id') throw new Error('field'); p++; a = { k: 'mem', a, f: t.v }; }
+      else if (isOp('[')) { p++; const i = ternary(); expect(']'); a = { k: 'idx', a, i }; }
+      else break;
+    }
+    return a;
+  }
+  function primary() {
+    const t = peek();
+    if (!t) throw new Error('eof');
+    if (t.t === 'num') { p++; return { k: 'num', v: t.v }; }
+    if (t.t === 'id') {
+      p++;
+      if (isOp('(')) {
+        p++; const args = [];
+        if (!isOp(')')) { do { args.push(ternary()); } while (eat(',')); }
+        expect(')');
+        return { k: 'call', fn: t.v, args };
+      }
+      return { k: 'id', v: t.v };
+    }
+    if (t.t === 'op' && t.v === '(') { p++; const e = ternary(); expect(')'); return e; }
+    throw new Error('unexpected ' + t.v);
+  }
+  return { ternary, pos: () => p };
+}
+
+// ---------------------------------------------------------------- top level scan: function signatures and global variables
+function parseTopLevel(text) {
+  const { toks } = tokenize(text);
+  const sigs = new Map(), vars = {};
+  const Q = new Set(['uniform', 'varying', 'const', 'in', 'out', 'attribute', 'highp', 'mediump', 'lowp', 'flat', 'smooth', 'inout']);
+  const isType = t => t && t.t === 'id' && TYPE_NAMES.has(t.v);
+  let i = 0;
+  while (i < toks.length) {
+    const t = toks[i];
+    if (t.t === 'op' && t.v === '{') {
+      let d = 0;
+      while (i < toks.length) {
+        if (toks[i].t === 'op' && toks[i].v === '{') d++;
+        else if (toks[i].t === 'op' && toks[i].v === '}') { d--; if (d === 0) { i++; break; } }
+        i++;
+      }
+      continue;
+    }
+    let j = i;
+    while (j < toks.length && toks[j].t === 'id' && Q.has(toks[j].v)) j++;
+    if (isType(toks[j]) && toks[j + 1] && toks[j + 1].t === 'id') {
+      const type = toks[j].v, name = toks[j + 1].v;
+      if (toks[j + 2] && toks[j + 2].t === 'op' && toks[j + 2].v === '(') {
+        let k = j + 3, pd = 1, cur = [];
+        const params = [];
+        while (k < toks.length && pd > 0) {
+          const x = toks[k];
+          if (x.t === 'op' && x.v === '(') pd++;
+          if (x.t === 'op' && x.v === ')') { pd--; if (pd === 0) break; }
+          if (pd === 1 && x.t === 'op' && x.v === ',') { params.push(cur); cur = []; } else cur.push(x);
+          k++;
+        }
+        params.push(cur);
+        const ps = [];
+        for (const pr of params) {
+          const ids = pr.filter(x => x.t === 'id' && !Q.has(x.v));
+          if (ids.length >= 2) ps.push({ type: ids[0].v, name: ids[ids.length - 1].v });
+        }
+        if (!sigs.has(name)) sigs.set(name, []);
+        sigs.get(name).push({ ret: type, params: ps });
+        i = k + 1; continue;
+      }
+      vars[name] = type;
+      let k = j + 2, pd = 0;
+      while (k < toks.length) {
+        const x = toks[k];
+        if (x.t === 'op') {
+          if ('([{'.includes(x.v)) pd++;
+          else if (')]}'.includes(x.v)) pd--;
+          else if (x.v === ';' && pd === 0) break;
+          else if (x.v === ',' && pd === 0) { const nx = toks[k + 1]; if (nx && nx.t === 'id') vars[nx.v] = type; }
+        }
+        k++;
+      }
+      i = k + 1; continue;
+    }
+    i++;
+  }
+  return { sigs, vars };
+}
+
+function pickSig(ctx, fn, n) {
+  const list = ctx.sigs.get(fn);
+  if (!list || !list.length) return null;
+  return list.find(s => s.params.length === n) || list[0];
+}
+/** Port names (and defaults) for the arguments of a function call node. */
+function argNames(ctx, fn, n) {
+  const sig = pickSig(ctx, fn, n);
+  if (sig && sig.params.length === n) return sig.params.map(p => p.name);
+  if (CTORS.has(fn)) return n === 1 ? ['v'] : n <= 4 ? ['x', 'y', 'z', 'w'].slice(0, n) : Array.from({ length: n }, (_, i) => 'c' + i);
+  const b = BUILTIN[fn];
+  if (b) { if (fn === 'atan' && n === 1) return ['x']; if (n <= b.args.length) return b.args.slice(0, n); }
+  return Array.from({ length: n }, (_, i) => String.fromCharCode(97 + (i % 26)) + (i >= 26 ? i : ''));
+}
+function defaultFor(type) {
+  if (!type) return '0.0';
+  if (type === 'float') return '0.0';
+  if (type === 'int' || type === 'uint') return '0';
+  if (type === 'bool') return 'false';
+  if (/^[iub]?vec[234]$/.test(type) || /^mat[234]$/.test(type)) return type + '(0.0)';
+  return '0.0';
+}
+
+// ---------------------------------------------------------------- graph
+const STMT_KINDS = new Set(['decl', 'assign', 'raw', 'surface', 'fragout']);
+const isStmt = n => STMT_KINDS.has(n.kind);
+
+function newGraph() { return { nodes: [], nextId: 1, nextOrder: 1, globals: '', ctx: null }; }
+function mkNode(g, kind, props) {
+  const n = Object.assign({ id: 'n' + (g.nextId++), kind, x: 0, y: 0, ins: [], outs: ['out'] }, props || {});
+  g.nodes.push(n);
+  return n;
+}
+const mkPort = (name, v) => ({ name, src: (v && v.src) || null, inline: (v && v.inline) || '' });
+
+function findAccess(toks, i, e, known) {
+  // which variables does a raw statement read and write?
+  const local = new Set(), names = new Set(), writes = new Set();
+  for (let q = i; q < e; q++) {
+    const t = toks[q];
+    if (t.t !== 'id') continue;
+    const prev = toks[q - 1], next = toks[q + 1];
+    if (q > i && prev.t === 'id' && TYPE_NAMES.has(prev.v) && next && !(next.t === 'op' && next.v === '(')) { local.add(t.v); continue; }
+    if (q > i && prev.t === 'op' && prev.v === '.') continue;
+    if (KEYWORDS.has(t.v) || TYPE_NAMES.has(t.v)) continue;
+    if (next && next.t === 'op' && next.v === '(') continue;
+    names.add(t.v);
+    let r = q + 1;
+    while (r < e) {
+      const x = toks[r];
+      if (x.t === 'op' && x.v === '.' && toks[r + 1] && toks[r + 1].t === 'id') r += 2;
+      else if (x.t === 'op' && x.v === '[') { let d = 0; for (; r < e; r++) { if (toks[r].v === '[') d++; else if (toks[r].v === ']') { d--; if (d === 0) { r++; break; } } } }
+      else break;
+    }
+    const a = toks[r];
+    if (a && a.t === 'op' && (ASSIGN_OPS.has(a.v) || a.v === '++' || a.v === '--')) writes.add(t.v);
+    if (prev && prev.t === 'op' && (prev.v === '++' || prev.v === '--')) writes.add(t.v);
+  }
+  for (const l of local) { names.delete(l); writes.delete(l); }
+  return { reads: [...names].filter(n => known(n)), writes: [...writes] };
+}
+
+function collectIds(a, set) {
+  if (!a) return;
+  switch (a.k) {
+    case 'id': set.add(a.v); break;
+    case 'un': collectIds(a.a, set); break;
+    case 'bin': collectIds(a.a, set); collectIds(a.b, set); break;
+    case 'call': a.args.forEach(x => collectIds(x, set)); break;
+    case 'mem': collectIds(a.a, set); break;
+    case 'idx': collectIds(a.a, set); collectIds(a.i, set); break;
+    case 'tern': collectIds(a.c, set); collectIds(a.a, set); collectIds(a.b, set); break;
+  }
+}
+
+/**
+ * code -> graph. ctx0 = { sigs, vars } of the prelude. layoutMap = { key: [x, y] } to restore node positions.
+ * Throws if there is no main().
+ */
+function buildGraph(code, ctx0, layoutMap) {
+  const { toks, comments } = tokenize(code);
+  let mi = -1;
+  for (let i = 0; i < toks.length - 2; i++) if (toks[i].v === 'void' && toks[i + 1].v === 'main' && toks[i + 2].v === '(') { mi = i; break; }
+  if (mi < 0) throw new Error('No "void main()" found');
+  let j = mi + 3; while (j < toks.length && !(toks[j].t === 'op' && toks[j].v === '{')) j++;
+  let depth = 0, k = j;
+  for (; k < toks.length; k++) {
+    if (toks[k].t !== 'op') continue;
+    if (toks[k].v === '{') depth++;
+    else if (toks[k].v === '}') { depth--; if (depth === 0) break; }
+  }
+  if (k >= toks.length) throw new Error('main() is not closed');
+  const bodyLo = j + 1, bodyHi = k;
+  const globals = (code.slice(0, toks[mi].s) + '\n' + code.slice(toks[k].e)).replace(/\n[ \t]*(?:\n[ \t]*)+/g, '\n\n').trim();
+
+  const info = parseTopLevel(globals);
+  const ctx = { sigs: new Map(ctx0.sigs), vars: Object.assign({}, ctx0.vars, info.vars) };
+  for (const [name, list] of info.sigs) ctx.sigs.set(name, (ctx0.sigs.get(name) || []).concat(list));
+
+  const g = newGraph();
+  g.globals = globals; g.ctx = ctx;
+
+  // ---- statements
+  const matchClose = (q, open, close) => {
+    let d = 0;
+    for (; q < bodyHi; q++) { const t = toks[q]; if (t.t !== 'op') continue; if (t.v === open) d++; else if (t.v === close) { d--; if (d === 0) return q; } }
+    return bodyHi - 1;
+  };
+  function stmtEnd(q) {
+    if (q >= bodyHi) return bodyHi;
+    const t = toks[q];
+    if (t.t === 'pp') return q + 1;
+    if (t.t === 'op' && t.v === '{') return matchClose(q, '{', '}') + 1;
+    if (t.t === 'id') {
+      if (t.v === 'if') { let r = matchClose(q + 1, '(', ')') + 1; r = stmtEnd(r); if (toks[r] && r < bodyHi && toks[r].t === 'id' && toks[r].v === 'else') r = stmtEnd(r + 1); return r; }
+      if (t.v === 'for' || t.v === 'while' || t.v === 'switch') return stmtEnd(matchClose(q + 1, '(', ')') + 1);
+      if (t.v === 'do') { const r = stmtEnd(q + 1); return Math.min(bodyHi, matchClose(r + 1, '(', ')') + 2); }
+    }
+    let d = 0;
+    for (; q < bodyHi; q++) {
+      const x = toks[q]; if (x.t !== 'op') continue;
+      if ('([{'.includes(x.v)) d++; else if (')]}'.includes(x.v)) d--; else if (x.v === ';' && d === 0) return q + 1;
+    }
+    return bodyHi;
+  }
+  const rawStmt = (i, e) => ({ k: 'raw', text: code.slice(toks[i].s, toks[e - 1].e).replace(/\n[ \t]{0,2}/g, '\n'), i, e });
+  function tryBump(i, e) {
+    let q = i;
+    const need = v => { if (!toks[q] || toks[q].v !== v) throw 0; q++; };
+    try {
+      need('if'); need('('); need('uQuality'); need('>'); need('1.5'); need(')'); need('{'); need('gNormal'); need('='); need('bumpFromHeight'); need('(');
+      let ep = exprParser(toks, q, e); const h = ep.ternary(); q = ep.pos(); need(',');
+      ep = exprParser(toks, q, e); const kk = ep.ternary(); q = ep.pos(); need(')'); need(';'); need('gHasN'); need('='); need('1.0'); need(';'); need('}');
+      return q === e ? { k: 'bump', h, kk, i, e, text: code.slice(toks[i].s, toks[e - 1].e).replace(/\n[ \t]{0,2}/g, '\n') } : null;
+    } catch (_) { return null; }
+  }
+  function parseDecl(i, e, jj, quals) {
+    const type = toks[jj].v, out = [];
+    let q = jj + 1;
+    for (;;) {
+      const name = toks[q].v; q++;
+      let init = null;
+      if (toks[q].t === 'op' && toks[q].v === '=') { const ep = exprParser(toks, q + 1, e - 1); init = ep.ternary(); q = ep.pos(); }
+      out.push({ k: 'decl', type, name, init, qual: quals.join(' ') });
+      if (toks[q].t === 'op' && toks[q].v === ',') { q++; continue; }
+      break;
+    }
+    if (q !== e - 1 || toks[q].v !== ';') throw new Error('decl');
+    return out;
+  }
+  function tryAssign(i, e) {
+    let q = i;
+    if (toks[q].t !== 'id') return null;
+    const base = toks[q].v; q++;
+    while (q < e) {
+      const x = toks[q];
+      if (x.t === 'op' && x.v === '.' && toks[q + 1] && toks[q + 1].t === 'id') q += 2;
+      else if (x.t === 'op' && x.v === '[') q = matchClose(q, '[', ']') + 1;
+      else break;
+    }
+    const opTok = toks[q];
+    if (!opTok || opTok.t !== 'op' || !ASSIGN_OPS.has(opTok.v)) return null;
+    const target = code.slice(toks[i].s, toks[q - 1].e);
+    const ep = exprParser(toks, q + 1, e - 1);
+    const rhs = ep.ternary();
+    if (ep.pos() !== e - 1 || toks[e - 1].v !== ';') return null;
+    return { k: 'assign', base, target, op: opTok.v, rhs };
+  }
+  function classify(i, e) {
+    const t = toks[i];
+    if (t.t === 'pp') return [rawStmt(i, e)];
+    try {
+      if (t.t === 'id') {
+        if (t.v === 'if') { const b = tryBump(i, e); return [b || rawStmt(i, e)]; }
+        let jj = i; const quals = [];
+        while (toks[jj].t === 'id' && QUALS.has(toks[jj].v)) { quals.push(toks[jj].v); jj++; }
+        if (toks[jj].t === 'id' && TYPE_NAMES.has(toks[jj].v) && toks[jj].v !== 'void' && toks[jj + 1] && toks[jj + 1].t === 'id' && toks[jj + 2] && toks[jj + 2].t === 'op' && ['=', ';', ','].includes(toks[jj + 2].v)) return parseDecl(i, e, jj, quals);
+        const a = tryAssign(i, e);
+        if (a) return [a];
+      }
+    } catch (err) { /* falls back to raw */ }
+    return [rawStmt(i, e)];
+  }
+  const groups = [];
+  for (let q = bodyLo; q < bodyHi;) { const e = Math.max(q + 1, stmtEnd(q)); groups.push({ i: q, e, items: classify(q, Math.min(e, bodyHi)) }); q = e; }
+
+  // ---- comments: leading ones belong to the next statement, one on the line of a statement's end belongs to it
+  const notes = groups.map(() => []);
+  for (const c of comments) {
+    if (c.pos < toks[mi].s || c.pos > toks[k].s) continue;
+    let gi = groups.findIndex(gr => c.pos >= toks[gr.i].s && c.pos <= toks[gr.e - 1].e);
+    if (gi >= 0) continue; // inside a statement (kept with raw code)
+    let before = -1;
+    for (let x = 0; x < groups.length; x++) if (toks[groups[x].e - 1].e <= c.pos) before = x;
+    if (before >= 0 && toks[groups[before].e - 1].line === c.line) { notes[before].push(c.text); continue; }
+    const after = groups.findIndex(gr => toks[gr.i].s > c.pos);
+    if (after >= 0) notes[after].push(c.text);
+  }
+
+  // ---- flat list with write analysis
+  const flat = [];
+  groups.forEach((gr, gi) => gr.items.forEach((it, ii) => { it.note = ii === 0 ? notes[gi].filter(Boolean).join(' · ') : ''; flat.push(it); }));
+  const knownVar = n => Object.prototype.hasOwnProperty.call(ctx.vars, n) || n === 'cameraPosition' || n === 'gl_FragCoord' || n === 'gl_FrontFacing';
+  const declared = new Set();
+  flat.forEach(it => { if (it.k === 'decl') declared.add(it.name); });
+  const lastWrite = {}, writeCount = {};
+  flat.forEach((it, idx) => {
+    let w = [];
+    if (it.k === 'decl') w = [it.name];
+    else if (it.k === 'assign') w = [it.base];
+    else if (it.k === 'raw' || it.k === 'bump') { it.acc = findAccess(toks, it.i, it.e, n => declared.has(n) || knownVar(n)); w = it.acc.writes; }
+    w.forEach(n => { lastWrite[n] = idx; writeCount[n] = (writeCount[n] || 0) + 1; });
+  });
+  // the final `gl_FragColor = finish(color, alpha);`
+  let finishIdx = -1;
+  flat.forEach((it, idx) => { if (it.k === 'assign' && it.base === 'gl_FragColor' && it.target === 'gl_FragColor' && it.op === '=') finishIdx = idx; });
+  const finishItem = finishIdx >= 0 ? flat[finishIdx] : null;
+  const isFinish = !!finishItem && finishItem.rhs.k === 'call' && finishItem.rhs.fn === 'finish' && finishItem.rhs.args.length === 2;
+  const canAbsorb = (asts, idx) => {
+    if (!isFinish || idx >= finishIdx) return false;
+    const rs = new Set(); asts.forEach(a => collectIds(a, rs));
+    for (const n of rs) if (lastWrite[n] !== undefined && lastWrite[n] > idx) return false;
+    return true;
+  };
+
+  // ---- build the nodes
+  const vars = new Map(), inputs = new Map();
+  const mk = (kind, props) => mkNode(g, kind, props);
+  const ref = name => { const v = vars.get(name); return { id: v.id, port: v.port }; };
+  function inputNode(name) {
+    let n = inputs.get(name);
+    if (!n) { n = mk('input', { name, key: 'in:' + name }); inputs.set(name, n); }
+    return { id: n.id, port: 'out' };
+  }
+  const isLit = a => a.k === 'num' || (a.k === 'un' && a.op === '-' && a.a.k === 'num');
+  const litText = a => (a.k === 'num' ? a.v : '-' + a.a.v);
+  function val(a, key) {
+    switch (a.k) {
+      case 'num': return { inline: a.v };
+      case 'id':
+        if (a.v === 'true' || a.v === 'false') return { inline: a.v };
+        return vars.has(a.v) ? { src: ref(a.v) } : { src: inputNode(a.v) };
+      case 'un': {
+        if (a.op === '-' && a.a.k === 'num') return { inline: '-' + a.a.v };
+        const n = mk('unary', { op: a.op, key, ins: [mkPort('a', val(a.a, key + '.a'))] });
+        return { src: { id: n.id, port: 'out' } };
+      }
+      case 'bin': {
+        const n = mk('op', { op: a.op, key, ins: [mkPort('a', val(a.a, key + '.a')), mkPort('b', val(a.b, key + '.b'))] });
+        return { src: { id: n.id, port: 'out' } };
+      }
+      case 'call': {
+        const fn = a.fn;
+        if (VEC_N[fn] && a.args.length === VEC_N[fn] && a.args.every(isLit)) {
+          const n = mk('vec', { type: fn, vals: a.args.map(litText), key });
+          return { src: { id: n.id, port: 'out' } };
+        }
+        const names = argNames(ctx, fn, a.args.length);
+        const n = mk('call', { fn, key, varargs: CTORS.has(fn), ins: a.args.map((x, i) => mkPort(names[i], val(x, key + '.' + names[i] + i))) });
+        return { src: { id: n.id, port: 'out' } };
+      }
+      case 'mem': { const n = mk('member', { field: a.f, key, ins: [mkPort('a', val(a.a, key + '.a'))] }); return { src: { id: n.id, port: 'out' } }; }
+      case 'idx': { const n = mk('index', { key, ins: [mkPort('a', val(a.a, key + '.a')), mkPort('i', val(a.i, key + '.i'))] }); return { src: { id: n.id, port: 'out' } }; }
+      case 'tern': { const n = mk('ternary', { key, ins: [mkPort('cond', val(a.c, key + '.c')), mkPort('a', val(a.a, key + '.a')), mkPort('b', val(a.b, key + '.b'))] }); return { src: { id: n.id, port: 'out' } }; }
+    }
+    throw new Error('bad ast');
+  }
+
+  const pending = {};
+  const seenKey = {};
+  const uniqKey = base => { seenKey[base] = (seenKey[base] || 0) + 1; return seenKey[base] > 1 ? base + '#' + seenKey[base] : base; };
+  flat.forEach((it, idx) => {
+    if (it.k === 'decl') {
+      const key = uniqKey('d:' + it.name);
+      const ins = [mkPort('value', it.init ? val(it.init, key) : {})];
+      const n = mk('decl', { name: it.name, type: it.type, qual: it.qual, hasInit: !!it.init, key, order: g.nextOrder++, note: it.note, ins });
+      vars.set(it.name, { id: n.id, port: 'out' });
+    } else if (it.k === 'assign') {
+      if (idx === finishIdx && isFinish) {
+        const key = 'surface';
+        const color = val(it.rhs.args[0], key + '.color'), alpha = val(it.rhs.args[1], key + '.alpha');
+        const ins = SURFACE_PORTS.map(sp => {
+          if (sp.name === 'color') return mkPort('color', color);
+          if (sp.name === 'alpha') return mkPort('alpha', alpha);
+          return mkPort(sp.name, pending[sp.name] || { inline: sp.def });
+        });
+        mk('surface', { key, order: 1e9, note: it.note, ins, outs: [] });
+        return;
+      }
+      if (idx === finishIdx) {
+        mk('fragout', { key: 'out', order: 1e9, note: it.note, ins: [mkPort('color', val(it.rhs, 'out'))], outs: [] });
+        return;
+      }
+      const gp = G_PORT[it.base];
+      if (gp && it.target === it.base && it.op === '=' && writeCount[it.base] === 1 && !pending[gp] && canAbsorb([it.rhs], idx)) {
+        pending[gp] = val(it.rhs, 'surface.' + gp);
+        return;
+      }
+      const key = uniqKey('a:' + it.target);
+      const ins = [];
+      const prev = vars.get(it.base);
+      const value = mkPort('value', val(it.rhs, key));
+      if (prev) ins.push(mkPort('prev', { src: ref(it.base) }));
+      ins.push(value);
+      const n = mk('assign', { name: it.base, target: it.target, op: it.op, key, order: g.nextOrder++, note: it.note, ins });
+      vars.set(it.base, { id: n.id, port: 'out' });
+    } else if (it.k === 'bump') {
+      if (!pending.bump && canAbsorb([it.h, it.kk], idx)) {
+        pending.bump = val(it.h, 'surface.bump');
+        pending.bumpk = val(it.kk, 'surface.bumpk');
+        return;
+      }
+      // not absorbable: keep the statement as code
+      it.text = it.text;
+      const acc = it.acc || { reads: [], writes: [] };
+      const ins = [], seen = new Set();
+      acc.reads.forEach(r => { if (!seen.has(r)) { seen.add(r); ins.push(mkPort(r, { src: vars.has(r) ? ref(r) : inputNode(r) })); } });
+      const n = mk('raw', { text: it.text, key: uniqKey('raw'), order: g.nextOrder++, note: it.note, ins, outs: acc.writes.slice() });
+      acc.writes.forEach(w => vars.set(w, { id: n.id, port: w }));
+    } else {
+      const acc = it.acc || { reads: [], writes: [] };
+      const ins = [], seen = new Set();
+      const reads = new Set(acc.reads);
+      acc.writes.forEach(w => { if (vars.has(w)) reads.add(w); });
+      for (const r of reads) {
+        if (seen.has(r)) continue; seen.add(r);
+        ins.push(mkPort(r, { src: vars.has(r) ? ref(r) : inputNode(r) }));
+      }
+      const n = mk('raw', { text: it.text, key: uniqKey('raw'), order: g.nextOrder++, note: it.note, ins, outs: acc.writes.slice() });
+      acc.writes.forEach(w => vars.set(w, { id: n.id, port: w }));
+    }
+  });
+
+  layoutGraph(g);
+  if (layoutMap) for (const n of g.nodes) if (n.key && layoutMap[n.key]) { n.x = layoutMap[n.key][0]; n.y = layoutMap[n.key][1]; }
+  return g;
+}
+
+// ---------------------------------------------------------------- layout
+function nodeW(n) { return n.kind === 'raw' ? 270 : n.kind === 'surface' ? 220 : n.kind === 'decl' || n.kind === 'assign' ? 210 : 190; }
+function nodeH(n) {
+  const rows = (n.kind === 'input' ? 0 : n.ins.length) + n.outs.length;
+  const extra = { raw: 70 + Math.min(10, (n.text || '').split('\n').length) * 16, decl: 30, assign: 30, vec: 30, surface: 10, member: 28, op: 24, unary: 24, call: 6 }[n.kind] || 0;
+  return 34 + rows * 24 + extra + (n.note ? 16 : 0);
+}
+function layoutGraph(g) {
+  const byId = new Map(g.nodes.map(n => [n.id, n]));
+  const rank = new Map(), visiting = new Set();
+  function rk(n) {
+    if (rank.has(n.id)) return rank.get(n.id);
+    if (visiting.has(n.id)) return 0;
+    visiting.add(n.id);
+    let r = 0;
+    for (const inp of n.ins) { if (!inp.src) continue; const s = byId.get(inp.src.id); if (!s || s.kind === 'input') continue; r = Math.max(r, rk(s) + 1); }
+    visiting.delete(n.id); rank.set(n.id, r); return r;
+  }
+  g.nodes.forEach(n => { if (n.kind !== 'input') rk(n); });
+  for (const n of g.nodes) if (n.kind === 'input') {
+    let m = Infinity;
+    for (const c of g.nodes) if (c.kind !== 'input' && c.ins.some(i => i.src && i.src.id === n.id)) m = Math.min(m, rank.get(c.id));
+    rank.set(n.id, isFinite(m) ? m - 1 : 0);
+  }
+  let mn = Infinity; rank.forEach(r => { mn = Math.min(mn, r); });
+  if (!isFinite(mn)) mn = 0;
+  const cols = new Map();
+  g.nodes.forEach((n, idx) => { const r = rank.get(n.id) - mn; (cols.get(r) || cols.set(r, []).get(r)).push(n); n._i = idx; });
+  const keys = [...cols.keys()].sort((a, b) => a - b);
+  let x = 0;
+  const colX = new Map();
+  for (const c of keys) { colX.set(c, x); x += Math.max(...cols.get(c).map(nodeW)) + 70; }
+  const cy = new Map();
+  for (const c of keys) { let y = 0; for (const n of cols.get(c)) { n.x = colX.get(c); n.y = y; y += nodeH(n) + 16; cy.set(n.id, n.y + nodeH(n) / 2); } }
+  for (let sweep = 0; sweep < 4; sweep++) {
+    for (const c of keys) {
+      const list = cols.get(c);
+      const want = new Map();
+      for (const n of list) {
+        const ys = [];
+        for (const inp of n.ins) if (inp.src && cy.has(inp.src.id)) ys.push(cy.get(inp.src.id));
+        want.set(n.id, ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : cy.get(n.id));
+      }
+      list.sort((a, b) => (want.get(a.id) - nodeH(a) / 2) - (want.get(b.id) - nodeH(b) / 2) || a._i - b._i);
+      let y = -Infinity;
+      for (const n of list) { const wantTop = want.get(n.id) - nodeH(n) / 2; n.y = Math.max(wantTop, y + 16); y = n.y + nodeH(n); cy.set(n.id, n.y + nodeH(n) / 2); }
+    }
+  }
+  let top = Infinity; g.nodes.forEach(n => { top = Math.min(top, n.y); });
+  g.nodes.forEach(n => { n.y = Math.round(n.y - top); n.x = Math.round(n.x); delete n._i; });
+}
+
+// ---------------------------------------------------------------- types
+function maxType(a, b) {
+  if (!a || a === '?') return b; if (!b || b === '?') return a;
+  if (a === b) return a;
+  const scalar = t => t === 'float' || t === 'int' || t === 'uint';
+  if (scalar(a) && scalar(b)) return a === 'float' || b === 'float' ? 'float' : a;
+  if (scalar(a)) return b; if (scalar(b)) return a;
+  if (/^mat/.test(a) && /^[iub]?vec/.test(b)) return b; if (/^mat/.test(b) && /^[iub]?vec/.test(a)) return a;
+  return a;
+}
+function indexGraph(g) { g._idx = new Map(g.nodes.map(n => [n.id, n])); g._tc = new Map(); }
+function analyzeRaw(g, text) {
+  const { toks } = tokenize(text);
+  const decls = new Set(g.nodes.filter(n => n.kind === 'decl').map(n => n.name));
+  return findAccess(toks, 0, toks.length, n => decls.has(n) || Object.prototype.hasOwnProperty.call(g.ctx.vars, n));
+}
+function outType(g, id, port, seen) {
+  const top = !seen;
+  const ck = id + '|' + port;
+  if (g._tc && g._tc.has(ck)) return g._tc.get(ck);
+  seen = seen || new Set();
+  const n = (g._idx && g._idx.get(id)) || g.nodes.find(x => x.id === id);
+  if (!n || seen.has(id)) return '?';
+  seen.add(id);
+  const t = i => { const p = n.ins[i]; return p && p.src ? outType(g, p.src.id, p.src.port, seen) : (p ? inlineType(p.inline) : '?'); };
+  const vtype = name => g.ctx && g.ctx.vars[name] || (g.nodes.find(x => x.kind === 'decl' && x.name === name) || {}).type || '?';
+  let r = '?';
+  switch (n.kind) {
+    case 'input': r = vtype(n.name); break;
+    case 'decl': r = n.type; break;
+    case 'assign': r = vtype(n.name); break;
+    case 'raw': r = vtype(port); break;
+    case 'vec': r = n.type; break;
+    case 'op': {
+      if (['<', '>', '<=', '>=', '==', '!=', '&&', '||', '^^'].includes(n.op)) r = 'bool';
+      else r = maxType(t(0), t(1));
+      break;
+    }
+    case 'unary': r = n.op === '!' ? 'bool' : t(0); break;
+    case 'member': {
+      const b = t(0), len = n.field.length;
+      const pre = b.replace(/[234]$/, '');
+      if (!/^[iub]?vec/.test(b) || !/^[xyzwrgbastpq]+$/.test(n.field)) r = '?';
+      else { const scal = pre === 'vec' ? 'float' : pre === 'ivec' ? 'int' : pre === 'bvec' ? 'bool' : 'uint'; r = len === 1 ? scal : pre + len; }
+      break;
+    }
+    case 'index': { const b = t(0); r = /^vec/.test(b) ? 'float' : /^mat(\d)/.test(b) ? 'vec' + b[3] : '?'; break; }
+    case 'ternary': r = t(1); break;
+    case 'call': {
+      const fn = n.fn;
+      if (CTORS.has(fn)) { r = fn; break; }
+      const sig = pickSig(g.ctx, fn, n.ins.length);
+      if (sig) { r = sig.ret; break; }
+      const b = BUILTIN[fn];
+      if (b) {
+        if (b.ret === 'first') r = t(0); else if (b.ret === 'second') r = t(1); else if (b.ret === 'third') r = t(2);
+        else if (b.ret === 'maxof') r = maxType(t(0), t(1)); else r = b.ret;
+      }
+      break;
+    }
+    case 'surface': case 'fragout': r = 'vec4'; break;
+  }
+  seen.delete(id);
+  if (top && g._tc) g._tc.set(ck, r);
+  return r;
+}
+function inlineType(t) {
+  t = (t || '').trim();
+  if (/^-?(?:\d+\.\d*|\.\d+|\d+[eE][+-]?\d+|\d+\.?\d*[eE][+-]?\d+)$/.test(t)) return 'float';
+  if (/^-?\d+$/.test(t)) return 'int';
+  if (t === 'true' || t === 'false') return 'bool';
+  const m = /^(vec[234]|ivec[234]|mat[234])\(/.exec(t);
+  return m ? m[1] : '?';
+}
+
+// ---------------------------------------------------------------- generator
+function inlinePrec(t) {
+  t = (t || '').trim();
+  if (!t) return 100;
+  if (/^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[fFuU]?$/.test(t)) return t[0] === '-' ? 90 : 100;
+  let body = t, lead = 100;
+  if (t[0] === '-' || t[0] === '!') { body = t.slice(1).trim(); lead = 90; }
+  let d = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if ('([{'.includes(c)) d++;
+    else if (')]}'.includes(c)) d--;
+    else if (d === 0 && '+-*/%<>=!&|^?:'.includes(c)) {
+      // an exponent sign inside a number is not an operator
+      if ((c === '-' || c === '+') && /[eE]$/.test(body.slice(0, i)) && /[0-9.]e$/i.test(body.slice(Math.max(0, i - 8), i))) continue;
+      return 0;
+    }
+  }
+  return lead;
+}
+
+function generate(g, opts) {
+  opts = opts || {};
+  const byId = new Map(g.nodes.map(n => [n.id, n]));
+  const errors = [];
+  const ctx = g.ctx;
+  let fixes = 0; // integer literals turned into floats (GLSL ES 3.00 has no implicit int -> float)
+  const isFl = t => /^(float|vec[234]|mat[234])$/.test(t || '');
+  const inTypeOf = (n, i) => { const p = n.ins[i]; return !p ? '?' : p.src ? outType(g, p.src.id, p.src.port) : inlineType(p.inline); };
+  const isIntLit = (n, i) => { const p = n.ins[i]; return !!p && !p.src && /^-?\d+$/.test((p.inline || '').trim()); };
+
+  function coerce(r, from, to) {
+    if (!to || !from || from === '?') return r;
+    if (from === 'float' && /^vec[234]$/.test(to)) return { s: to + '(' + r.s + ')', p: 100 };
+    if (from === 'int' && to === 'float') return { s: 'float(' + r.s + ')', p: 100 };
+    return r;
+  }
+  function wrap(r, minP) { return r.p >= minP ? r.s : '(' + r.s + ')'; }
+  function inExpr(n, idx, stack, wantType) {
+    const inp = n.ins[idx];
+    if (!inp) return { s: '0.0', p: 100 };
+    if (inp.src) {
+      const r = refExpr(inp.src.id, inp.src.port, stack);
+      return coerce(r, wantType ? outType(g, inp.src.id, inp.src.port) : null, wantType);
+    }
+    const t = (inp.inline || '').trim();
+    if (wantType && isFl(wantType) && /^-?\d+$/.test(t)) { fixes++; return { s: t + '.0', p: inlinePrec(t) }; }
+    return { s: t || '0.0', p: inlinePrec(t) };
+  }
+  function refExpr(id, port, stack) {
+    const n = byId.get(id);
+    if (!n) return { s: '0.0', p: 100 };
+    if (stack.has(id)) { errors.push('Cycle through a ' + n.kind + ' node'); return { s: '0.0', p: 100 }; }
+    stack.add(id);
+    let r;
+    switch (n.kind) {
+      case 'input': case 'decl': case 'assign': r = { s: n.name, p: 100 }; break;
+      case 'raw': r = { s: port, p: 100 }; break;
+      case 'vec': { const s = n.type === 'float' ? n.vals[0] : n.type + '(' + n.vals.join(', ') + ')'; r = { s, p: n.type === 'float' && s[0] === '-' ? 90 : 100 }; break; }
+      case 'op': {
+        const P = OPPREC[n.op] || 60;
+        const a = inExpr(n, 0, stack), b = inExpr(n, 1, stack);
+        if (!['&&', '||', '^^', '%'].includes(n.op)) {
+          if (isIntLit(n, 1) && isFl(inTypeOf(n, 0))) { b.s += '.0'; fixes++; }
+          if (isIntLit(n, 0) && isFl(inTypeOf(n, 1))) { a.s += '.0'; fixes++; }
+        }
+        r = { s: wrap(a, P) + ' ' + n.op + ' ' + wrap(b, P + 1), p: P };
+        break;
+      }
+      case 'unary': {
+        const a = inExpr(n, 0, stack);
+        let s = wrap(a, 90);
+        if (n.op === '-' && s[0] === '-') s = '(' + s + ')';
+        r = { s: n.op + s, p: 90 };
+        break;
+      }
+      case 'member': { const a = inExpr(n, 0, stack); r = { s: wrap(a, 100) + '.' + n.field, p: 100 }; break; }
+      case 'index': { const a = inExpr(n, 0, stack), i = inExpr(n, 1, stack); r = { s: wrap(a, 100) + '[' + i.s + ']', p: 100 }; break; }
+      case 'ternary': { const c = inExpr(n, 0, stack), a = inExpr(n, 1, stack), b = inExpr(n, 2, stack); r = { s: wrap(c, 11) + ' ? ' + wrap(a, 11) + ' : ' + wrap(b, 10), p: 10 }; break; }
+      case 'call': {
+        const sig = pickSig(ctx, n.fn, n.ins.length);
+        const builtin = BUILTIN[n.fn] && !sig && n.fn !== 'texture2D' && n.fn !== 'texture';
+        const anyFl = n.ins.some((_, i) => isFl(inTypeOf(n, i)));
+        const args = n.ins.map((_, i) => {
+          const want = sig && sig.params.length === n.ins.length ? sig.params[i].type : null;
+          let s2 = inExpr(n, i, stack, want).s;
+          if (builtin && anyFl && isIntLit(n, i)) { s2 += '.0'; fixes++; }
+          return s2;
+        });
+        r = { s: n.fn + '(' + args.join(', ') + ')', p: 100 };
+        break;
+      }
+      default: r = { s: '0.0', p: 100 };
+    }
+    stack.delete(id);
+    return r;
+  }
+  const E = (n, idx, want) => inExpr(n, idx, new Set(), want);
+
+  // ---- statements and their order
+  const stmts = g.nodes.filter(n => isStmt(n) && n.kind !== 'surface' && n.kind !== 'fragout').sort((a, b) => (a.order || 0) - (b.order || 0));
+  const finals = g.nodes.filter(n => n.kind === 'surface' || n.kind === 'fragout');
+  const gWriters = g.nodes.filter(n => (n.kind === 'assign' && G_NAMES.has(n.name)) || (n.kind === 'raw' && n.outs.some(o => G_NAMES.has(o))));
+  function exprNodes(n, set, deps) {
+    for (const inp of n.ins) {
+      if (!inp.src) continue;
+      const s = byId.get(inp.src.id);
+      if (!s) continue;
+      if (isStmt(s)) { if (deps) deps.add(s.id); continue; }
+      if (s.kind === 'input') continue;
+      if (set.has(s.id)) continue;
+      set.add(s.id);
+      if (s.kind === 'call' && s.fn === 'finish' && deps) gWriters.forEach(w => deps.add(w.id));
+      exprNodes(s, set, deps);
+    }
+  }
+  const depsOf = new Map(), exprOf = new Map();
+  for (const n of stmts.concat(finals)) {
+    const set = new Set(), deps = new Set();
+    if (n.kind !== 'raw') exprNodes(n, set, deps); else for (const inp of n.ins) { if (inp.src) { const s = byId.get(inp.src.id); if (s && isStmt(s)) deps.add(s.id); } }
+    deps.delete(n.id);
+    depsOf.set(n.id, deps); exprOf.set(n.id, set);
+  }
+  // a reader of one version of a variable has to come before the statement that writes the next version
+  for (const w of stmts) {
+    if (w.kind !== 'assign') continue;
+    const pi = w.ins.find(i => i.name === 'prev');
+    if (!pi || !pi.src) continue;
+    for (const r of stmts) {
+      if (r === w) continue;
+      if (!depsOf.get(r.id).has(pi.src.id)) continue;
+      if (r.kind === 'assign' && r.ins.some(i => i.name === 'prev' && i.src && i.src.id === pi.src.id)) continue;
+      depsOf.get(w.id).add(r.id);
+    }
+  }
+  const placed = new Set(), order = [];
+  const remaining = stmts.slice();
+  while (remaining.length) {
+    let pick = -1;
+    for (let i = 0; i < remaining.length; i++) {
+      const n = remaining[i];
+      if ([...depsOf.get(n.id)].every(d => placed.has(d) || !stmts.some(s => s.id === d))) { pick = i; break; }
+    }
+    if (pick < 0) { errors.push('The graph has a cycle: some statements cannot be ordered'); order.push(...remaining); break; }
+    const n = remaining.splice(pick, 1)[0];
+    placed.add(n.id); order.push(n);
+  }
+
+  // ---- preview (debug) of one node
+  let dbgNode = null, dbgBefore = null, dbgAfter = null;
+  if (opts.previewId && byId.has(opts.previewId)) {
+    dbgNode = byId.get(opts.previewId);
+    if (dbgNode.kind === 'surface' || dbgNode.kind === 'fragout') dbgNode = null;
+    else if (isStmt(dbgNode)) dbgAfter = dbgNode.id;
+    else {
+      const holder = order.concat(finals).find(s => exprOf.get(s.id) && exprOf.get(s.id).has(dbgNode.id));
+      if (holder) dbgBefore = holder.id; else dbgNode = null;
+    }
+  }
+  function dbgLine() {
+    let port = 'out';
+    if (dbgNode.kind === 'raw') port = dbgNode.outs[0];
+    const r = refExpr(dbgNode.id, port, new Set());
+    const t = outType(g, dbgNode.id, port);
+    let s = r.s;
+    if (t === 'vec3') s = wrap(r, 100);
+    else if (t === 'vec4') s = wrap(r, 100) + '.rgb';
+    else if (t === 'vec2') s = 'vec3(' + r.s + ', 0.0)';
+    else if (t === 'int' || t === 'uint') s = 'vec3(float(' + r.s + '))';
+    else if (t === 'bool') s = 'vec3((' + r.s + ') ? 1.0 : 0.0)';
+    else s = 'vec3(' + r.s + ')';
+    return 'vec3 _dbgPreview = ' + s + ';';
+  }
+
+  const lines = [], gpuLines = [];
+  const withNote = (txt, n) => (n.note ? txt + '  // ' + n.note : txt);
+  function emit(n) {
+    switch (n.kind) {
+      case 'decl': {
+        const inp = n.ins[0];
+        const has = inp && (inp.src || (inp.inline || '').trim());
+        return [withNote((n.qual ? n.qual + ' ' : '') + n.type + ' ' + n.name + (has ? ' = ' + E(n, 0, n.type).s : '') + ';', n)];
+      }
+      case 'assign': {
+        const vi = n.ins.findIndex(i => i.name === 'value');
+        return [withNote(n.target + ' ' + n.op + ' ' + E(n, vi).s + ';', n)];
+      }
+      case 'raw': return [withNote(n.text, n)];
+      case 'fragout': return [withNote('gl_FragColor = ' + E(n, 0).s + ';', n)];
+      case 'surface': {
+        const val = name => { const i = n.ins.findIndex(x => x.name === name); const inp = n.ins[i]; if (!inp) return null; if (!inp.src && !(inp.inline || '').trim()) return null; return E(n, i, (SURFACE_PORTS.find(p => p.name === name) || {}).type).s; };
+        const out = [];
+        const bump = val('bump');
+        if (bump) out.push('if (uQuality > 1.5) { gNormal = bumpFromHeight(' + bump + ', ' + (val('bumpk') || '0.045') + '); gHasN = 1.0; }');
+        for (const sp of SURFACE_PORTS) if (sp.g) { const v = val(sp.name); if (v) out.push(sp.g + ' = ' + v + ';'); }
+        out.push(withNote('gl_FragColor = finish(' + (val('color') || 'vec3(0.8)') + ', ' + (val('alpha') || '1.0') + ');', n));
+        return out;
+      }
+    }
+    return [];
+  }
+  for (const n of order) {
+    if (dbgBefore === n.id) gpuLines.push(dbgLine());
+    const l = emit(n);
+    lines.push(...l); gpuLines.push(...l);
+    if (dbgAfter === n.id) gpuLines.push(dbgLine());
+  }
+  for (const n of finals) {
+    if (dbgBefore === n.id) gpuLines.push(dbgLine());
+    lines.push(...emit(n));
+  }
+  if (dbgNode) gpuLines.push('gl_FragColor = vec4(_dbgPreview, 1.0);');
+  const wrapMain = ls => 'void main() {\n' + ls.map(l => '  ' + l.replace(/\n/g, '\n  ')).join('\n') + '\n}';
+  const head = g.globals ? g.globals + '\n\n' : '';
+  return { code: head + wrapMain(lines), gpuCode: head + wrapMain(dbgNode ? gpuLines : lines), errors, fixes };
+}
+
+/** Would wiring `from` into `to` make a loop? (does `from` already depend on `to`?) */
+function dependsOn(g, fromId, toId) {
+  const byId = new Map(g.nodes.map(n => [n.id, n]));
+  const seen = new Set();
+  const walk = id => {
+    if (id === toId) return true;
+    if (seen.has(id)) return false; seen.add(id);
+    const n = byId.get(id); if (!n) return false;
+    return n.ins.some(i => i.src && walk(i.src.id));
+  };
+  return walk(fromId);
+}
+
+const api = { tokenize, exprParser, parseTopLevel, buildGraph, generate, layoutGraph, nodeW, nodeH, outType, inlineType, inlinePrec, dependsOn, mkNode, mkPort, newGraph, argNames, pickSig, defaultFor, indexGraph, analyzeRaw,
+  BUILTIN, CTORS, TYPE_NAMES, SURFACE_PORTS, G_NAMES, OPPREC, STMT_KINDS, isStmt };
+if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.GC = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script>window.ORIG = (function () {
+// CLIENT ONLY: GLSL for every material. A material in shared.js names one of these with `shader: '...'`.
+// To add a look: add a fragment shader here (copy one, change main()) and point a material at it.
+//
+// What a block shader can use (declared in `prelude`):
+//   vP        texture coordinates in world units, glued to the block (front/back: x, y; sides and chamfers: distance along the edge, z)
+//   vP3       position in the mesh's own 3D space. Shaders that use it (bowlwood, wood2, ceramic, bark ...) work on ANY mesh: bowls, models, blocks
+//   uSeed     random number per block, so two wooden blocks do not have identical grain
+//   uTime     seconds
+//   finish()  call it for the final colour: it adds simple lighting (so the 3D sides are shaded), the coloured glow of a block
+//             somebody is holding, and the red tint of a block that cannot be dropped where it is
+
+/** Light shared by every lit material (and the floor). ONE light in world space drives both the shading and the shadow map, so they always agree:
+ *   uLightDir  towards the sun / moon      uLightCol  its colour times its strength (changes with the time of day)
+ *   uAmbSky / uAmbGround  the soft light from above and from below (a hemisphere): shadows are never black, they take the colour of the sky
+ *   sceneLight(position, normal) -> the colour a surface is multiplied with. Wrap lighting softens the edge between lit and dark side,
+ *   and the shadow map only ever removes the DIRECT light.
+ *   shadowAt(position, normal) -> 1 in light, 0 in shadow: normal-offset + slope bias against acne, and a contact-hardening soft edge
+ *   (a smooth 3x3-texel filter, no noise). */
+const SHADOW_GLSL = /* glsl */ `
+uniform sampler2D uShadowMap;
+uniform mat4 uShadowMat;
+uniform float uShadowStr;
+uniform vec2 uShadowTexel;
+uniform float uShadowRange;
+uniform float uShadowDepth;
+uniform vec3 uShadowR; // the sun camera's right and up axes in the world
+uniform vec3 uShadowU;
+uniform float uShadowBias; // depth offset, world units
+uniform float uShadowNormal; // normal offset, in shadow texels
+uniform int uShadowK; // 1 = crisp, 2 = soft, 3 = softer
+uniform vec3 uLightDir;
+uniform vec3 uLightCol;
+uniform vec3 uAmbSky;
+uniform vec3 uAmbGround;
+uniform vec3 uLPos[8]; // point lights of the background (world position, colour times intensity, reach); 8 = MAX_LIGHTS in shared.js
+uniform vec3 uLCol[8];
+uniform float uLRange[8];
+uniform int uLN;
+float unpackShadowDepth(vec4 v) { return dot(v, vec4(255.0 / 256.0 / 16777216.0, 255.0 / 256.0 / 65536.0, 255.0 / 256.0 / 256.0, 255.0 / 256.0)); }
+float shadowAt(vec3 wp, vec3 n) {
+  if (uShadowStr <= 0.0) return 1.0;
+  float ndl = clamp(dot(n, uLightDir), 0.0, 1.0);
+  float texW = uShadowTexel.x * uShadowRange; // world size of one shadow texel
+  vec4 sp = uShadowMat * vec4(wp + n * (texW * uShadowNormal * (0.5 + (1.0 - ndl))), 1.0); // normal offset: the surface is moved off itself before the lookup
+  vec3 p = sp.xyz / sp.w * 0.5 + 0.5;
+  if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+  // RECEIVER PLANE: how fast the depth changes across the shadow map on this very surface, worked out from its NORMAL (smooth over the whole
+  // surface, unlike screen-space derivatives which are constant per 2x2 pixels and draw lines). Every texel is compared with the depth the
+  // surface really has THERE: this is what keeps sloped surfaces free of acne stripes.
+  vec2 slope = vec2(dot(n, uShadowR), dot(n, uShadowU)) * (uShadowRange / (uShadowDepth * max(ndl, 0.12)));
+  slope = clamp(slope, vec2(-4.0), vec2(4.0));
+  float zr = p.z - (uShadowBias / uShadowDepth) * (0.5 + (1.0 - ndl));
+  // a SMOOTH box filter, (2K+1)x(2K+1) texels with the outermost ones weighted by where the point lies between texel centres ("bilinear PCF").
+  // No random rotation or noise: nothing that could beat against the texel grid.
+  vec2 t = p.xy / uShadowTexel - 0.5;
+  vec2 f = fract(t);
+  vec2 base = floor(t) + 0.5;
+  float lit = 0.0;
+  for (int j = -3; j <= 4; j++) {
+    if (j < -uShadowK || j > uShadowK + 1) continue;
+    float wy = (j == -uShadowK) ? 1.0 - f.y : ((j == uShadowK + 1) ? f.y : 1.0);
+    for (int i = -3; i <= 4; i++) {
+      if (i < -uShadowK || i > uShadowK + 1) continue;
+      float wx = (i == -uShadowK) ? 1.0 - f.x : ((i == uShadowK + 1) ? f.x : 1.0);
+      vec2 uv = (base + vec2(float(i), float(j))) * uShadowTexel;
+      float d = texture2D(uShadowMap, uv).r; // (a real depth texture: 24 bits, no packing)
+      lit += wx * wy * ((d < zr + dot(uv - p.xy, slope)) ? 0.0 : 1.0);
+    }
+  }
+  float k2 = float(2 * uShadowK + 1);
+  return lit / (k2 * k2);
+}
+float gDirect = 0.0; // how much the sun lights the surface (wrap diffuse times shadow): the last sceneLight() call leaves it here, for the blown-out look
+float gSh = 1.0; // how much of the sun reaches the surface (1 = fully lit, lower in shadow): the last sceneLight() call leaves it here, for the shine
+vec3 sceneLight(vec3 wp, vec3 n) {
+  float ndl = dot(n, uLightDir);
+  float wrap = clamp((ndl + 0.35) / 1.35, 0.0, 1.0);
+  float sh = shadowAt(wp, n);
+  float k = clamp(uShadowStr * 1.8, 0.0, 1.0); // (the strength in definitions.js: 0 = no shadows, 0.55+ = fully dark)
+  sh = 1.0 - k * (1.0 - sh);
+  sh = mix(1.0, sh, smoothstep(-0.05, 0.25, ndl)); // the side turned away from the light is dark anyway: no map noise there
+  gSh = sh;
+  vec3 amb = mix(uAmbGround, uAmbSky, n.y * 0.5 + 0.5);
+  vec3 lamps = vec3(0.0);
+  for (int i = 0; i < 8; i++) { // point lights: no shadows, they fade out smoothly at their range
+    if (i >= uLN) break;
+    vec3 d = uLPos[i] - wp;
+    float dist = length(d);
+    float att = clamp(1.0 - dist / uLRange[i], 0.0, 1.0);
+    float w = clamp((dot(n, d / max(dist, 0.001)) + 0.35) / 1.35, 0.0, 1.0);
+    lamps += uLCol[i] * (w * att * att);
+  }
+  gDirect = wrap * sh;
+  return amb + uLightCol * (wrap * sh) + lamps;
+}
+`;
+
+const vertexShader = /* glsl */ `
+varying vec2 vP;
+varying vec3 vP3;
+varying vec3 vN;
+varying vec3 vW;
+varying vec3 vWN;
+varying float vDist;
+varying vec3 vRX; // the mesh's own x / y / z axes in the world (its rotation): a bump map made in the mesh's space is turned into the world with them
+varying vec3 vRY;
+varying vec3 vRZ;
+void main() {
+  mat3 R = mat3(modelMatrix);
+  vRX = R[0]; vRY = R[1]; vRZ = R[2];
+  vP = uv; //   texture coordinates made by the client: the front face is (x, y), the sides run along the outline and up the depth
+  vP3 = position;
+  vW = (modelMatrix * vec4(position, 1.0)).xyz;
+  vWN = normalize(mat3(modelMatrix) * normal);
+  vN = normalize(normalMatrix * normal);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vDist = length(mv.xyz);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+/**
+ * Like vertexShader, but the faces of the block ripple: every vertex is pushed forwards or backwards (along the depth of the block) by a wave. The EDGES stay
+ * where they are: how much a vertex moves is multiplied by its `edge` (distance to the outline of the shape, see addEdgeDistance in client.js), which is 0 on
+ * the outline, so the outline of the block, and so its collision, never changes: you always see exactly where it is. The movement is a function of the
+ * vertex position only, so vertices at the same place move together: the surface stays closed. Only what is drawn moves; the physics does not.
+ */
+const waveVertexShader = /* glsl */ `
+attribute float edge;
+varying vec2 vP;
+varying vec3 vP3;
+varying vec3 vN;
+varying vec3 vW;
+varying vec3 vWN;
+varying float vDist;
+varying vec3 vRX; // the mesh's own x / y / z axes in the world (its rotation): a bump map made in the mesh's space is turned into the world with them
+varying vec3 vRY;
+varying vec3 vRZ;
+uniform float uTime;
+uniform float uSeed;
+float vhash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(vhash(i), vhash(i + vec2(1.0, 0.0)), f.x), mix(vhash(i + vec2(0.0, 1.0)), vhash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float swell(vec2 p, float t) { // slow waves, about -0.3 .. 0.3
+  float h = 0.0;
+  h += 0.10 * sin(dot(p, vec2(0.95, 0.31)) * 0.55 + t * 1.0);
+  h += 0.05 * sin(dot(p, vec2(-0.37, 0.93)) * 0.90 + t * 1.3);
+  h += (vnoise(p * 0.35 + vec2(t * 0.15, -t * 0.10)) - 0.5) * 0.30;
+  h += (vnoise(p * 0.95 - vec2(t * 0.25, t * 0.20)) - 0.5) * 0.10;
+  return h;
+}
+void main() {
+  mat3 R = mat3(modelMatrix);
+  vRX = R[0]; vRY = R[1]; vRZ = R[2];
+  vP = uv;
+  vP3 = position;
+  float still = smoothstep(0.2, 1.3, edge); // 0 on the outline and the bevel, 1 well inside
+  vec3 pos = position + vec3(0.0, 0.0, swell(position.xy + uSeed * 7.0, uTime) * 1.4 * still);
+  vW = (modelMatrix * vec4(pos, 1.0)).xyz;
+  vWN = normalize(mat3(modelMatrix) * normal);
+  vN = normalize(normalMatrix * normal);
+  vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+  vDist = length(mv.xyz);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+/** Shaders whose blocks are drawn with waveVertexShader and a geometry cut into 3 x 3 (the faces ripple, the edges stay). */
+const deformShaders = new Set([]); // (the water block no longer uses it: no subdivided faces, the ripples are in the fragment shader only)
+
+const prelude = /* glsl */ `
+precision highp float;
+varying vec2 vP;
+varying vec3 vP3;
+varying vec3 vN;
+varying vec3 vW;
+varying vec3 vWN;
+varying float vDist;
+varying vec3 vRX;
+varying vec3 vRY;
+varying vec3 vRZ;
+uniform vec3 uFogColor;
+uniform vec2 uFog;
+uniform float uTime;
+uniform float uSeed;
+uniform vec3 uGlow;
+uniform float uBad;
+uniform float uWaterY;
+uniform float uCaus;
+uniform float uCausOn; // 0 = this block gets no caustics (it is held, or waits on the table)
+uniform float uCausInward;
+uniform float uReveal; // 1 = the block is whole; below 1 it is dissolving in (a block that just came out of its outline on the table)
+uniform vec2 uBowlHalf;
+uniform float uAA; // graphics setting (texture filtering): 0 = off, 1 = trilinear, 1.5 = anisotropic 4x, 2 = anisotropic 16x: how early fine patterns fade out
+uniform float uQuality; // graphics setting: 0 = low (no extra surface detail), 1 = medium (roughness maps), 2 = high (roughness maps and bump maps)
+
+${SHADOW_GLSL}
+float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+// fbm is FILTERED: an octave whose cells are smaller than a pixel (steep camera angles, far away) is replaced by its average, so nothing shimmers or
+// turns into streaks. (fwidth = how far p moves across one screen pixel; uAA = the texture filtering setting, 0 = off but still a little smoothing.)
+float fbm(vec2 p) {
+  vec2 fw = fwidth(p);
+  float w = max(fw.x, fw.y) * (0.6 + 0.4 * uAA);
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    float keep = 1.0 - smoothstep(0.25, 0.7, w); // 1 while a cell covers several pixels, 0 when it is smaller than one
+    s += a * mix(0.5, noise(p), keep);
+    p *= 2.03; w *= 2.03; a *= 0.5;
+  }
+  return s;
+}
+// PERLIN (gradient) noise in 3D, from -1 to 1: every lattice point has a random direction, smooth quintic blending. pfbm = several octaves of it.
+float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+vec3 pgrad(vec3 p) { return vec3(h13(p), h13(p + 19.19), h13(p + 47.77)) * 2.0 - 1.0; } // (a random direction: no sin / cos / sqrt, this runs 8 times per noise call)
+float perlin(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float n000 = dot(pgrad(i), f);
+  float n100 = dot(pgrad(i + vec3(1.0, 0.0, 0.0)), f - vec3(1.0, 0.0, 0.0));
+  float n010 = dot(pgrad(i + vec3(0.0, 1.0, 0.0)), f - vec3(0.0, 1.0, 0.0));
+  float n110 = dot(pgrad(i + vec3(1.0, 1.0, 0.0)), f - vec3(1.0, 1.0, 0.0));
+  float n001 = dot(pgrad(i + vec3(0.0, 0.0, 1.0)), f - vec3(0.0, 0.0, 1.0));
+  float n101 = dot(pgrad(i + vec3(1.0, 0.0, 1.0)), f - vec3(1.0, 0.0, 1.0));
+  float n011 = dot(pgrad(i + vec3(0.0, 1.0, 1.0)), f - vec3(0.0, 1.0, 1.0));
+  float n111 = dot(pgrad(i + vec3(1.0, 1.0, 1.0)), f - vec3(1.0, 1.0, 1.0));
+  return clamp(1.15 * mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z), -1.0, 1.0);
+}
+float pfbm(vec3 p) { // 0..1
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++) { s += a * perlin(p); p *= 2.02; a *= 0.5; }
+  return clamp(s * 1.0 + 0.5, 0.0, 1.0);
+}
+// BUMP MAPS: a shader defines a height h(q) (any function of a position) and takes its slope: the surface normal then leans away from the slope.
+//   float e = 0.03; float h0 = h(q);  vec3 g = vec3(h(q + vec3(e,0,0)) - h0, h(q + vec3(0,e,0)) - h0, h(q + vec3(0,0,e)) - h0) / e;
+//   gNormal = bumpedNormal(g, 0.3, 1.0);  gHasN = 1.0;        (space: 1 = q is a position in the MESH (blocks that move), 0 = q is a position in the WORLD)
+vec3 toWorld(vec3 o) { return vRX * o.x + vRY * o.y + vRZ * o.z; }
+vec3 bumpedNormal(vec3 grad, float k, float space) {
+  vec3 n0 = normalize(vWN);
+  if (!gl_FrontFacing) n0 = -n0;
+  vec3 g = space > 0.5 ? toWorld(grad) : grad;
+  return normalize(n0 - k * (g - dot(g, n0) * n0));
+}
+// The CHEAP bump map, from the height you already have: the slope of h across the screen (derivatives of neighbouring pixels) tilts the normal. It needs
+// no extra samples of the height (the 4-sample way above costs four times as much), and any pattern can be a height: the grain of a wood, the lumps of a stone.
+//   if (uQuality > 1.5) { gNormal = bumpFromHeight(height, 0.045); gHasN = 1.0; }
+vec3 bumpFromHeight(float h, float k) {
+  vec3 n0 = normalize(vWN);
+  if (!gl_FrontFacing) n0 = -n0;
+  vec3 dpdx = dFdx(vW), dpdy = dFdy(vW);
+  vec3 r1 = cross(dpdy, n0), r2 = cross(n0, dpdx);
+  float det = dot(dpdx, r1);
+  vec3 grad = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  vec3 t = k * grad / max(abs(det), 1e-8);
+  float tl = length(t);
+  t *= min(1.0, 0.35 / max(tl, 1e-6)); // cap the tilt: derivative noise can't produce harsh spikes
+  return normalize(n0 - t);
+}
+// A roughness map: base plus a bit of Perlin noise around the position q (medium quality and up; at low quality it is just base).
+float roughMap(vec3 q, float base, float amt) { return uQuality < 0.5 ? base : clamp(base + amt * perlin(q), 0.05, 1.0); }
+// Anti-aliasing for procedural patterns: pass how many pattern cycles fit in one screen pixel (e.g. fwidth(p.y) * frequency); returns 1 while the
+// pattern is still readable and fades to 0 where it is finer than a pixel (steep viewing angles, far away), so it blends to its average instead of shimmering.
+float aaFade(float cyclesPerPixel) { return 1.0 - smoothstep(0.12, 0.45, cyclesPerPixel * (0.6 + 0.4 * uAA)); }
+// two ready-made heights: wood (fine grain stretched along x) and rock (lumps, bumps, grain)
+float woodHeight(vec3 q) { return 0.5 * perlin(q * vec3(0.6, 3.2, 0.6)) + 0.25 * perlin(q * vec3(1.5, 9.0, 1.5)) + 0.1 * perlin(q * 24.0); }
+float rockHeight(vec3 q) { return 0.55 * perlin(q * 1.5) + 0.3 * perlin(q * 4.6) + 0.16 * perlin(q * 13.0) + 0.07 * perlin(q * 31.0); }
+vec3 woodBump(vec3 q, float k, float space) {
+  float e = 0.03, h0 = woodHeight(q);
+  return bumpedNormal(vec3(woodHeight(q + vec3(e, 0.0, 0.0)) - h0, woodHeight(q + vec3(0.0, e, 0.0)) - h0, woodHeight(q + vec3(0.0, 0.0, e)) - h0) / e, k, space);
+}
+vec3 rockBump(vec3 q, float k, float space) {
+  float e = 0.03, h0 = rockHeight(q);
+  return bumpedNormal(vec3(rockHeight(q + vec3(e, 0.0, 0.0)) - h0, rockHeight(q + vec3(0.0, e, 0.0)) - h0, rockHeight(q + vec3(0.0, 0.0, e)) - h0) / e, k, space);
+}
+// caustics: the bright net the ripples of the water throw on whatever is under it (a tiling pattern of folded sines)
+float caustic(vec2 uv, float t) {
+  vec2 p = mod(uv * 6.28318, 6.28318) - 250.0; // (the big offset matters: close to 0 the folding below blows up)
+  vec2 i = p;
+  float c = 1.0;
+  for (int n = 0; n < 4; n++) {
+    float tt = t * (1.0 - 3.5 / float(n + 1));
+    i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));
+    c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / 0.005), p.y / (cos(i.y + tt) / 0.005)));
+  }
+  c /= 4.0;
+  c = 1.17 - pow(c, 1.4);
+  return min(pow(abs(c), 8.0), 1.5);
+}
+vec3 gNormal = vec3(0.0, 1.0, 0.0); // a shader can light the block with its OWN normal (a bump map): set gNormal and gHasN = 1.0 before finish()
+float gHasN = 0.0;
+vec3 gSpec = vec3(0.0); //  and add shine on top of the lighting (highlights are not multiplied by the colour of the surface)
+vec3 gGlint = vec3(0.0); // like gSpec, but only where the sun is not in shadow (multiplied by how lit the surface is)
+float gBlow = 0.0; //    where the sun hits the surface it gets brighter and a little blown out (0 = not at all, 1 = a lot)
+float gShine = 0.0; //   strength of the highlight of this surface (0 = none: the shader does not shine)
+float gRough = 0.6; //    how rough it is: 0 = a small hard highlight, 1 = a wide dull glow. A shader may change it from place to place (non-uniform shine)
+vec4 finish(vec3 c, float a) {
+  float dissolveEdge = 0.0;
+  if (uReveal < 1.0) { // dissolve: the block appears out of noise, with a pale rim where it is just appearing
+    float d = fbm(vP3.xy * 0.9 + vP3.z * 0.7 + uSeed * 9.0);
+    float k = uReveal * 1.12;
+    if (d > k) discard;
+    dissolveEdge = smoothstep(k - 0.07, k, d);
+  }
+  vec3 albedo = c;
+  vec3 wn = normalize(vWN);
+  if (!gl_FrontFacing) wn = -wn; // two-sided surfaces (the bowl, models) are lit from the side you are looking at
+  if (gHasN > 0.5) wn = gNormal;
+  vec3 L = sceneLight(vW, wn);
+  float depth = uWaterY - vW.y;
+  if (uCaus * uCausOn > 0.0 && depth > 0.0) { // under the water, inside the bowl
+    vec2 m = abs(vW.xz) / uBowlHalf;
+    float inside = 1.0 - smoothstep(0.9, 1.0, pow(pow(m.x, 4.0) + pow(m.y, 4.0), 0.25));
+    vec2 q = vW.xz + uLightDir.xz / max(uLightDir.y, 0.3) * depth; // where the ray crossed the surface
+    float k = caustic(q * 0.11, uTime * 0.55) * (0.35 + 0.65 * clamp(dot(wn, uLightDir) + 0.4, 0.0, 1.0));
+    vec3 gn = normalize(vWN); // (the true normal: for the bowl only the inside counts, not the outside or the underside)
+    float inward = uCausInward > 0.5 ? max(step(dot(gn.xz, vW.xz), 0.0), step(0.5, gn.y)) : 1.0;
+    float fade = exp(-depth * 0.06) * smoothstep(0.0, 0.5, depth) * inside * inward;
+    L += uLightCol * (k * uCaus * fade * 2.4);
+    c = mix(c, c * vec3(0.8, 0.93, 1.0), 0.55 * fade);
+  }
+  c *= L * 0.86;
+  c += gSpec + gGlint * gSh;
+  if (gBlow > 0.0) { // overexposure: the part the sun lights up pushes towards white
+    float lit = smoothstep(0.45, 1.0, gDirect);
+    c *= 1.0 + gBlow * 0.75 * lit;
+    c = mix(c, vec3(1.0, 0.97, 0.9), gBlow * 0.5 * lit * lit);
+  }
+  if (gShine > 0.0) { // where the sun hits the surface it brightens the colour of the surface itself; the rougher, the wider and duller the bright part
+    vec3 V = normalize(cameraPosition - vW);
+    vec3 H = normalize(uLightDir + V);
+    float nh = clamp(dot(wn, H), 0.0, 1.0);
+    float nl = clamp(dot(wn, uLightDir), 0.0, 1.0);
+    float r = clamp(gRough, 0.05, 1.0);
+    float lobe = pow(nh, mix(160.0, 4.0, r * r)) * mix(1.0, 0.25, r);
+    float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(wn, V), 0.0, 1.0), 5.0);
+    vec3 tint = mix(vec3(1.0), clamp(albedo * 2.2, 0.0, 1.4), 0.6);
+    c += uLightCol * tint * (lobe * gShine * (0.55 + fres) * gSh * smoothstep(0.0, 0.2, nl));
+  }
+  float rim = pow(1.0 - clamp(dot(wn, normalize(cameraPosition - vW)), 0.0, 1.0), 3.0);
+  c += uAmbSky * (rim * 0.16);
+  c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
+  c += uGlow * 0.28;
+  c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, vDist)); // distant background models melt into the mist
+  c = mix(c, vec3(1.0, 0.98, 0.92), dissolveEdge * 0.85);
+  return vec4(c, a);
+}
+`;
+
+const frag = (body) => prelude + body;
+/** How many lines come before the code of a shader (what is shown in the shader studio starts after them): the line numbers of an error are corrected with it. */
+const PRELUDE_LINES = (prelude.match(/\n/g) ?? []).length;
+
+return { frag: frag, vertexShader: vertexShader };
+})();</script>
+<script>window.DEFAULT_SHADER_CODE = (function () {
+// Runs on BOTH server and browser. Pure data: ALL the SHADERS of the game (edit them in the shader studio of the debug menu). _definitions.js re-exports them.
+//
+//   const shaderCode = { name: { type?: 'opaque' | 'transparent' | 'refract', code: `...GLSL...` }, ... }
+//
+// EVERY shader of the game is here (shaders.js only has the common part that all of them start with). The name is what materials, bowls, models and backgrounds
+// pick; a new name is a new shader.
+// `code` is what comes after the common part of every shader (the varyings, uniforms, noise functions, lighting and finish(): see shaders.js);
+// it has to define main() and end by setting gl_FragColor, usually with finish(colour, 1.0).
+// type: opaque (default) = a normal solid surface, transparent = drawn after the solid things without depth writes,
+//       refract = transparent AND it bends the picture behind it (needs the REFRACT_GLSL part: copy a glass shader to start).
+//
+// With `DEBUG = true` the shader studio writes this file for you when you press "Save shader" and confirm it (comments are not kept).
+// That needs write permission:
+//   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js,games/balance/_shaders.js     (on the "start" and "dev" tasks)
+
+const shaderCode = {
+  wood: {
+    code: `
+// the grain fades to its average where it gets finer than a pixel (aaFade), so it does not shimmer or turn to stripes at steep camera angles
+void main() {
+  vec2 p = vP + uSeed * 17.0;
+  vec2 fw = fwidth(p);
+  float fp = max(fw.x, fw.y);
+  float aaR = aaFade(fp * 2.6), aaF = aaFade(fp * 6.0);
+  float warp = fbm(p * vec2(0.5, 1.6));
+  float rings = sin((p.y * 3.2 + warp * 5.0) * 3.14159) * aaR;
+  float fib = mix(0.5, fbm(p * 6.0), aaF);
+  vec3 c = mix(vec3(0.64, 0.42, 0.21), vec3(0.45, 0.27, 0.12), 0.5 + 0.3 * rings);
+  c *= 0.9 + 0.2 * fib;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.2 * rings + 0.2 * (fib - 0.5), 0.045); gHasN = 1.0; } // the bump IS the grain: the same rings that colour the wood
+  gBlow = 0.4;
+  gShine = 0.3;
+  gRough = roughMap(vec3(p * 2.0, 1.0), 0.55, 0.3 * aaR);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  bowlwood: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float warp = fbm(q.xz * 0.3 + vec2(q.y * 0.25, 3.0));
+  float rings = sin((q.y * 1.7 + warp * 4.0) * 3.14159) * aaFade(fwidth(q.y * 1.7 + warp * 4.0) * 0.5);
+  float fib = fbm(vec2(q.x + q.z, q.y * 3.0) * 1.5);
+  vec3 c = mix(vec3(0.50, 0.30, 0.14), vec3(0.34, 0.19, 0.08), 0.5 + 0.4 * rings);
+  c *= 0.88 + 0.24 * fib;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.5 * rings + 0.5 * fib, 0.045); gHasN = 1.0; }
+  gBlow = 0.35;
+  gShine = 0.4;
+  gRough = roughMap(q * 0.8, 0.45, 0.3);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  floorwood: {
+    code: `
+void main() {
+  vec2 p = vec2(vP3.x, vP3.z + vP3.y) + uSeed * 9.0;
+  float plank = floor(p.y / 3.2);
+  vec2 q = vec2(p.x * 0.35 + hash(vec2(plank, 3.0)) * 40.0, p.y);
+  float warp = fbm(vec2(q.x * 0.5, q.y * 2.5));
+  float grain = sin((q.y * 2.0 + warp * 6.0) * 3.14159) * aaFade(fwidth(q.y * 2.0 + warp * 6.0) * 0.5);
+  float fib = fbm(q * vec2(1.0, 4.0));
+  vec3 base = mix(vec3(0.60, 0.40, 0.20), vec3(0.44, 0.27, 0.12), hash(vec2(plank, 7.0)));
+  vec3 c = mix(base, base * 0.8, 0.5 + 0.3 * grain);
+  c *= 0.9 + 0.2 * fib;
+  float f = fract(p.y / 3.2);
+  float sw = 0.03 + fwidth(p.y) / 3.2;                              // the seam stays at least about a pixel wide, and fainter when it is wider (no dotted lines)
+  float seam = smoothstep(sw, 0.0, min(f, 1.0 - f)) * (0.03 / sw);
+  c *= 1.0 - seam * 0.5;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.5 * grain + 0.5 * fib - 1.5 * seam, 0.041); gHasN = 1.0; } // grain and the grooves between the planks
+  gBlow = 0.3;
+  gShine = 0.3;
+  gRough = roughMap(vec3(p * 0.7, 2.0), 0.6, 0.3);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  mahogany: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float warp = fbm(vec2(q.x * 0.15 + q.z * 0.1, q.y * 0.9));
+  float grain = sin((q.y * 2.6 + q.z * 1.3 + warp * 7.0) * 3.14159) * aaFade(fwidth(q.y * 2.6 + q.z * 1.3 + warp * 7.0) * 0.5);
+  float streak = fbm(vec2(q.x * 0.5 + q.z * 0.5, q.y * 6.0));
+  float fib = fbm(vec2(q.x + q.z, q.y * 14.0));
+  vec3 c = mix(vec3(0.36, 0.12, 0.07), vec3(0.20, 0.06, 0.04), 0.5 + 0.35 * grain);
+  c = mix(c, vec3(0.50, 0.19, 0.10), smoothstep(0.55, 0.9, streak) * 0.6);
+  c *= 0.9 + 0.18 * fib;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.5 * grain + 0.5 * fib, 0.041); gHasN = 1.0; }
+  gBlow = 0.3;
+  gShine = 0.55;
+  gRough = roughMap(q * 0.6, 0.35, 0.3);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  blackstone: {
+    code: `
+void main() {
+  vec3 q = vP3 * 2.0;
+  float n = fbm(q.xy + q.z * 0.7);
+  vec3 c = mix(vec3(0.05, 0.05, 0.06), vec3(0.17, 0.17, 0.19), n);
+  c += step(0.965, hash(floor(q.xy * 9.0 + q.z * 5.0))) * 0.25;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(n, 0.090); gHasN = 1.0; }
+  gBlow = 0.15;
+  gShine = 0.6;
+  gRough = roughMap(q * 0.5, 0.3, 0.35);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  plaster: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  vec3 c = vec3(0.80, 0.72, 0.60) * (0.95 + 0.07 * fbm(q.xy * 0.6 + q.z));
+  c *= 0.97 + 0.03 * hash(floor(q.xy * 6.0));
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  glass: {
+    type: 'refract',
+    code: `
+uniform sampler2D uRefr;
+uniform float uRefrOn;
+uniform vec2 uRefrRes;
+// rgb = what the glass shows: the picture behind it, bent (a little more at the edges and by waves in the glass), tinted, with a bit of the glass's own colour (keep).
+vec4 glassOut(vec3 own, vec2 p, float keep, vec2 piece) { // piece: extra bend for this part of the glass (a shard of cracked glass)
+  if (uRefrOn < 0.5) return vec4(own, 0.2 + keep * 0.6); // no picture to look through: a pale pane
+  vec2 warp = vec2(fbm(p * 0.9), fbm(p * 0.9 + 4.3)) - 0.5;
+  vec2 off = warp * 0.05 + normalize(vN).xy * 0.035 + piece;
+  vec2 uv = gl_FragCoord.xy / uRefrRes;
+  vec3 bg = vec3(
+    texture2D(uRefr, clamp(uv + off * 0.9, 0.002, 0.998)).r, // (the three colours bend a tiny bit differently)
+    texture2D(uRefr, clamp(uv + off, 0.002, 0.998)).g,
+    texture2D(uRefr, clamp(uv + off * 1.1, 0.002, 0.998)).b);
+  bg *= vec3(0.9, 0.97, 1.0);
+  return vec4(mix(bg, own, clamp(keep, 0.0, 1.0)), 1.0);
+}
+
+void main() {
+  vec2 p = vP + uSeed * 5.0;
+  vec3 c = mix(vec3(0.55, 0.80, 0.93), vec3(0.82, 0.95, 1.0), 0.5 + 0.5 * sin(p.x * 0.7 + p.y * 0.5));
+  float streak = smoothstep(0.0, 0.35, sin((p.x - p.y) * 1.2 + 1.0));
+  c += streak * 0.16;
+  vec4 f = finish(c, 1.0);
+  float rim = pow(1.0 - abs(normalize(vN).z), 2.0); // the bevelled edges catch more light and are less clear
+  gl_FragColor = glassOut(f.rgb, p, 0.1 + 0.4 * rim + streak * 0.06, vec2(0.0));
+}`,
+  },
+  crackedGlass: {
+    type: 'refract',
+    code: `
+uniform sampler2D uRefr;
+uniform float uRefrOn;
+uniform vec2 uRefrRes;
+// rgb = what the glass shows: the picture behind it, bent (a little more at the edges and by waves in the glass), tinted, with a bit of the glass's own colour (keep).
+vec4 glassOut(vec3 own, vec2 p, float keep, vec2 piece) { // piece: extra bend for this part of the glass (a shard of cracked glass)
+  if (uRefrOn < 0.5) return vec4(own, 0.2 + keep * 0.6); // no picture to look through: a pale pane
+  vec2 warp = vec2(fbm(p * 0.9), fbm(p * 0.9 + 4.3)) - 0.5;
+  vec2 off = warp * 0.05 + normalize(vN).xy * 0.035 + piece;
+  vec2 uv = gl_FragCoord.xy / uRefrRes;
+  vec3 bg = vec3(
+    texture2D(uRefr, clamp(uv + off * 0.9, 0.002, 0.998)).r, // (the three colours bend a tiny bit differently)
+    texture2D(uRefr, clamp(uv + off, 0.002, 0.998)).g,
+    texture2D(uRefr, clamp(uv + off * 1.1, 0.002, 0.998)).b);
+  bg *= vec3(0.9, 0.97, 1.0);
+  return vec4(mix(bg, own, clamp(keep, 0.0, 1.0)), 1.0);
+}
+
+vec3 cells(vec2 p, float per) { // nearest and second nearest point of a jittered grid (sideways it repeats after per cells), and a random number for the nearest cell
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float d1 = 8.0;
+  float d2 = 8.0;
+  float id = 0.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 g = vec2(float(x), float(y));
+      vec2 k = vec2(mod(i.x + g.x + per, per), i.y + g.y);
+      vec2 o = vec2(hash(k), hash(k + 17.3));
+      float d = length(g + o - f);
+      if (d < d1) { d2 = d1; d1 = d; id = hash(k + 31.7); } else if (d < d2) { d2 = d; }
+    }
+  }
+  return vec3(d1, d2, id);
+}
+void main() {
+  vec2 p = vP + uSeed * 13.0;
+  vec2 hit = (vec2(hash(vec2(uSeed, 1.0)), hash(vec2(uSeed, 2.0))) - 0.5) * 2.4; // where it was hit
+  vec2 v = vP - hit;
+  vec2 w = v + 0.35 * vec2(fbm(v * 1.1 + uSeed), fbm(v * 1.1 + 6.0 + uSeed)); // crooked cracks
+  float r = length(w) + 0.001;
+  float ang = atan(w.y, w.x) * 14.0 / 6.2831853; // 14 cracks run out from the hit
+  vec3 big = cells(vec2(ang, r * 0.55), 14.0);        // shards: narrow at the hit, longer further out
+  vec3 fine = cells(vec2(ang * 2.0, r * 1.1 + 3.0), 28.0); // smaller cracks inside the shards
+  float edge = big.y - big.x;
+  float crack = 1.0 - smoothstep(0.0, 0.05, edge); // thin lines
+  float hair = (1.0 - smoothstep(0.0, 0.03, fine.y - fine.x)) * step(0.45, hash(vec2(fine.z * 7.0, big.z))); // some of the small ones, not all
+  if (big.z > 0.94 && r > 2.8 && edge > 0.06) discard; // a missing shard, only away from the hit
+  vec2 q = vP + uSeed * 5.0;
+  vec3 c = mix(vec3(0.55, 0.80, 0.93), vec3(0.82, 0.95, 1.0), 0.5 + 0.5 * sin(q.x * 0.7 + q.y * 0.5));
+  c *= 0.94 + 0.12 * big.z;                                   // every shard is a little lighter or darker
+  c += smoothstep(0.16, 0.06, edge) * (1.0 - crack) * 0.12;    // the rim of a shard catches light, next to the crack
+  vec4 f = finish(c, 1.0);
+  float line = clamp(max(crack, hair * 0.7), 0.0, 1.0);
+  vec3 own = mix(f.rgb, vec3(0.02, 0.03, 0.05), line);         // the cracks are black
+  vec2 tilt = (vec2(hash(vec2(big.z, 3.7)), hash(vec2(big.z, 8.1))) - 0.5) * 0.09; // each shard bends the light its own way
+  float rim = pow(1.0 - abs(normalize(vN).z), 2.0);
+  gl_FragColor = glassOut(own, p * 1.7, max(0.1 + 0.4 * rim, line * 0.95), tilt);
+}`,
+  },
+  waterBlock: {
+    type: 'refract',
+    code: `
+uniform sampler2D uRefr;
+uniform float uRefrOn;
+uniform vec2 uRefrRes;
+// rgb = what the glass shows: the picture behind it, bent (a little more at the edges and by waves in the glass), tinted, with a bit of the glass's own colour (keep).
+vec4 glassOut(vec3 own, vec2 p, float keep, vec2 piece) { // piece: extra bend for this part of the glass (a shard of cracked glass)
+  if (uRefrOn < 0.5) return vec4(own, 0.2 + keep * 0.6); // no picture to look through: a pale pane
+  vec2 warp = vec2(fbm(p * 0.9), fbm(p * 0.9 + 4.3)) - 0.5;
+  vec2 off = warp * 0.05 + normalize(vN).xy * 0.035 + piece;
+  vec2 uv = gl_FragCoord.xy / uRefrRes;
+  vec3 bg = vec3(
+    texture2D(uRefr, clamp(uv + off * 0.9, 0.002, 0.998)).r, // (the three colours bend a tiny bit differently)
+    texture2D(uRefr, clamp(uv + off, 0.002, 0.998)).g,
+    texture2D(uRefr, clamp(uv + off * 1.1, 0.002, 0.998)).b);
+  bg *= vec3(0.9, 0.97, 1.0);
+  return vec4(mix(bg, own, clamp(keep, 0.0, 1.0)), 1.0);
+}
+
+uniform vec3 uWaterColor;
+uniform float uWaterOpacity;
+vec2 grad2(vec2 i) { float a = hash(i) * 6.2831853; return vec2(cos(a), sin(a)); }
+float perlin(vec2 p) { // gradient (Perlin) noise, about -0.7 .. 0.7
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  return mix(mix(dot(grad2(i), f), dot(grad2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
+             mix(dot(grad2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)), dot(grad2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x), u.y);
+}
+float wh(vec2 p, float t) { // the wave height of the water of the bowl (waveH in client.js) plus finer Perlin ripples, on the face of the block
+  float h = 0.0;
+  h += 0.10 * sin(dot(p, vec2(0.95, 0.31)) * 0.55 + t * 1.0);
+  h += 0.05 * sin(dot(p, vec2(-0.37, 0.93)) * 0.90 + t * 1.3);
+  h += 0.02 * sin(dot(p, vec2(0.71, 0.71)) * 1.70 + t * 1.9);
+  h += (noise(p * 0.35 + vec2(t * 0.15, -t * 0.10)) - 0.5) * 0.20;
+  h += (noise(p * 0.95 - vec2(t * 0.25, t * 0.20)) - 0.5) * 0.06;
+  h += perlin(p * 0.65 + vec2(t * 0.22, t * 0.17)) * 0.34; // ripples (twice as large)
+  h += perlin(p * 1.55 - vec2(t * 0.38, t * 0.12)) * 0.16; // finer ones (twice as large)
+  return h;
+}
+void main() {
+  vec2 p = vP + uSeed * 7.0;
+  float t = uTime;
+  float h0 = wh(p, t);
+  vec2 slope = vec2(wh(p + vec2(0.1, 0.0), t) - h0, wh(p + vec2(0.0, 0.1), t) - h0) / 0.1;
+  float front = smoothstep(0.6, 0.95, abs(normalize(vWN).z)); // the big flat faces (the front of the block): the ripples are strongest there
+  vec3 N = normalize(normalize(vWN) + vec3(-slope, 0.0) * (2.0 + 2.5 * front)); // the waves tilt the surface
+  vec3 V = normalize(cameraPosition - vW);
+  float fres = pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 3.0);
+  vec3 col = uWaterColor * ((uAmbSky * 0.7 + uLightCol * 0.35) * 1.28); // the colour of the water follows the light of the day
+  col *= 0.8 + 0.4 * (perlin(p * 0.225 + vec2(t * 0.08, -t * 0.05)) + 0.5);  // deeper and shallower patches drifting through the water
+  float rip = perlin(p * 1.1 + vec2(t * 0.3, -t * 0.2));
+  col *= 1.0 + front * (0.5 * rip + 0.28 * smoothstep(0.35, 0.7, abs(perlin(p * 0.8 - vec2(t * 0.18, t * 0.25))) )); // visible light and dark ripples, with bright lines
+  // reflection: the sky (and the ground) as the tilted surface mirrors it, stronger at a low angle
+  vec3 R = reflect(-V, N);
+  vec3 sky = mix(uAmbGround, uAmbSky, smoothstep(-0.2, 0.7, R.y)) * 1.15;
+  float refl = clamp(0.12 + 0.75 * fres, 0.0, 0.85);
+  col = mix(col, sky, refl * 0.55);
+  float glint = pow(max(dot(N, normalize(uLightDir + V)), 0.0), 140.0);   // sun (or moon) glitter on the ripples
+  col += uLightCol * (glint * 0.9);
+  col *= 0.94 + 0.12 * N.x;
+  float keep = clamp(uWaterOpacity + fres * 0.12 + refl * 0.2 + glint * 0.6, 0.0, 1.0);
+  gl_FragColor = glassOut(col, p, keep, slope * (0.03 + 0.03 * front));
+}`,
+  },
+  outline: {
+    type: 'transparent',
+    code: `
+void main() {
+  vec2 p = vP + uSeed * 17.0;
+  float across = smoothstep(0.0, 0.3, vP.y) * smoothstep(1.0, 0.7, vP.y); // soft edges on both sides of the line
+  float rough = 0.55 + 0.45 * fbm(vec2(p.x * 2.2, vP.y * 2.5));             // the chalk is thicker and thinner along the line
+  float dust = step(0.82, hash(floor(vec2(p.x * 9.0, vP.y * 4.0)))) * 0.25; // grains
+  float a = clamp(across * (rough - dust) * 1.15, 0.0, 1.0) * 0.92 * uReveal; // (uReveal: the line fades in and out)
+  gl_FragColor = vec4(vec3(0.97, 0.97, 0.94), a);
+}`,
+  },
+  stone1: {
+    code: `
+// Weathered slate. ONE height drives everything: the bump is its slope and the colour follows its value (high = lighter, low = darker), so the
+// grain of the relief and the grain of the colour are the same grain. Fine layers fade out with aaFade() where they get smaller than a pixel.
+void main() {
+  vec3 q = vW * 1.7 + uSeed * 11.0;
+  float fq = max(length(fwidth(q)), 1e-5);                          // how much of the pattern one pixel covers
+  float aaA = aaFade(fq * 8.0), aaB = aaFade(fq * 16.0), aaC = aaFade(fq * 30.0);
+  float lump = 0.55 * perlin(q * 1.4) + 0.4 * perlin(q * 3.6) * aaA + 0.25 * perlin(q * 8.0) * aaB;      // soft rock surface
+  float fine = perlin(q * 16.0) * aaB;                                                                    // fine grain
+  float ridge = smoothstep(0.17, 0.0, abs(perlin(q * 1.8 + 5.0 + 0.3 * perlin(q * 4.0)))); // thin wandering lines
+  float crev = ridge * smoothstep(-0.1, 0.3, perlin(q * 0.7 + 3.0));                       // crevices: only in some places, fading in and out
+  float h0 = lump + 0.35 * fine - 1.3 * crev;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(h0, 0.11); gHasN = 1.0; }
+
+  float blot = pfbm(q * 0.5);
+  vec3 c = mix(vec3(0.36, 0.38, 0.44), vec3(0.50, 0.52, 0.57), smoothstep(0.3, 0.7, blot));   // blue-grey slate, gentle patches
+  c *= 0.8 + 0.34 * smoothstep(-0.8, 0.9, h0);                                                  // the colour follows the height
+  c *= 1.0 + 0.16 * fine;                                                                       // the same fine grain, light and dark
+  float speck = smoothstep(0.6, 0.78, perlin(q * 27.0)) * aaC;
+  c = mix(c, vec3(0.66, 0.68, 0.72), speck * 0.35);                                             // a few pale mineral grains
+  c *= 1.0 - 0.55 * crev;                                                                       // dark crevices
+  gRough = roughMap(q * 0.8 + 21.0, 0.65, 0.35 * aaA) + 0.2 * crev;
+  gShine = 0.35 * (1.0 - 0.6 * crev);
+  gBlow = 0.28;
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  stone2: {
+    code: `
+float heightAt(vec3 q) { return 0.6 * perlin(q * 1.5) + 0.3 * perlin(q * 4.6) + 0.06 * perlin(q * 9.0); } // lumps, bumps, grain
+void main() {
+  vec3 q = vW * 0.9 + uSeed * 11.0;
+  float h0 = heightAt(q);
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(h0, 0.135); gHasN = 1.0; }
+
+  // colour: blue-grey slate, blotchy, with paler and darker grains
+  float blot = pfbm(q * 0.7);
+  vec3 c = mix(vec3(0.20, 0.23, 0.30), vec3(0.42, 0.44, 0.50), smoothstep(0.25, 0.75, blot));
+  c *= 0.86 + 0.28 * (perlin(q * 18.0) * 0.5 + 0.5);                                            // grain
+  c = mix(c, vec3(0.64, 0.66, 0.70), smoothstep(0.5, 0.62, perlin(q * 15.0)) * 0.5);           // pale mineral specks
+  c *= 1.0 - 0.4 * smoothstep(0.1, -0.35, h0);                                                   // the low parts are darker
+
+  // shine: the roughness varies with its own noise (non-uniform reflection); the highlight itself is added in finish()
+  gRough = roughMap(q * 0.9 + 21.0, 0.62, 0.45);
+  gShine = 0.55;
+  gBlow = 0.35;
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  float: {
+    code: `
+void main() {
+  vec2 p = vP;
+  float s = step(0.5, fract(p.x * 0.42 + 0.1));
+  vec3 c = mix(vec3(0.95, 0.42, 0.18), vec3(0.97, 0.94, 0.88), s);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  wood2: {
+    code: `
+void main() {
+  vec3 q = vP3 + uSeed * 9.0;
+  float warp = fbm(q.xz * 0.3 + vec2(q.y * 0.25, 7.0));
+  float rings = sin((q.y * 2.2 + warp * 3.5) * 3.14159) * aaFade(fwidth(q.y * 2.2 + warp * 3.5) * 0.5);
+  float fib = fbm(vec2(q.x + q.z, q.y * 4.0) * 1.2);
+  vec3 c = mix(vec3(0.84, 0.68, 0.46), vec3(0.72, 0.54, 0.33), 0.5 + 0.35 * rings);
+  c *= 0.92 + 0.16 * fib;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.5 * rings + 0.5 * fib, 0.045); gHasN = 1.0; }
+  gBlow = 0.4;
+  gShine = 0.3;
+  gRough = roughMap(q * 0.7, 0.5, 0.3);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  ceramic: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float a = atan(q.z, q.x);
+  float rim = smoothstep(0.06, 0.0, abs(q.y - 0.0) - 0.5);
+  float wave = smoothstep(0.08, 0.0, abs(q.y + 2.6 + 0.5 * sin(a * 7.0)) - 0.18);
+  vec3 c = mix(vec3(0.95, 0.95, 0.92), vec3(0.20, 0.36, 0.60), clamp(rim + wave, 0.0, 1.0) * 0.92);
+  c *= 0.96 + 0.06 * noise(q.xz * 5.0 + q.y * 2.0);
+  gBlow = 0.25;
+  gShine = 0.9;
+  gRough = roughMap(q * 1.2, 0.14, 0.12);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  bark: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float a = atan(q.z, q.x);
+  float streak = fbm(vec2(a * 3.0, q.y * 0.9));
+  vec3 c = mix(vec3(0.24, 0.17, 0.12), vec3(0.44, 0.32, 0.21), streak);
+  c *= 0.82 + 0.3 * noise(vec2(a * 9.0, q.y * 3.0));
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  leaves: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float n = fbm(q.xy * 1.2 + q.zy * 0.8);
+  vec3 c = mix(vec3(0.20, 0.42, 0.20), vec3(0.47, 0.66, 0.28), n);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  blossom: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float n = fbm(q.xy * 1.4 + q.zy * 0.9);
+  vec3 c = mix(vec3(0.93, 0.68, 0.76), vec3(1.0, 0.90, 0.92), n);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  bamboo: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float knot = smoothstep(0.05, 0.0, abs(fract(q.y) - 0.92) - 0.06);
+  vec3 c = mix(vec3(0.40, 0.58, 0.26), vec3(0.56, 0.70, 0.34), noise(vec2(q.y * 2.0, q.x * 9.0 + q.z * 9.0)));
+  c = mix(c, vec3(0.28, 0.40, 0.18), knot * 0.8);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  paper: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  vec3 c = vec3(1.18, 0.98, 0.66) * (0.9 + 0.1 * noise(q.xy * 8.0));
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+  mountain: {
+    code: `
+void main() {
+  vec3 q = vP3;
+  float snow = smoothstep(27.0 + 3.0 * fbm(q.xz * 0.15), 36.0, q.y);
+  vec3 c = mix(vec3(0.46, 0.53, 0.60), vec3(0.62, 0.68, 0.72), fbm(q.xz * 0.12 + q.y * 0.05));
+  c = mix(c, vec3(0.95, 0.96, 0.97), snow);
+  gl_FragColor = finish(c, 1.0);
+}`,
+  },
+};
+
+return shaderCode;
+})();</script>
+<script>/* ===== app.js : Shader Studio UI (node editor, WebGL2 preview, library) ===== */
+(function () {
+'use strict';
+const GC = window.GC;
+const $ = (s, r = document) => r.querySelector(s);
+const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const LS_KEY = 'shaderStudio.v1';
+const countNL = s => { let n = 0; for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++; return n; };
+const cleanCode = c => c.replace(/^\n+/, '').replace(/\s+$/, '');
+
+const S = {
+  lib: [], defaults: new Map(), entry: null, g: null, noGraph: false,
+  sel: new Set(), view: { x: 40, y: 40, z: 1 }, undo: [], redo: [], preview: null,
+  sock: {}, time: 0, uSig: '',
+  preludeText: '', vs: '', ctx0: null, customPrelude: null,
+  scene: { shape: 'block', auto: true, anim: true, speed: 1, lightAz: 35, lightEl: 48, tod: 'day', quality: 2, aa: 2, seed: 0.37, reveal: 1, bg: 'studio', glow: false, bad: false, yaw: 0.55, pitch: 0.3, dist: 11 },
+};
+
+// ================================================================= prelude (the common part of every shader)
+function setPrelude(text, vs) {
+  S.preludeText = text; S.vs = vs; S.ctx0 = GC.parseTopLevel(text);
+}
+setPrelude(window.ORIG.frag(''), window.ORIG.vertexShader);
+
+// ================================================================= math
+const M4 = {
+  persp(f, a, n, fa) { const t = 1 / Math.tan(f / 2), nf = 1 / (n - fa); return new Float32Array([t / a, 0, 0, 0, 0, t, 0, 0, 0, 0, (fa + n) * nf, -1, 0, 0, 2 * fa * n * nf, 0]); },
+  mul(a, b) { const o = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; },
+  look(e, t, up) {
+    let zx = e[0] - t[0], zy = e[1] - t[1], zz = e[2] - t[2]; let l = Math.hypot(zx, zy, zz); zx /= l; zy /= l; zz /= l;
+    let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx; l = Math.hypot(xx, xy, xz); xx /= l; xy /= l; xz /= l;
+    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    return new Float32Array([xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0, -(xx * e[0] + xy * e[1] + xz * e[2]), -(yx * e[0] + yy * e[1] + yz * e[2]), -(zx * e[0] + zy * e[1] + zz * e[2]), 1]);
+  },
+  rotY(a) { const c = Math.cos(a), s = Math.sin(a); return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]); },
+};
+const IDENT16 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+// ================================================================= shapes (position, normal, uv in the game's units)
+function Geo() { const v = [], i = []; return { v, i, vert(p, n, uv) { v.push(p[0], p[1], p[2], n[0], n[1], n[2], uv[0], uv[1]); return v.length / 8 - 1; }, quad(a, b, c, d) { i.push(a, b, c, a, c, d); } }; }
+function gridGeo(G, nu, nv, f) {
+  const base = G.v.length / 8;
+  for (let a = 0; a <= nu; a++) for (let b = 0; b <= nv; b++) { const r = f(a / nu, b / nv); G.vert(r.p, r.n, r.uv); }
+  for (let a = 0; a < nu; a++) for (let b = 0; b < nv; b++) { const i0 = base + a * (nv + 1) + b, i1 = i0 + 1, i2 = i0 + nv + 1, i3 = i2 + 1; G.i.push(i0, i2, i1, i1, i2, i3); }
+}
+function lathe(G, prof, segs, rMax) {
+  const n = prof.length, s = [0];
+  for (let i = 1; i < n; i++) s.push(s[i - 1] + Math.hypot(prof[i][0] - prof[i - 1][0], prof[i][1] - prof[i - 1][1]));
+  const base = G.v.length / 8;
+  for (let a = 0; a <= segs; a++) {
+    const ph = a / segs * 2 * Math.PI, cs = Math.cos(ph), sn = Math.sin(ph);
+    for (let i = 0; i < n; i++) {
+      const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
+      const dr = prof[i1][0] - prof[i0][0], dy = prof[i1][1] - prof[i0][1], l = Math.hypot(dr, dy) || 1;
+      const nr = dy / l, ny = -dr / l;
+      G.vert([prof[i][0] * cs, prof[i][1], prof[i][0] * sn], [nr * cs, ny, nr * sn], [ph * rMax, s[i]]);
+    }
+  }
+  for (let a = 0; a < segs; a++) for (let i = 0; i < n - 1; i++) { const i0 = base + a * n + i, i1 = i0 + 1, i2 = i0 + n, i3 = i2 + 1; G.i.push(i0, i2, i1, i1, i2, i3); }
+}
+const sub = (a, b, k) => { const o = []; for (let i = 0; i <= k; i++) o.push([a[0] + (b[0] - a[0]) * i / k, a[1] + (b[1] - a[1]) * i / k]); return o; };
+function boxGeo(w, h2, d) {
+  const G = Geo(), x = w / 2, y = h2 / 2, z = d / 2;
+  const face = (pts, n, uvf) => { const ids = pts.map(p => G.vert(p, n, uvf(p))); G.quad(...ids); };
+  face([[-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z]], [0, 0, 1], p => [p[0], p[1]]);
+  face([[x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z]], [0, 0, -1], p => [p[0], p[1]]);
+  const edges = [[[-x, -y], [x, -y], [0, -1, 0], 0], [[x, -y], [x, y], [1, 0, 0], w], [[x, y], [-x, y], [0, 1, 0], w + h2], [[-x, y], [-x, -y], [-1, 0, 0], 2 * w + h2]];
+  for (const [a, b, n, s0] of edges) {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    G.quad(G.vert([a[0], a[1], -z], n, [s0, -z]), G.vert([b[0], b[1], -z], n, [s0 + len, -z]), G.vert([b[0], b[1], z], n, [s0 + len, z]), G.vert([a[0], a[1], z], n, [s0, z]));
+  }
+  return G;
+}
+function planeGeo(w, h2, uvf) { const G = Geo(); gridGeo(G, 1, 1, (u, v) => { const x = (u - 0.5) * w, y = (v - 0.5) * h2; return { p: [x, y, 0], n: [0, 0, 1], uv: uvf(x, y) }; }); return G; }
+const SHAPES = {
+  block: { label: 'Block', make: () => boxGeo(4, 4, 1.2) },
+  plank: { label: 'Plank', make: () => boxGeo(8, 1.6, 1.2) },
+  sphere: { label: 'Sphere', make: () => { const G = Geo(), r = 2.3; gridGeo(G, 64, 40, (u, v) => { const th = v * Math.PI, ph = u * 2 * Math.PI; const n = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)]; return { p: n.map(c => c * r), n, uv: [u * 2 * Math.PI * r, v * Math.PI * r] }; }); return G; } },
+  torus: { label: 'Torus', make: () => { const G = Geo(), R = 2, r = 0.85; gridGeo(G, 80, 36, (u, v) => { const a = u * 2 * Math.PI, b = v * 2 * Math.PI; const n = [Math.cos(b) * Math.cos(a), Math.sin(b), Math.cos(b) * Math.sin(a)]; return { p: [(R + r * Math.cos(b)) * Math.cos(a), r * Math.sin(b), (R + r * Math.cos(b)) * Math.sin(a)], n, uv: [u * 2 * Math.PI * R, v * 2 * Math.PI * r] }; }); return G; } },
+  knot: { label: 'Knot', make: () => {
+    const G = Geo(), r = 0.6, C = t => [(2 + Math.cos(3 * t)) * Math.cos(2 * t), Math.sin(3 * t), (2 + Math.cos(3 * t)) * Math.sin(2 * t)];
+    const norm = a => { const l = Math.hypot(...a) || 1; return a.map(c => c / l); };
+    gridGeo(G, 360, 24, (u, v) => {
+      const t = u * 2 * Math.PI, e = 0.002, c0 = C(t), c1 = C(t + e), c2 = C(t - e);
+      const T = norm(c1.map((c, i) => c - c2[i])); const acc = c1.map((c, i) => c + c2[i] - 2 * c0[i]);
+      const d = acc[0] * T[0] + acc[1] * T[1] + acc[2] * T[2]; const N = norm(acc.map((c, i) => c - T[i] * d));
+      const B = [T[1] * N[2] - T[2] * N[1], T[2] * N[0] - T[0] * N[2], T[0] * N[1] - T[1] * N[0]];
+      const a = v * 2 * Math.PI, n = N.map((c, i) => c * Math.cos(a) + B[i] * Math.sin(a));
+      return { p: c0.map((c, i) => c + r * n[i]), n, uv: [u * 40, v * 2 * Math.PI * r] };
+    }); return G; } },
+  cylinder: { label: 'Cylinder', make: () => { const G = Geo(); lathe(G, [[0, -2], [1.5, -2]], 48, 1.5); lathe(G, sub([1.5, -2], [1.5, 2], 12), 48, 1.5); lathe(G, [[1.5, 2], [0, 2]], 48, 1.5); return G; } },
+  cone: { label: 'Cone', make: () => { const G = Geo(); lathe(G, sub([2, -2.2], [0, 2.2], 16), 48, 2); lathe(G, [[0, -2.2], [2, -2.2]], 48, 2); return G; } },
+  bowl: { label: 'Bowl', make: () => {
+    const G = Geo(), R = 4.4, D = 2.4, th = 0.35, K = 28, outer = [], inner = [];
+    for (let i = 0; i <= K; i++) { const a = i / K * Math.PI / 2; outer.push([R * Math.sin(a), -D * Math.cos(a)]); }
+    for (let i = 0; i <= K; i++) { const a = (1 - i / K) * Math.PI / 2; inner.push([(R - th) * Math.sin(a), -(D - th) * Math.cos(a)]); }
+    lathe(G, outer, 64, R); lathe(G, [[R, 0], [R - th, 0]], 64, R); lathe(G, inner, 64, R); return G; } },
+  plane: { label: 'Plane', make: () => planeGeo(8, 8, (x, y) => [x, y]) },
+  strip: { label: 'Chalk strip', make: () => planeGeo(10, 1, (x, y) => [x, y + 0.5]) },
+};
+
+// ================================================================= WebGL2 preview
+const VS_HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\n#define varying out\nin vec3 position;\nin vec3 normal;\nin vec2 uv;\nuniform mat4 modelMatrix;\nuniform mat4 modelViewMatrix;\nuniform mat4 projectionMatrix;\nuniform mat3 normalMatrix;\n';
+const FS_HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\n#define varying in\n#define texture2D texture\nout highp vec4 fragColor;\n#define gl_FragColor fragColor\nuniform vec3 cameraPosition;\n';
+const KNOWN_U = {
+  uFogColor: [0.62, 0.72, 0.85], uFog: [1e5, 2e5], uWaterY: -1e5, uCaus: 0, uCausOn: 0, uCausInward: 0, uBowlHalf: [6, 6],
+  uShadowStr: 0, uShadowTexel: [1 / 1024, 1 / 1024], uShadowRange: 40, uShadowDepth: 100, uShadowR: [1, 0, 0], uShadowU: [0, 1, 0], uShadowBias: 0.02, uShadowNormal: 1, uShadowK: 1, uShadowMat: IDENT16,
+  uLN: 0, uLPos: new Float32Array(24), uLCol: new Float32Array(24), uLRange: new Float32Array(8), uRefrOn: 1,
+};
+const MANAGED = new Set([...Object.keys(KNOWN_U), 'uTime', 'uSeed', 'uReveal', 'uQuality', 'uAA', 'uGlow', 'uBad', 'uLightDir', 'uLightCol', 'uAmbSky', 'uAmbGround', 'uRefr', 'uRefrRes', 'uShadowMap', 'modelMatrix', 'modelViewMatrix', 'projectionMatrix', 'normalMatrix', 'cameraPosition']);
+const CUSTOM_DEFAULTS = { uWaterColor: [0.18, 0.52, 0.78], uWaterOpacity: 0.45 };
+const TOD = {
+  day: { col: [1.0, 0.93, 0.8], sky: [0.42, 0.5, 0.62], gnd: [0.27, 0.24, 0.21] },
+  sunset: { col: [1.0, 0.6, 0.34], sky: [0.46, 0.38, 0.5], gnd: [0.26, 0.18, 0.15] },
+  night: { col: [0.34, 0.42, 0.68], sky: [0.12, 0.15, 0.26], gnd: [0.07, 0.07, 0.1] },
+  overcast: { col: [0.6, 0.6, 0.62], sky: [0.6, 0.64, 0.7], gnd: [0.35, 0.35, 0.36] },
+};
+
+class Preview {
+  constructor(canvas) {
+    this.c = canvas; this.ok = false; this.prog = null; this.uniforms = []; this.type = 'opaque'; this.meshes = {};
+    const gl = this.gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+    if (!gl) return;
+    this.ok = true;
+    this.dummy = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, this.dummy);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
+    this.bgTex = gl.createTexture(); this.bgKey = '';
+    this.emptyVao = gl.createVertexArray();
+    const vs = '#version 300 es\nvoid main(){ vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2)); gl_Position = vec4(p*2.0-1.0, 0.0, 1.0); }';
+    const fs = '#version 300 es\nprecision highp float;\nuniform sampler2D uTex; uniform vec2 uRes; out vec4 o; void main(){ o = vec4(texture(uTex, gl_FragCoord.xy/uRes).rgb, 1.0); }';
+    const p = gl.createProgram();
+    gl.attachShader(p, this.sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, this.sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p);
+    this.bgProg = p; this.bgU = { tex: gl.getUniformLocation(p, 'uTex'), res: gl.getUniformLocation(p, 'uRes') };
+  }
+  sh(kind, src) { const gl = this.gl; const s = gl.createShader(kind); gl.shaderSource(s, src); gl.compileShader(s); return s; }
+  compileOne(kind, src) {
+    const gl = this.gl, s = gl.createShader(kind);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { const log = gl.getShaderInfoLog(s) || 'compile failed'; gl.deleteShader(s); return { log }; }
+    return { s };
+  }
+  setShader(type, code) {
+    const gl = this.gl;
+    const fsSrc = FS_HEAD + S.preludeText + '\n' + code;
+    const off = countNL(FS_HEAD) + countNL(S.preludeText) + 1;
+    const v = this.compileOne(gl.VERTEX_SHADER, VS_HEAD + S.vs);
+    if (v.log) return { ok: false, errors: [{ line: 0, msg: 'vertex shader: ' + v.log.trim() }] };
+    const f = this.compileOne(gl.FRAGMENT_SHADER, fsSrc);
+    if (f.log) {
+      const errors = [];
+      for (const l of f.log.split('\n')) {
+        if (!l.trim() || /^\s*\0?$/.test(l)) continue;
+        const m = /(?:ERROR|WARNING):\s*\d+:(\d+):\s*(.*)/.exec(l);
+        if (m) { const ln = +m[1] - off; errors.push(ln >= 1 ? { line: ln, msg: m[2] } : { line: 0, msg: '(in the prelude, line ' + m[1] + ') ' + m[2] }); } else errors.push({ line: 0, msg: l.trim() });
+      }
+      return { ok: false, errors: errors.length ? errors : [{ line: 0, msg: f.log }] };
+    }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, v.s); gl.attachShader(prog, f.s);
+    gl.bindAttribLocation(prog, 0, 'position'); gl.bindAttribLocation(prog, 1, 'normal'); gl.bindAttribLocation(prog, 2, 'uv');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return { ok: false, errors: [{ line: 0, msg: 'link: ' + gl.getProgramInfoLog(prog) }] };
+    if (this.prog) gl.deleteProgram(this.prog);
+    this.prog = prog; this.type = type; this.uniforms = [];
+    const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < n; i++) { const info = gl.getActiveUniform(prog, i); this.uniforms.push({ name: info.name.replace(/\[0\]$/, ''), type: info.type, size: info.size, loc: gl.getUniformLocation(prog, info.name) }); }
+    return { ok: true, errors: [] };
+  }
+  mesh(name) {
+    if (this.meshes[name]) return this.meshes[name];
+    const gl = this.gl, G = SHAPES[name].make();
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(G.v), gl.STATIC_DRAW);
+    const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(G.i), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 32, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 32, 12);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 32, 24);
+    let rad = 0; for (let i = 0; i < G.v.length; i += 8) rad = Math.max(rad, Math.hypot(G.v[i], G.v[i + 1], G.v[i + 2]));
+    return (this.meshes[name] = { vao, count: G.i.length, rad });
+  }
+  backdrop(w, hgt, mode) {
+    const gl = this.gl, key = w + 'x' + hgt + mode;
+    if (key === this.bgKey) return; this.bgKey = key;
+    const c = document.createElement('canvas'); c.width = w; c.height = hgt; const x = c.getContext('2d');
+    if (mode === 'checker') {
+      const sz = Math.max(24, Math.round(hgt / 12));
+      for (let j = 0; j * sz < hgt; j++) for (let i = 0; i * sz < w; i++) { x.fillStyle = (i + j) % 2 ? '#d7dbe2' : '#7f8794'; x.fillRect(i * sz, j * sz, sz, sz); }
+      x.fillStyle = '#d6504a'; x.fillRect(0, hgt / 2 - 3, w, 6);
+    } else if (mode === 'sky') {
+      const gr = x.createLinearGradient(0, 0, 0, hgt); gr.addColorStop(0, '#4f8fd6'); gr.addColorStop(.58, '#bfe0f5'); gr.addColorStop(.6, '#7b8f5c'); gr.addColorStop(1, '#3f4d33'); x.fillStyle = gr; x.fillRect(0, 0, w, hgt);
+    } else if (mode === 'light') {
+      const gr = x.createLinearGradient(0, 0, 0, hgt); gr.addColorStop(0, '#eef0f4'); gr.addColorStop(1, '#bfc5d0'); x.fillStyle = gr; x.fillRect(0, 0, w, hgt);
+    } else {
+      const gr = x.createLinearGradient(0, 0, 0, hgt); gr.addColorStop(0, mode === 'dark' ? '#14161b' : '#4b5871'); gr.addColorStop(1, mode === 'dark' ? '#050608' : '#161920'); x.fillStyle = gr; x.fillRect(0, 0, w, hgt);
+      x.strokeStyle = 'rgba(255,255,255,.06)'; x.lineWidth = 1;
+      for (let i = 0; i < w; i += 48) { x.beginPath(); x.moveTo(i + .5, 0); x.lineTo(i + .5, hgt); x.stroke(); }
+      for (let j = 0; j < hgt; j += 48) { x.beginPath(); x.moveTo(0, j + .5); x.lineTo(w, j + .5); x.stroke(); }
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.bgTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+  uniformValue(name, d) {
+    const sc = S.scene;
+    switch (name) {
+      case 'modelMatrix': return d.model; case 'modelViewMatrix': return d.mv; case 'projectionMatrix': return d.proj; case 'normalMatrix': return d.nm; case 'cameraPosition': return d.eye;
+      case 'uTime': return S.time; case 'uSeed': return sc.seed; case 'uReveal': return sc.reveal; case 'uQuality': return sc.quality; case 'uAA': return sc.aa;
+      case 'uGlow': return sc.glow ? [0.7, 0.5, 0.1] : [0, 0, 0]; case 'uBad': return sc.bad ? 1 : 0;
+      case 'uLightDir': return d.ldir; case 'uLightCol': return d.light.col; case 'uAmbSky': return d.light.sky; case 'uAmbGround': return d.light.gnd;
+      case 'uRefrRes': return [this.c.width, this.c.height];
+    }
+    if (name in KNOWN_U) return KNOWN_U[name];
+    const u = S.entry && S.entry.uvals && S.entry.uvals[name];
+    return u;
+  }
+  frame(dt) {
+    const gl = this.gl, c = this.c, sc = S.scene;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.max(2, Math.round(c.clientWidth * dpr)), hh = Math.max(2, Math.round(c.clientHeight * dpr));
+    if (c.width !== w || c.height !== hh) { c.width = w; c.height = hh; }
+    if (sc.anim) S.time += dt * sc.speed;
+    if (sc.auto) this.rot += dt * 0.5;
+    gl.viewport(0, 0, w, hh);
+    gl.clearColor(0.05, 0.06, 0.08, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    this.backdrop(w, hh, sc.bg);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE);
+    gl.useProgram(this.bgProg); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.bgTex);
+    gl.uniform1i(this.bgU.tex, 0); gl.uniform2f(this.bgU.res, w, hh);
+    gl.bindVertexArray(this.emptyVao); gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (!this.prog) return;
+    const mesh = this.mesh(sc.shape);
+    const dist = sc.dist * mesh.rad / 3.2;
+    const eye = [dist * Math.cos(sc.pitch) * Math.sin(sc.yaw), dist * Math.sin(sc.pitch), dist * Math.cos(sc.pitch) * Math.cos(sc.yaw)];
+    const view = M4.look(eye, [0, 0, 0], [0, 1, 0]);
+    const model = M4.rotY(this.rot), mv = M4.mul(view, model);
+    const az = sc.lightAz * Math.PI / 180, el = sc.lightEl * Math.PI / 180;
+    const T = TOD[sc.tod];
+    const d = { model, mv, proj: M4.persp(0.75, w / hh, 0.1, 400), nm: new Float32Array([mv[0], mv[1], mv[2], mv[4], mv[5], mv[6], mv[8], mv[9], mv[10]]), eye, ldir: [Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)], light: T };
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
+    if (this.type === 'transparent') { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); } else { gl.disable(gl.BLEND); gl.depthMask(true); }
+    gl.useProgram(this.prog);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.bgTex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.dummy);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.dummy);
+    for (const u of this.uniforms) {
+      const t = u.type;
+      if (t === gl.SAMPLER_2D) { gl.uniform1i(u.loc, u.name === 'uRefr' ? 0 : u.name === 'uShadowMap' ? 1 : 2); continue; }
+      let v = this.uniformValue(u.name, d);
+      if (v === undefined) continue;
+      if (typeof v === 'boolean') v = v ? 1 : 0;
+      switch (t) {
+        case gl.FLOAT: u.size > 1 ? gl.uniform1fv(u.loc, v) : gl.uniform1f(u.loc, v); break;
+        case gl.FLOAT_VEC2: gl.uniform2fv(u.loc, v); break;
+        case gl.FLOAT_VEC3: gl.uniform3fv(u.loc, v); break;
+        case gl.FLOAT_VEC4: gl.uniform4fv(u.loc, v); break;
+        case gl.INT: case gl.BOOL: u.size > 1 ? gl.uniform1iv(u.loc, v) : gl.uniform1i(u.loc, v | 0); break;
+        case gl.FLOAT_MAT4: gl.uniformMatrix4fv(u.loc, false, v); break;
+        case gl.FLOAT_MAT3: gl.uniformMatrix3fv(u.loc, false, v); break;
+      }
+    }
+    gl.bindVertexArray(mesh.vao);
+    gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0);
+    gl.depthMask(true);
+  }
+}
+Preview.prototype.rot = 0.5;
+
+const pv = new Preview($('#gl'));
+
+// ================================================================= library
+function loadLib() {
+  const defs = Object.entries(window.DEFAULT_SHADER_CODE).map(([name, d]) => ({ name, type: d.type || 'opaque', code: cleanCode(d.code), layout: null, uvals: {}, builtin: true }));
+  defs.forEach(d => S.defaults.set(d.name, d.code));
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { /* ignore */ }
+  let cur = null;
+  if (stored && Array.isArray(stored.lib) && stored.lib.length) {
+    if (stored.prelude && stored.prelude.frag) { S.customPrelude = stored.prelude; setPrelude(stored.prelude.frag, stored.prelude.vs); }
+    S.lib = stored.lib.map(e => ({ name: e.name, type: e.type || 'opaque', code: e.code, layout: e.layout || null, uvals: e.uvals || {}, builtin: S.defaults.has(e.name) }));
+    cur = stored.cur;
+    if (stored.scene) Object.assign(S.scene, stored.scene);
+  } else S.lib = defs;
+  return S.lib.find(e => e.name === cur) || S.lib[0];
+}
+let saveT = 0;
+function saveSoon() { clearTimeout(saveT); saveT = setTimeout(save, 400); }
+function layoutOfGraph() { const m = {}; if (S.g) for (const n of S.g.nodes) if (n.key) m[n.key] = [Math.round(n.x), Math.round(n.y)]; return m; }
+function save() {
+  try {
+    if (S.entry && S.g && !S.noGraph) S.entry.layout = layoutOfGraph();
+    localStorage.setItem(LS_KEY, JSON.stringify({ v: 1, cur: S.entry && S.entry.name, lib: S.lib.map(e => ({ name: e.name, type: e.type, code: e.code, layout: e.layout, uvals: e.uvals })), scene: S.scene, prelude: S.customPrelude }));
+  } catch (e) { /* storage full or blocked */ }
+}
+function toast(msg, ms) {
+  const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.t); toast.t = setTimeout(() => { t.style.display = 'none'; }, ms || 2600);
+}
+function renderLib() {
+  const q = $('#libFilter').value.trim().toLowerCase();
+  const list = $('#libList'); list.textContent = '';
+  for (const e of S.lib) {
+    if (q && !e.name.toLowerCase().includes(q)) continue;
+    const it = h('div', 'libitem' + (e === S.entry ? ' on' : ''));
+    const nm = h('span', '', e.name);
+    const meta = h('small'); meta.textContent = e.type !== 'opaque' ? e.type : '';
+    if (e.builtin && S.defaults.get(e.name) !== e.code) { const m = h('span', 'mod', ' ●'); m.title = 'changed from the default'; nm.append(m); }
+    it.append(nm, meta);
+    it.onclick = () => { if (e !== S.entry) openShader(e); };
+    list.append(it);
+  }
+}
+
+// ================================================================= opening a shader, code <-> graph
+const codeEl = $('#code'), gutter = $('#gutter');
+function updateGutter(errLines) {
+  const n = codeEl.value.split('\n').length, bad = errLines || S.errLines || new Set();
+  let html = '';
+  for (let i = 1; i <= n; i++) html += '<div' + (bad.has(i) ? ' class="err"' : '') + '>' + i + '</div>';
+  gutter.innerHTML = html; gutter.scrollTop = codeEl.scrollTop;
+}
+function ctxFor(globals) {
+  const info = GC.parseTopLevel(globals), sigs = new Map(S.ctx0.sigs);
+  for (const [k, v] of info.sigs) sigs.set(k, (S.ctx0.sigs.get(k) || []).concat(v));
+  return { sigs, vars: Object.assign({}, S.ctx0.vars, info.vars) };
+}
+function showGraphMsg(msg) { const e = $('#graphMsg'); e.style.display = msg ? 'flex' : 'none'; e.textContent = msg || ''; }
+function openShader(entry) {
+  S.entry = entry; S.preview = null; S.undo = []; S.redo = []; S.sel.clear(); S.uSig = '';
+  $('#curName').textContent = entry.name; $('#typeSel').value = entry.type;
+  codeEl.value = entry.code; S.errLines = new Set(); updateGutter();
+  buildGraphFrom(entry.code, entry.layout);
+  render(); fitView(0.5);
+  compile(entry.code);
+  renderLib(); updateUndoBtns(); save();
+}
+function buildGraphFrom(code, layout) {
+  try { S.g = GC.buildGraph(code, S.ctx0, layout); S.noGraph = false; showGraphMsg(null); return true; }
+  catch (e) {
+    S.g = GC.newGraph(); S.g.ctx = ctxFor(''); S.noGraph = true;
+    showGraphMsg('Could not turn this code into nodes: ' + e.message + '\nFix the code on the right; the nodes appear again as soon as it parses.');
+    return false;
+  }
+}
+let genT = 0;
+function changed(structural) {
+  if (structural) render();
+  clearTimeout(genT); genT = setTimeout(regen, 50);
+}
+function regen() {
+  if (S.noGraph) return;
+  S.g._tc = new Map();
+  const r = GC.generate(S.g, { previewId: S.preview });
+  S.entry.code = r.code;
+  const st = codeEl.scrollTop;
+  codeEl.value = r.code; codeEl.scrollTop = st;
+  S.graphErrors = r.errors;
+  compile(r.gpuCode);
+  renderLib(); saveSoon();
+}
+let compT = 0;
+function compileSoon(code) { clearTimeout(compT); compT = setTimeout(() => compile(typeof code === 'function' ? code() : code), 380); }
+function compile(code) {
+  if (!pv.ok) { setStatus('WebGL2 is not available in this browser', true); return; }
+  const res = pv.setShader(S.entry.type, code);
+  const errs = $('#errs'); errs.textContent = '';
+  S.errLines = new Set();
+  if (res.ok) {
+    $('#pvmsg').style.display = 'none';
+    const ok = h('div', 'ok', 'Compiled.'); errs.append(ok);
+    (S.graphErrors || []).forEach(m => { const d = h('div', '', 'graph: ' + m); errs.append(d); });
+    setStatus((S.graphErrors && S.graphErrors.length) ? 'graph problem' : 'compiled', !!(S.graphErrors && S.graphErrors.length));
+    rebuildUniforms();
+  } else {
+    res.errors.forEach(er => {
+      const d = h('div', '', (er.line ? 'line ' + er.line + ': ' : '') + er.msg);
+      if (er.line) { S.errLines.add(er.line); d.onclick = () => gotoLine(er.line); }
+      errs.append(d);
+    });
+    setStatus(res.errors.length + ' error' + (res.errors.length > 1 ? 's' : '') + ' (showing the last good shader)', true);
+  }
+  updateGutter();
+}
+function setStatus(t, bad) { const s = $('#status'); s.textContent = t; s.classList.toggle('err', !!bad); }
+function gotoLine(n) {
+  const lines = codeEl.value.split('\n'); let pos = 0;
+  for (let i = 0; i < n - 1; i++) pos += lines[i].length + 1;
+  codeEl.focus(); codeEl.setSelectionRange(pos, pos + (lines[n - 1] || '').length);
+  codeEl.scrollTop = Math.max(0, (n - 4) * 18);
+}
+let parseT = 0;
+codeEl.addEventListener('input', () => {
+  S.entry.code = codeEl.value; updateGutter();
+  S.preview = null; updateBanner();
+  compileSoon(() => codeEl.value);
+  clearTimeout(parseT); parseT = setTimeout(() => reparse(), 300);
+  renderLib(); saveSoon();
+});
+codeEl.addEventListener('scroll', () => { gutter.scrollTop = codeEl.scrollTop; });
+codeEl.addEventListener('keydown', e => {
+  if (e.key === 'Tab') { e.preventDefault(); const s = codeEl.selectionStart; codeEl.setRangeText('  ', s, codeEl.selectionEnd, 'end'); codeEl.dispatchEvent(new Event('input')); }
+});
+function reparse() {
+  const layout = layoutOfGraph();
+  if (!S.noGraph) pushUndo();
+  const wasEmpty = S.noGraph;
+  if (buildGraphFrom(codeEl.value, wasEmpty ? S.entry.layout : layout)) { S.sel.clear(); render(); if (wasEmpty) fitView(0.5); }
+  else render();
+  updateUndoBtns();
+  if (!S.noGraph) {
+    // GLSL ES 3.00 has no implicit int -> float: `x / 5` is rewritten to `x / 5.0` (and the fix is shown in the code pane)
+    const r = GC.generate(S.g, {});
+    if (r.fixes) {
+      const pos = codeEl.selectionStart, st = codeEl.scrollTop;
+      codeEl.value = r.code; S.entry.code = r.code; codeEl.scrollTop = st; codeEl.setSelectionRange(Math.min(pos, r.code.length), Math.min(pos, r.code.length));
+      updateGutter(); clearTimeout(compT); compile(r.gpuCode);
+      toast('Turned ' + r.fixes + ' whole number' + (r.fixes > 1 ? 's' : '') + ' into floats (1 → 1.0): GLSL does not mix int and float');
+    }
+  }
+}
+$('#bReparse').onclick = () => reparse();
+$('#bCopyCode').onclick = () => { navigator.clipboard && navigator.clipboard.writeText(codeEl.value).then(() => toast('Code copied')); };
+
+// ================================================================= graph editor
+const graphEl = $('#graph'), world = $('#world'), nodesEl = $('#nodes'), wiresEl = $('#wires');
+const TCOL = { float: '#c0c4ce', int: '#5cc8c8', bool: '#e07070', vec2: '#7ed07e', vec3: '#e8c85a', vec4: '#e48ee0', mat2: '#9a8cf0', mat3: '#9a8cf0', mat4: '#9a8cf0', '?': '#7b8497' };
+const tcol = t => TCOL[t] || (/^[iub]vec/.test(t) ? TCOL.int : TCOL['?']);
+const typeOf = (id, port) => GC.outType(S.g, id, port);
+const OPNAME = { '+': 'Add', '-': 'Subtract', '*': 'Multiply', '/': 'Divide', '%': 'Modulo', '<': 'Less than', '>': 'Greater than', '<=': 'Less or equal', '>=': 'Greater or equal', '==': 'Equal', '!=': 'Not equal', '&&': 'And', '||': 'Or', '^^': 'Xor' };
+const nodeById = id => S.g._idx.get(id);
+
+function applyView() {
+  const v = S.view;
+  world.style.transform = 'translate(' + v.x + 'px,' + v.y + 'px) scale(' + v.z + ')';
+  graphEl.style.backgroundSize = 24 * v.z + 'px ' + 24 * v.z + 'px';
+  graphEl.style.backgroundPosition = v.x + 'px ' + v.y + 'px';
+}
+function toWorld(cx, cy) { const r = graphEl.getBoundingClientRect(); return { x: (cx - r.left - S.view.x) / S.view.z, y: (cy - r.top - S.view.y) / S.view.z }; }
+/** Fit everything into the canvas. With minZ the zoom never goes below it (long graphs then start at the left and you pan along). */
+function fitView(minZ) {
+  const ns = S.g.nodes; if (!ns.length) { S.view = { x: 40, y: 40, z: 1 }; applyView(); return; }
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const n of ns) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x + GC.nodeW(n)); y1 = Math.max(y1, n.y + GC.nodeH(n)); }
+  const r = graphEl.getBoundingClientRect(), pad = 50;
+  const fit = Math.min((r.width - pad * 2) / (x1 - x0), (r.height - pad * 2) / (y1 - y0));
+  const z = clamp(fit, minZ || 0.1, 1.1);
+  const x = fit >= z ? (r.width - (x1 - x0) * z) / 2 - x0 * z : pad - x0 * z;
+  S.view = { z, x, y: (r.height - (y1 - y0) * z) / 2 - y0 * z };
+  applyView();
+}
+function pushUndo() {
+  if (!S.g) return;
+  const s = JSON.stringify({ nodes: S.g.nodes, nextId: S.g.nextId, nextOrder: S.g.nextOrder, globals: S.g.globals });
+  if (S.undo[S.undo.length - 1] === s) return;
+  S.undo.push(s); if (S.undo.length > 100) S.undo.shift();
+  S.redo.length = 0; updateUndoBtns();
+}
+function snapNow() { return JSON.stringify({ nodes: S.g.nodes, nextId: S.g.nextId, nextOrder: S.g.nextOrder, globals: S.g.globals }); }
+function restore(s) {
+  const o = JSON.parse(s);
+  S.g.nodes = o.nodes; S.g.nextId = o.nextId; S.g.nextOrder = o.nextOrder; S.g.globals = o.globals; S.g.ctx = ctxFor(o.globals);
+  S.noGraph = false; showGraphMsg(null);
+  const ids = new Set(S.g.nodes.map(n => n.id)); [...S.sel].forEach(i => { if (!ids.has(i)) S.sel.delete(i); });
+  if (S.preview && !ids.has(S.preview)) S.preview = null;
+  render(); regen();
+}
+function undo() { if (!S.undo.length) return; S.redo.push(snapNow()); restore(S.undo.pop()); updateUndoBtns(); }
+function redo() { if (!S.redo.length) return; S.undo.push(snapNow()); restore(S.redo.pop()); updateUndoBtns(); }
+function updateUndoBtns() { $('#bUndo').disabled = !S.undo.length; $('#bRedo').disabled = !S.redo.length; }
+
+function defaultInline(n, idx) {
+  if (n.kind === 'surface') { const p = GC.SURFACE_PORTS.find(x => x.name === n.ins[idx].name); return p ? p.def : ''; }
+  if (n.kind === 'decl') return n.hasInit === false ? '' : GC.defaultFor(n.type);
+  if (n.kind === 'call') { const sig = GC.pickSig(S.g.ctx, n.fn, n.ins.length); if (sig && sig.params.length === n.ins.length) return GC.defaultFor(sig.params[idx].type); const b = GC.BUILTIN[n.fn]; if (b && b.defs && b.defs[idx]) return b.defs[idx]; }
+  if (n.kind === 'fragout') return 'vec4(1.0)';
+  if (n.kind === 'ternary' && idx === 0) return 'true';
+  return '0.0';
+}
+
+function render() {
+  const g = S.g; GC.indexGraph(g);
+  nodesEl.textContent = ''; S.sock = {};
+  const frag = document.createDocumentFragment();
+  for (const n of g.nodes) frag.append(renderNode(n));
+  nodesEl.append(frag);
+  for (const n of g.nodes) measure(n);
+  drawWires(); updateBanner(); applyView();
+}
+function measure(n) {
+  const el = nodesEl.querySelector('.node[data-id="' + n.id + '"]'); if (!el) return;
+  const nr = el.getBoundingClientRect(), z = S.view.z, out = { in: [], out: {}, w: nr.width / z, h: nr.height / z };
+  el.querySelectorAll('.sock').forEach(s => {
+    const r = s.getBoundingClientRect(), p = { x: (r.left + r.width / 2 - nr.left) / z, y: (r.top + r.height / 2 - nr.top) / z };
+    if (s.dataset.dir === 'in') out.in[+s.dataset.port] = p; else out.out[s.dataset.port] = p;
+  });
+  S.sock[n.id] = out;
+}
+function nodeTitle(n) {
+  switch (n.kind) {
+    case 'input': return n.name; case 'decl': return 'Variable'; case 'assign': return 'Set'; case 'op': return OPNAME[n.op] || n.op;
+    case 'unary': return n.op === '-' ? 'Negate' : 'Not'; case 'call': return n.fn; case 'member': return 'Swizzle'; case 'index': return 'Index';
+    case 'ternary': return 'Select  ? :'; case 'vec': return n.type === 'float' ? 'Float' : n.type === 'vec3' ? 'Vec3 / Color' : n.type;
+    case 'raw': return 'Code'; case 'surface': return 'Surface (lit)'; case 'fragout': return 'Fragment output';
+  }
+  return n.kind;
+}
+function fmtNum(v) { let t = (+v.toFixed(4)).toString(); if (!/[.e]/i.test(t)) t += '.0'; return t; }
+function attachScrub(inp, onScrub) {
+  inp.addEventListener('mousedown', e => {
+    if (document.activeElement === inp || e.button !== 0) return;
+    const txt = inp.value.trim();
+    if (!/^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(txt)) return;
+    e.preventDefault(); e.stopPropagation();
+    const v0 = parseFloat(txt), isInt = !/[.e]/i.test(txt), x0 = e.clientX; let moved = false;
+    const mv = ev => {
+      const dx = ev.clientX - x0; if (!moved && Math.abs(dx) < 3) return;
+      if (!moved) { moved = true; pushUndo(); }
+      let v;
+      if (isInt) v = v0 + Math.round(dx / 8);
+      else v = v0 + dx * (ev.shiftKey ? 0.001 : (ev.ctrlKey || ev.metaKey) ? 0.1 : 0.01);
+      inp.value = isInt ? String(v) : fmtNum(v); onScrub(inp.value);
+    };
+    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); if (!moved) { inp.focus(); inp.select(); } };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  });
+}
+function mkSock(n, dir, port, type, connected) {
+  const s = h('span', 'sock ' + dir); s.dataset.node = n.id; s.dataset.dir = dir; s.dataset.port = port;
+  const c = tcol(type); s.style.borderColor = c; if (connected) s.style.background = c;
+  s.title = type && type !== '?' ? type : '';
+  return s;
+}
+function addIn(body, n, i, label, opts) {
+  opts = opts || {};
+  const inp = n.ins[i], r = h('div', 'row in');
+  const srcT = inp.src ? typeOf(inp.src.id, inp.src.port) : '?';
+  r.append(mkSock(n, 'in', i, srcT, !!inp.src), h('span', 'lbl', label));
+  if (!inp.src && !opts.noField) {
+    const f = h('input', 'fld'); f.value = inp.inline || ''; f.placeholder = opts.ph || ''; f.spellcheck = false;
+    f.addEventListener('focus', () => pushUndo());
+    f.addEventListener('input', () => { inp.inline = f.value; changed(); });
+    f.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === 'Escape') f.blur(); });
+    attachScrub(f, v => { inp.inline = v; changed(); });
+    r.append(f);
+  }
+  body.append(r); return r;
+}
+function addOut(body, n, port, label) {
+  const r = h('div', 'row out'); const t = typeOf(n.id, port);
+  r.append(h('span', 'lbl', label || (t !== '?' ? t : 'out')), mkSock(n, 'out', port, t, true));
+  body.append(r);
+}
+function rgbHex(vals) { return '#' + vals.slice(0, 3).map(v => { const x = clamp(Math.round(parseFloat(v) * 255) || 0, 0, 255); return x.toString(16).padStart(2, '0'); }).join(''); }
+function renderNode(n) {
+  const d = h('div', 'node k-' + n.kind); d.dataset.id = n.id;
+  d.style.left = n.x + 'px'; d.style.top = n.y + 'px'; d.style.width = GC.nodeW(n) + 'px';
+  if (S.sel.has(n.id)) d.classList.add('sel'); if (S.preview === n.id) d.classList.add('pv');
+  const head = h('div', 'nh'), title = h('span', 'nt', nodeTitle(n)); head.append(title);
+  if (n.kind !== 'surface' && n.kind !== 'fragout') { const eye = h('span', 'nbtn eye', '◉'); eye.title = 'Preview this node\'s value on the shape (P)'; eye.onclick = () => togglePreview(n.id); head.append(eye); }
+  const x = h('span', 'nbtn', '×'); x.title = 'Delete (Del)'; x.onclick = () => deleteNodes([n.id]); head.append(x);
+  d.append(head);
+  if (n.note) d.append(h('div', 'note', n.note));
+  const body = h('div', 'nb'); d.append(body);
+  const row = (...kids) => { const r = h('div', 'row body'); r.append(...kids); body.append(r); return r; };
+  switch (n.kind) {
+    case 'input': addOut(body, n, 'out'); break;
+    case 'decl': {
+      const sel = h('select'); ['float', 'int', 'bool', 'vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4'].forEach(t => sel.add(new Option(t, t))); sel.value = n.type;
+      sel.onchange = () => { pushUndo(); n.type = sel.value; changed(true); };
+      const nm = h('input', 'tin'); nm.value = n.name; nm.spellcheck = false;
+      nm.onchange = () => { if (!renameVar(n, nm.value.trim())) nm.value = n.name; };
+      row(sel, nm); addOut(body, n, 'out');
+      addIn(body, n, 0, 'value', { ph: 'no value' }); break;
+    }
+    case 'assign': {
+      const tg = h('input', 'tin'); tg.value = n.target; tg.spellcheck = false;
+      tg.title = 'What is assigned to: a variable, or a swizzle like c.rgb';
+      tg.onfocus = () => pushUndo();
+      tg.oninput = () => { n.target = tg.value; const m = /^[A-Za-z_]\w*/.exec(tg.value); if (m) n.name = m[0]; changed(); };
+      const op = h('select'); ['=', '+=', '-=', '*=', '/=', '%='].forEach(o => op.add(new Option(o, o))); op.value = n.op;
+      op.onchange = () => { pushUndo(); n.op = op.value; changed(); };
+      row(tg, op); addOut(body, n, 'out', n.name);
+      n.ins.forEach((inp, i) => addIn(body, n, i, inp.name === 'prev' ? '(previous)' : 'value', inp.name === 'prev' ? { noField: true } : {}));
+      break;
+    }
+    case 'op': addOut(body, n, 'out'); n.ins.forEach((inp, i) => addIn(body, n, i, inp.name.toUpperCase())); break;
+    case 'unary': addOut(body, n, 'out'); addIn(body, n, 0, 'value'); break;
+    case 'member': {
+      const f = h('input', 'tin'); f.value = n.field; f.spellcheck = false; f.title = 'Swizzle: x, xy, rgb, ...';
+      f.onfocus = () => pushUndo(); f.oninput = () => { if (/^[xyzwrgbastpq]{1,4}$/.test(f.value)) { n.field = f.value; changed(); } };
+      f.onchange = () => { f.value = n.field; changed(true); };
+      row(h('span', 'lbl', '.'), f); addOut(body, n, 'out'); addIn(body, n, 0, 'vector'); break;
+    }
+    case 'index': addOut(body, n, 'out'); addIn(body, n, 0, 'array / vector'); addIn(body, n, 1, 'index'); break;
+    case 'ternary': addOut(body, n, 'out'); addIn(body, n, 0, 'condition'); addIn(body, n, 1, 'if true'); addIn(body, n, 2, 'if false'); break;
+    case 'vec': {
+      const vals = h('div', 'vals'), inputs = [];
+      n.vals.forEach((v, i) => {
+        const f = h('input'); f.value = v; f.spellcheck = false; inputs.push(f);
+        f.onfocus = () => pushUndo();
+        f.oninput = () => { n.vals[i] = f.value; if (sw) sw.value = rgbHex(n.vals); changed(); };
+        f.onkeydown = e => { if (e.key === 'Enter') f.blur(); };
+        attachScrub(f, v2 => { n.vals[i] = v2; if (sw) sw.value = rgbHex(n.vals); changed(); });
+        vals.append(f);
+      });
+      let sw = null;
+      const kids = [vals];
+      if (n.type === 'vec3' || n.type === 'vec4') {
+        sw = h('input'); sw.type = 'color'; sw.value = rgbHex(n.vals); sw.title = 'Pick a colour (values above 1.0 are kept until you pick)';
+        sw.onfocus = () => pushUndo();
+        sw.oninput = () => { const hx = sw.value; for (let i = 0; i < 3; i++) { n.vals[i] = fmtNum(parseInt(hx.slice(1 + 2 * i, 3 + 2 * i), 16) / 255); inputs[i].value = n.vals[i]; } changed(); };
+        kids.push(sw);
+      }
+      row(...kids); addOut(body, n, 'out'); break;
+    }
+    case 'call': {
+      addOut(body, n, 'out');
+      n.ins.forEach((inp, i) => addIn(body, n, i, inp.name));
+      if (n.varargs) {
+        const r = h('div', 'row body'); const plus = h('button', 'mini', '+ arg'), minus = h('button', 'mini', '− arg');
+        plus.onclick = () => { pushUndo(); n.ins.push(GC.mkPort('', { inline: '0.0' })); renameArgs(n); changed(true); };
+        minus.onclick = () => { if (n.ins.length > 1) { pushUndo(); n.ins.pop(); renameArgs(n); changed(true); } };
+        r.append(plus, minus); body.append(r);
+      }
+      break;
+    }
+    case 'raw': {
+      const ta = h('textarea'); ta.value = n.text; ta.spellcheck = false; ta.rows = Math.min(12, n.text.split('\n').length + 1); ta.wrap = 'off';
+      ta.onfocus = () => pushUndo();
+      ta.oninput = () => { n.text = ta.value; changed(); clearTimeout(ta._t); ta._t = setTimeout(() => reconcileRaw(n, ta), 500); };
+      ta.onkeydown = e => { if (e.key === 'Tab') { e.preventDefault(); ta.setRangeText('  ', ta.selectionStart, ta.selectionEnd, 'end'); ta.dispatchEvent(new Event('input')); } };
+      const r = h('div', 'row body'); r.append(ta); body.append(r);
+      n.outs.forEach(o => addOut(body, n, o, o));
+      n.ins.forEach((inp, i) => addIn(body, n, i, inp.name, { noField: true }));
+      break;
+    }
+    case 'surface': GC.SURFACE_PORTS.forEach(sp => { const i = n.ins.findIndex(p => p.name === sp.name); if (i >= 0) addIn(body, n, i, sp.label, { ph: sp.def === '' ? 'off' : '' }); }); break;
+    case 'fragout': addIn(body, n, 0, 'vec4 colour'); break;
+  }
+  return d;
+}
+function renameArgs(n) { const names = GC.argNames(S.g.ctx, n.fn, n.ins.length); n.ins.forEach((p, i) => { p.name = names[i]; }); }
+function reconcileRaw(n, ta) {
+  const acc = GC.analyzeRaw(S.g, n.text);
+  const declared = nm => S.g.nodes.some(x => (x.kind === 'decl' || x.kind === 'assign') && x.name === nm);
+  const reads = new Set(acc.reads); acc.writes.forEach(w => { if (declared(w)) reads.add(w); });
+  const sig = [...reads].join(',') + '|' + acc.writes.join(',');
+  if (sig === n.ins.map(i => i.name).join(',') + '|' + n.outs.join(',')) return;
+  const old = new Map(n.ins.map(i => [i.name, i]));
+  n.ins = [...reads].map(r => old.get(r) || GC.mkPort(r, { src: resolveName(r, n.x, n.y) }));
+  n.outs = acc.writes.slice();
+  for (const m of S.g.nodes) m.ins.forEach((inp, i) => { if (inp.src && inp.src.id === n.id && !n.outs.includes(inp.src.port)) { inp.src = null; inp.inline = defaultInline(m, i); } });
+  const pos = ta ? [ta.selectionStart, ta.selectionEnd] : null;
+  changed(true);
+  if (pos) { const t = nodesEl.querySelector('.node[data-id="' + n.id + '"] textarea'); if (t) { t.focus(); t.setSelectionRange(pos[0], pos[1]); } }
+}
+function resolveName(name, nx, ny) {
+  let best = null;
+  for (const n of S.g.nodes) if ((((n.kind === 'decl' || n.kind === 'assign') && n.name === name) || (n.kind === 'raw' && n.outs.includes(name))) && (!best || n.order > best.order)) best = n;
+  if (best) return { id: best.id, port: best.kind === 'raw' ? name : 'out' };
+  let inp = S.g.nodes.find(n => n.kind === 'input' && n.name === name);
+  if (!inp) { inp = GC.mkNode(S.g, 'input', { name, x: (nx || 0) - 220, y: ny || 0, key: 'in:' + name }); GC.indexGraph(S.g); }
+  return { id: inp.id, port: 'out' };
+}
+function renameVar(n, nn) {
+  if (nn === n.name) return true;
+  if (!/^[A-Za-z_]\w*$/.test(nn) || GC.TYPE_NAMES.has(nn) || /^(if|else|for|while|do|return|break|continue|discard|true|false|main|in|out|inout|uniform|const)$/.test(nn)) { toast('"' + nn + '" is not a valid variable name'); return false; }
+  if (S.g.nodes.some(x => x !== n && x.kind === 'decl' && x.name === nn) || S.g.ctx.sigs.has(nn) || (S.g.ctx.vars[nn] && true)) { toast('"' + nn + '" already exists'); return false; }
+  pushUndo();
+  const old = n.name, re = new RegExp('(^|[^.\\w])' + old + '(?![\\w])', 'g'), sub2 = t => t.replace(re, '$1' + nn);
+  for (const m of S.g.nodes) {
+    if (m.kind === 'assign' && m.name === old) { m.name = nn; m.target = nn + m.target.slice(old.length); }
+    if (m.kind === 'raw') { m.text = sub2(m.text); m.ins.forEach(p => { if (p.name === old) p.name = nn; }); m.outs = m.outs.map(o => o === old ? nn : o); m.ins.forEach(p => { if (p.src && p.src.port === old) p.src.port = nn; }); }
+    m.ins.forEach(p => { if (p.inline) p.inline = sub2(p.inline); });
+    if (m.kind === 'vec') m.vals = m.vals.map(sub2);
+  }
+  n.name = nn; changed(true); return true;
+}
+
+// ---- wires
+function outPos(id, port) { const n = nodeById(id), s = S.sock[id]; if (!n || !s || !s.out[port]) return null; return { x: n.x + s.out[port].x, y: n.y + s.out[port].y }; }
+function inPos(id, i) { const n = nodeById(id), s = S.sock[id]; if (!n || !s || !s.in[i]) return null; return { x: n.x + s.in[i].x, y: n.y + s.in[i].y }; }
+function wirePath(a, b) { const dx = Math.max(40, Math.abs(b.x - a.x) * 0.5); return 'M' + a.x + ' ' + a.y + ' C' + (a.x + dx) + ' ' + a.y + ',' + (b.x - dx) + ' ' + b.y + ',' + b.x + ' ' + b.y; }
+function drawWires() {
+  let html = '';
+  for (const n of S.g.nodes) n.ins.forEach((inp, i) => {
+    if (!inp.src) return;
+    const a = outPos(inp.src.id, inp.src.port), b = inPos(n.id, i); if (!a || !b) return;
+    const hl = S.sel.has(n.id) || S.sel.has(inp.src.id);
+    html += '<path class="' + (hl ? 'hl' : '') + '" stroke="' + tcol(typeOf(inp.src.id, inp.src.port)) + '" d="' + wirePath(a, b) + '"/>';
+  });
+  wiresEl.innerHTML = html;
+}
+function updateSelection() {
+  nodesEl.querySelectorAll('.node').forEach(el => el.classList.toggle('sel', S.sel.has(el.dataset.id)));
+  drawWires();
+}
+
+// ---- editing operations
+function deleteNodes(ids) {
+  if (!ids.length) return; pushUndo();
+  const set = new Set(ids);
+  for (const m of S.g.nodes) m.ins.forEach((p, i) => { if (p.src && set.has(p.src.id)) { p.src = null; p.inline = defaultInline(m, i); } });
+  S.g.nodes = S.g.nodes.filter(n => !set.has(n.id));
+  ids.forEach(i => S.sel.delete(i)); if (set.has(S.preview)) S.preview = null;
+  changed(true);
+}
+function connect(from, to, idx) {
+  if (from.id === to) return;
+  if (GC.dependsOn(S.g, from.id, to)) { toast('That would make a loop'); return; }
+  pushUndo();
+  const n = nodeById(to); n.ins[idx].src = { id: from.id, port: from.port }; n.ins[idx].inline = '';
+  changed(true);
+}
+function duplicateSelection() {
+  if (!S.sel.size) return; pushUndo();
+  const map = new Map(), made = [];
+  for (const id of S.sel) {
+    const n = nodeById(id); if (!n) continue;
+    const c = JSON.parse(JSON.stringify(n)); c.id = 'n' + (S.g.nextId++); c.x += 30; c.y += 30; delete c.key;
+    if (c.order !== undefined && c.kind !== 'surface' && c.kind !== 'fragout') c.order = S.g.nextOrder++;
+    if (c.kind === 'surface' || c.kind === 'fragout') continue;
+    if (c.kind === 'decl') { let k = 2; while (S.g.nodes.some(x => x.kind === 'decl' && x.name === n.name + k)) k++; c.name = n.name + k; }
+    map.set(id, c.id); made.push(c);
+  }
+  for (const c of made) c.ins.forEach(p => { if (p.src && map.has(p.src.id)) p.src.id = map.get(p.src.id); });
+  S.g.nodes.push(...made); S.sel = new Set(made.map(c => c.id));
+  changed(true);
+}
+function togglePreview(id) { S.preview = S.preview === id ? null : id; render(); regen(); }
+function updateBanner() {
+  const b = $('#banner');
+  if (S.preview && S.g && S.g._idx.get(S.preview)) { const n = S.g._idx.get(S.preview); b.style.display = 'block'; b.textContent = 'Previewing the value of "' + nodeTitle(n) + (n.name ? ' ' + n.name : '') + '" (unlit). Click to go back to the shader.'; }
+  else { b.style.display = 'none'; S.preview = null; }
+}
+$('#banner').onclick = () => { S.preview = null; render(); regen(); };
+function uniqueName(base) { let k = 1; while (S.g.nodes.some(n => n.kind === 'decl' && n.name === base + k) || S.g.ctx.vars[base + k]) k++; return base + k; }
+
+// ---- add-node menu
+function catalog() {
+  const g = S.g, items = [], add = (cat, name, kind, props) => items.push({ cat, name, kind, props });
+  const P = (name, inline) => GC.mkPort(name, { inline });
+  add('Value', 'Float', 'vec', () => ({ type: 'float', vals: ['1.0'] }));
+  add('Value', 'Vec2', 'vec', () => ({ type: 'vec2', vals: ['0.0', '0.0'] }));
+  add('Value', 'Vec3 / Color', 'vec', () => ({ type: 'vec3', vals: ['0.8', '0.6', '0.4'] }));
+  add('Value', 'Vec4', 'vec', () => ({ type: 'vec4', vals: ['0.0', '0.0', '0.0', '1.0'] }));
+  for (const t of ['float', 'vec2', 'vec3', 'vec4', 'int', 'bool']) add('Variable', 'Variable: ' + t, 'decl', () => ({ type: t, qual: '', hasInit: true, name: uniqueName('v'), ins: [P('value', GC.defaultFor(t))] }));
+  add('Variable', 'Set variable (assign)', 'assign', () => {
+    const d = g.nodes.find(n => n.kind === 'decl'), name = d ? d.name : 'x';
+    return { name, target: name, op: '=', ins: [P('value', '0.0')] };
+  });
+  for (const op of Object.keys(OPNAME)) add('Math', OPNAME[op] + '  ' + op, 'op', () => ({ op, ins: [P('a', '0.0'), P('b', '0.0')] }));
+  add('Math', 'Negate  -x', 'unary', () => ({ op: '-', ins: [P('a', '0.0')] }));
+  add('Math', 'Not  !x', 'unary', () => ({ op: '!', ins: [P('a', 'true')] }));
+  add('Math', 'Select  cond ? a : b', 'ternary', () => ({ ins: [P('cond', 'true'), P('a', '0.0'), P('b', '0.0')] }));
+  add('Math', 'Swizzle  .xyz', 'member', () => ({ field: 'x', ins: [P('a', 'vec3(0.0)')] }));
+  add('Math', 'Index  [i]', 'index', () => ({ ins: [P('a', 'vec3(0.0)'), P('i', '0')] }));
+  const callProps = (fn, n) => () => { const names = GC.argNames(g.ctx, fn, n); const sig = GC.pickSig(g.ctx, fn, n); const b = GC.BUILTIN[fn]; return { fn, varargs: GC.CTORS.has(fn), ins: names.map((nm, i) => P(nm, sig && sig.params.length === n ? GC.defaultFor(sig.params[i].type) : (b && b.defs && b.defs[i]) || (GC.CTORS.has(fn) ? '0.0' : '0.0'))) }; };
+  for (const fn of Object.keys(GC.BUILTIN)) { if (fn === 'texture') continue; add('GLSL function', fn, 'call', callProps(fn, fn === 'atan' ? 2 : GC.BUILTIN[fn].args.length)); }
+  for (const fn of ['vec2', 'vec3', 'vec4', 'float', 'int', 'mat3']) add('GLSL function', fn + '(…)  construct', 'call', callProps(fn, fn === 'vec2' ? 2 : fn === 'vec3' ? 3 : fn === 'vec4' ? 4 : 1));
+  for (const [fn, list] of g.ctx.sigs) { if (fn === 'main') continue; const own = !S.ctx0.sigs.has(fn); add(own ? 'This shader' : 'Prelude (game)', fn, 'call', callProps(fn, list[0].params.length)); }
+  for (const name of Object.keys(g.ctx.vars)) {
+    if (!/^(v[A-Z]\w*|u[A-Z]\w*|g[A-Z]\w*)$/.test(name) || /sampler/.test(g.ctx.vars[name]) || g.ctx.sigs.has(name)) continue;
+    add('Input', name, 'input', () => ({ name, ins: [] }));
+  }
+  add('Input', 'gl_FragCoord', 'input', () => ({ name: 'gl_FragCoord', ins: [] }));
+  add('Output', 'Surface (lit: finish)', 'surface', () => ({ order: 1e9, outs: [], ins: GC.SURFACE_PORTS.map(sp => P(sp.name, sp.def)) }));
+  add('Output', 'Fragment output (vec4)', 'fragout', () => ({ order: 1e9, outs: [], ins: [P('color', 'vec4(1.0)')] }));
+  add('Other', 'Code block (raw GLSL)', 'raw', () => ({ text: '// your code', ins: [], outs: [] }));
+  return items;
+}
+let menuState = null;
+const menuEl = $('#menu'), menuIn = $('#menuIn'), menuList = $('#menuList');
+function openMenu(cx, cy, pending) {
+  const w = toWorld(cx, cy);
+  menuState = { wx: w.x, wy: w.y, pending: pending || null, idx: 0, items: [], all: catalog() };
+  menuEl.style.display = 'block';
+  menuEl.style.left = clamp(cx, 4, innerWidth - 270) + 'px'; menuEl.style.top = clamp(cy, 4, innerHeight - 400) + 'px';
+  menuIn.value = ''; fillMenu(''); menuIn.focus();
+}
+function closeMenu() { menuEl.style.display = 'none'; menuState = null; }
+function fillMenu(q) {
+  q = q.trim().toLowerCase();
+  const words = q.split(/\s+/).filter(Boolean);
+  const items = menuState.all.filter(it => { const hay = (it.name + ' ' + it.cat).toLowerCase(); return words.every(w => hay.includes(w)); });
+  items.sort((a, b) => (q && (b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))) || 0);
+  menuState.items = items.slice(0, 90); menuState.idx = 0;
+  menuList.textContent = '';
+  let cat = null;
+  menuState.items.forEach((it, i) => {
+    if (it.cat !== cat) { cat = it.cat; menuList.append(h('div', 'cat', cat)); }
+    const d = h('div', 'it' + (i === 0 ? ' on' : ''), it.name); d.dataset.i = i;
+    d.onmousedown = e => { e.preventDefault(); pickMenu(i); };
+    menuList.append(d);
+  });
+  if (!menuState.items.length) menuList.append(h('div', 'cat', 'nothing matches'));
+}
+function moveMenu(d) {
+  const els = menuList.querySelectorAll('.it'); if (!els.length) return;
+  els[menuState.idx].classList.remove('on'); menuState.idx = (menuState.idx + d + els.length) % els.length;
+  els[menuState.idx].classList.add('on'); els[menuState.idx].scrollIntoView({ block: 'nearest' });
+}
+function pickMenu(i) {
+  const it = menuState.items[i]; if (!it) return;
+  const st = menuState; closeMenu();
+  if ((it.kind === 'surface' || it.kind === 'fragout') && S.g.nodes.some(n => n.kind === 'surface' || n.kind === 'fragout')) { toast('There is already an output node'); return; }
+  pushUndo();
+  const props = it.props();
+  if (it.kind === 'decl') props.order = S.g.nextOrder++;
+  if (it.kind === 'assign') { props.order = S.g.nextOrder++; const pv2 = resolveName(props.name, st.wx, st.wy); props.ins.unshift(GC.mkPort('prev', { src: pv2 })); }
+  if (it.kind === 'raw') props.order = S.g.nextOrder++;
+  if (it.kind === 'input') { const ex = S.g.nodes.find(n => n.kind === 'input' && n.name === props.name); if (ex) { S.sel = new Set([ex.id]); toast('That input already exists: selected it'); render(); return; } props.key = 'in:' + props.name; }
+  const n = GC.mkNode(S.g, it.kind, Object.assign({ x: Math.round(st.wx), y: Math.round(st.wy) }, props));
+  GC.indexGraph(S.g);
+  if (st.pending) {
+    if (st.pending.from) { const idx = n.ins.findIndex(p => !p.src); if (idx >= 0 && n.kind !== 'input') { n.ins[idx].src = { id: st.pending.from.id, port: st.pending.from.port }; n.ins[idx].inline = ''; } }
+    else if (st.pending.to && n.outs.length) { const t = nodeById(st.pending.to.id); t.ins[st.pending.to.idx].src = { id: n.id, port: n.outs[0] }; t.ins[st.pending.to.idx].inline = ''; }
+  }
+  S.sel = new Set([n.id]); changed(true);
+}
+menuIn.addEventListener('input', () => fillMenu(menuIn.value));
+menuIn.addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); moveMenu(1); } else if (e.key === 'ArrowUp') { e.preventDefault(); moveMenu(-1); }
+  else if (e.key === 'Enter') { e.preventDefault(); pickMenu(menuState.idx); } else if (e.key === 'Escape') closeMenu();
+});
+document.addEventListener('mousedown', e => { if (menuState && !e.target.closest('#menu')) closeMenu(); });
+
+// ---- pointer interaction on the canvas
+let drag = null;
+let mouse = { x: 0, y: 0 };
+graphEl.addEventListener('mousemove', e => { mouse = { x: e.clientX, y: e.clientY }; });
+graphEl.addEventListener('mousedown', e => {
+  const sock = e.target.closest('.sock');
+  if (sock && e.button === 0) { startWire(e, sock); return; }
+  const nodeEl = e.target.closest('.node');
+  if (nodeEl) {
+    if (e.button !== 0 || e.target.closest('input,textarea,select,button,.nbtn')) return;
+    const id = nodeEl.dataset.id;
+    if (e.shiftKey) { if (S.sel.has(id)) S.sel.delete(id); else S.sel.add(id); updateSelection(); return; }
+    if (!S.sel.has(id)) { S.sel = new Set([id]); updateSelection(); }
+    pushUndo();
+    drag = { type: 'node', x0: e.clientX, y0: e.clientY, moved: false, start: [...S.sel].map(i => { const n = nodeById(i); return { n, x: n.x, y: n.y, el: nodesEl.querySelector('.node[data-id="' + i + '"]') }; }), id };
+    e.preventDefault(); return;
+  }
+  if (e.button === 1 || (e.button === 0 && !e.shiftKey)) { drag = { type: 'pan', x0: e.clientX, y0: e.clientY, vx: S.view.x, vy: S.view.y, moved: false }; e.preventDefault(); }
+  else if (e.button === 0 && e.shiftKey) { const r = graphEl.getBoundingClientRect(); drag = { type: 'box', x0: e.clientX - r.left, y0: e.clientY - r.top, base: new Set(S.sel) }; e.preventDefault(); }
+});
+document.addEventListener('mousemove', e => {
+  if (!drag) return;
+  if (drag.type === 'pan') {
+    const dx = e.clientX - drag.x0, dy = e.clientY - drag.y0; if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    S.view.x = drag.vx + dx; S.view.y = drag.vy + dy; applyView();
+  } else if (drag.type === 'node') {
+    const dx = (e.clientX - drag.x0) / S.view.z, dy = (e.clientY - drag.y0) / S.view.z;
+    if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+    for (const s of drag.start) { s.n.x = Math.round(s.x + dx); s.n.y = Math.round(s.y + dy); s.el.style.left = s.n.x + 'px'; s.el.style.top = s.n.y + 'px'; }
+    drawWires();
+  } else if (drag.type === 'box') {
+    const r = graphEl.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, b = $('#boxsel');
+    const l = Math.min(x, drag.x0), t = Math.min(y, drag.y0), w = Math.abs(x - drag.x0), hh = Math.abs(y - drag.y0);
+    b.style.display = 'block'; b.style.left = l + 'px'; b.style.top = t + 'px'; b.style.width = w + 'px'; b.style.height = hh + 'px';
+    const a = { x: (l - S.view.x) / S.view.z, y: (t - S.view.y) / S.view.z }, c = { x: (l + w - S.view.x) / S.view.z, y: (t + hh - S.view.y) / S.view.z };
+    S.sel = new Set(drag.base);
+    for (const n of S.g.nodes) { const sz = S.sock[n.id]; const nw = sz ? sz.w : GC.nodeW(n), nh = sz ? sz.h : GC.nodeH(n); if (n.x < c.x && n.x + nw > a.x && n.y < c.y && n.y + nh > a.y) S.sel.add(n.id); }
+    updateSelection();
+  } else if (drag.type === 'wire') {
+    const w = toWorld(e.clientX, e.clientY);
+    const a = drag.from ? outPos(drag.from.id, drag.from.port) : w, b = drag.from ? w : inPos(drag.to.id, drag.to.idx);
+    if (a && b) drag.path.setAttribute('d', wirePath(a, b));
+  }
+});
+document.addEventListener('mouseup', e => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.type === 'pan' && !d.moved) { S.sel.clear(); updateSelection(); }
+  else if (d.type === 'node') { if (!d.moved && !e.shiftKey) { S.sel = new Set([d.id]); updateSelection(); } else saveSoon(); }
+  else if (d.type === 'box') $('#boxsel').style.display = 'none';
+  else if (d.type === 'wire') {
+    d.path.remove();
+    const el = document.elementFromPoint(e.clientX, e.clientY), s = el && el.closest && el.closest('.sock');
+    if (s && d.from && s.dataset.dir === 'in') connect(d.from, s.dataset.node, +s.dataset.port);
+    else if (s && d.to && s.dataset.dir === 'out') connect({ id: s.dataset.node, port: s.dataset.port }, d.to.id, d.to.idx);
+    else if (!s && el && el.closest && el.closest('#graph') && !el.closest('.node')) openMenu(e.clientX, e.clientY, { from: d.from, to: d.to });
+  }
+});
+function startWire(e, sock) {
+  e.preventDefault(); e.stopPropagation();
+  const n = nodeById(sock.dataset.node); let from = null, to = null;
+  if (sock.dataset.dir === 'out') from = { id: n.id, port: sock.dataset.port };
+  else {
+    const idx = +sock.dataset.port, inp = n.ins[idx];
+    if (inp.src) { pushUndo(); from = { id: inp.src.id, port: inp.src.port }; inp.src = null; inp.inline = defaultInline(n, idx); render(); regen(); }
+    else to = { id: n.id, idx };
+  }
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('class', 'tmp'); path.setAttribute('stroke', '#ffffff'); wiresEl.append(path);
+  drag = { type: 'wire', from, to, path };
+  const w = toWorld(e.clientX, e.clientY), a = from ? outPos(from.id, from.port) : w, b = from ? w : inPos(to.id, to.idx);
+  if (a && b) path.setAttribute('d', wirePath(a, b));
+}
+graphEl.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const s = e.target.closest('.sock');
+  if (s && s.dataset.dir === 'in') { const n = nodeById(s.dataset.node), i = +s.dataset.port; if (n.ins[i].src) { pushUndo(); n.ins[i].src = null; n.ins[i].inline = defaultInline(n, i); changed(true); } return; }
+  if (!e.target.closest('.node')) openMenu(e.clientX, e.clientY);
+});
+graphEl.addEventListener('dblclick', e => { if (!e.target.closest('.node')) openMenu(e.clientX, e.clientY); });
+graphEl.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = graphEl.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top, v = S.view;
+  const nz = clamp(v.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0016)), 0.12, 2.5);
+  v.x = mx - (mx - v.x) * nz / v.z; v.y = my - (my - v.y) * nz / v.z; v.z = nz; applyView();
+}, { passive: false });
+document.addEventListener('keydown', e => {
+  const typing = e.target.closest && e.target.closest('input,textarea,select');
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y' && !typing) { e.preventDefault(); redo(); return; }
+  if (typing) return;
+  if ((e.key === 'Delete' || e.key === 'Backspace') && S.sel.size) { e.preventDefault(); deleteNodes([...S.sel]); }
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelection(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); S.sel = new Set(S.g.nodes.map(n => n.id)); updateSelection(); }
+  else if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.metaKey) fitView();
+  else if (e.key === 'Home') fitView(0.5);
+  else if (e.key.toLowerCase() === 'p' && S.sel.size === 1) togglePreview([...S.sel][0]);
+  else if (e.key === 'A' && e.shiftKey) { e.preventDefault(); openMenu(mouse.x || 400, mouse.y || 300); }
+  else if (e.key === 'Escape') { if (S.preview) togglePreview(S.preview); }
+});
+$('#bUndo').onclick = undo; $('#bRedo').onclick = redo; $('#bFit').onclick = () => fitView();
+$('#bLayout').onclick = () => { pushUndo(); GC.layoutGraph(S.g); render(); fitView(0.5); saveSoon(); };
+$('#bAdd').onclick = () => { const r = graphEl.getBoundingClientRect(); openMenu(r.left + 80, r.top + 80); };
+$('#bCode').onclick = () => { const on = $('#right').classList.toggle('hidden'); $('#rsplit').classList.toggle('hidden', on); $('#bCode').classList.toggle('on', !on); setTimeout(() => { if (S.g) drawWires(); }, 0); };
+$('#typeSel').onchange = () => { S.entry.type = $('#typeSel').value; compile(S.preview ? GC.generate(S.g, { previewId: S.preview }).gpuCode : S.entry.code); renderLib(); saveSoon(); };
+
+// ================================================================= left panel: shapes, scene, uniforms, help, library actions
+function buildShapes() {
+  const bar = $('#shapes'); bar.textContent = '';
+  for (const [k, v] of Object.entries(SHAPES)) {
+    const b = h('button', S.scene.shape === k ? 'on' : '', v.label); b.onclick = () => { S.scene.shape = k; buildShapes(); saveSoon(); };
+    bar.append(b);
+  }
+  bar.append(h('span', 'grow'));
+  const a = h('button', S.scene.auto ? 'on' : '', 'Spin'); a.title = 'Rotate the shape'; a.onclick = () => { S.scene.auto = !S.scene.auto; buildShapes(); };
+  const t = h('button', S.scene.anim ? 'on' : '', 'Time'); t.title = 'Animate uTime'; t.onclick = () => { S.scene.anim = !S.scene.anim; buildShapes(); };
+  bar.append(a, t);
+}
+function ctl(parent, label, make) { const row = h('div', 'field'); row.append(h('label', '', label)); const { el, val } = make(); row.append(el); if (val) row.append(val); else row.append(h('span')); parent.append(row); }
+function slider(parent, label, key, min, max, step, fmt) {
+  ctl(parent, label, () => { const r = h('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = S.scene[key]; const v = h('span', 'v', (fmt || (x => x))(S.scene[key])); r.oninput = () => { S.scene[key] = parseFloat(r.value); v.textContent = (fmt || (x => x))(S.scene[key]); saveSoon(); }; return { el: r, val: v }; });
+}
+function select(parent, label, key, opts, numeric, after) {
+  ctl(parent, label, () => { const s = h('select'); opts.forEach(([v, t]) => s.add(new Option(t, v))); s.value = S.scene[key]; s.onchange = () => { S.scene[key] = numeric ? parseFloat(s.value) : s.value; if (after) after(); saveSoon(); }; return { el: s }; });
+}
+function check(parent, label, key) {
+  ctl(parent, label, () => { const c = h('input'); c.type = 'checkbox'; c.checked = !!S.scene[key]; c.onchange = () => { S.scene[key] = c.checked; saveSoon(); }; return { el: c }; });
+}
+function buildScene() {
+  const p = $('#tab-scene'); p.textContent = '';
+  p.append(h('h4', '', 'Light'));
+  select(p, 'Time of day', 'tod', [['day', 'Day'], ['sunset', 'Sunset'], ['night', 'Night (moon)'], ['overcast', 'Overcast']]);
+  slider(p, 'Sun direction', 'lightAz', -180, 180, 1, x => x + '°');
+  slider(p, 'Sun height', 'lightEl', 0, 90, 1, x => x + '°');
+  p.append(h('h4', '', 'Surface settings the game passes in'));
+  select(p, 'Graphics quality', 'quality', [[0, 'Low (no extra detail)'], [1, 'Medium (roughness maps)'], [2, 'High (+ bump maps)']], true);
+  select(p, 'Texture filtering', 'aa', [[0, 'Off'], [1, 'Trilinear'], [1.5, 'Anisotropic 4x'], [2, 'Anisotropic 16x']], true);
+  ctl(p, 'Random seed', () => { const r = h('input'); r.type = 'range'; r.min = 0; r.max = 1; r.step = 0.001; r.value = S.scene.seed; const b = h('button', '', '🎲'); b.style.padding = '1px 6px'; r.oninput = () => { S.scene.seed = parseFloat(r.value); saveSoon(); }; b.onclick = () => { S.scene.seed = Math.random(); r.value = S.scene.seed; saveSoon(); }; return { el: r, val: b }; });
+  slider(p, 'Reveal (dissolve)', 'reveal', 0, 1, 0.01, x => x.toFixed(2));
+  check(p, 'Held (glow)', 'glow'); check(p, 'Cannot drop (red)', 'bad');
+  p.append(h('h4', '', 'Preview'));
+  select(p, 'Background', 'bg', [['studio', 'Studio'], ['checker', 'Checker (shows refraction)'], ['sky', 'Sky'], ['light', 'Light grey'], ['dark', 'Dark']]);
+  slider(p, 'Time speed', 'speed', 0, 4, 0.05, x => x.toFixed(2) + '×');
+  slider(p, 'Camera distance', 'dist', 5, 30, 0.1, x => x.toFixed(1));
+  p.append(h('div', 'hint', 'The sun and sky colours here are only a stand-in for the game\'s own lighting, so judge colours roughly and use the same time-of-day in the game for final tuning. Drag in the preview to orbit, wheel to zoom, double-click to reset.'));
+}
+function rebuildUniforms() {
+  const gl = pv.gl;
+  const list = pv.uniforms.filter(u => !MANAGED.has(u.name) && u.type !== gl.SAMPLER_2D);
+  const sig = list.map(u => u.name + ':' + u.type).join(',');
+  if (sig === S.uSig) return; S.uSig = sig;
+  const pane = $('#tab-uniforms'); pane.textContent = '';
+  if (!list.length) { pane.append(h('div', 'hint', 'This shader declares no extra uniforms. When you add a line such as "uniform float uAmount;" in the code, a control for it shows up here.')); return; }
+  pane.append(h('div', 'hint', 'Extra uniforms declared by this shader. The game has to provide them too; here you can try values.'));
+  const uv = S.entry.uvals = S.entry.uvals || {};
+  for (const u of list) {
+    const t = u.type, N = { [gl.FLOAT]: 1, [gl.FLOAT_VEC2]: 2, [gl.FLOAT_VEC3]: 3, [gl.FLOAT_VEC4]: 4, [gl.INT]: 1, [gl.BOOL]: 1 }[t];
+    if (!N) continue;
+    if (uv[u.name] === undefined) uv[u.name] = CUSTOM_DEFAULTS[u.name] !== undefined ? CUSTOM_DEFAULTS[u.name] : (t === gl.BOOL ? false : t === gl.INT ? 1 : N === 1 ? 1 : new Array(N).fill(1));
+    const row = h('div', 'field'); row.append(h('label', '', u.name)); row.title = u.name;
+    if (t === gl.BOOL) { const c = h('input'); c.type = 'checkbox'; c.checked = !!uv[u.name]; c.onchange = () => { uv[u.name] = c.checked; saveSoon(); }; row.append(c, h('span')); }
+    else if (N === 1) {
+      const r = h('input'); r.type = 'range'; r.min = t === gl.INT ? 0 : -1; r.max = t === gl.INT ? 10 : 4; r.step = t === gl.INT ? 1 : 0.01; r.value = uv[u.name];
+      const n = h('input'); n.type = 'number'; n.step = t === gl.INT ? 1 : 0.05; n.value = uv[u.name]; n.style.width = '64px';
+      r.oninput = () => { uv[u.name] = parseFloat(r.value); n.value = r.value; saveSoon(); };
+      n.oninput = () => { const x = parseFloat(n.value); if (isFinite(x)) { uv[u.name] = x; r.value = x; saveSoon(); } };
+      row.append(r, n);
+    } else {
+      const box = h('div'); box.style.display = 'flex'; box.style.gap = '3px';
+      const ins = [];
+      for (let i = 0; i < N; i++) { const n = h('input'); n.type = 'number'; n.step = 0.05; n.value = uv[u.name][i]; n.style.width = '100%'; n.oninput = () => { const x = parseFloat(n.value); if (isFinite(x)) { uv[u.name][i] = x; if (cp) cp.value = rgbHex(uv[u.name]); saveSoon(); } }; ins.push(n); box.append(n); }
+      let cp = null;
+      if (N >= 3) { cp = h('input'); cp.type = 'color'; cp.value = rgbHex(uv[u.name]); cp.style.width = '30px'; cp.oninput = () => { for (let i = 0; i < 3; i++) { uv[u.name][i] = +(parseInt(cp.value.slice(1 + 2 * i, 3 + 2 * i), 16) / 255).toFixed(3); ins[i].value = uv[u.name][i]; } saveSoon(); }; }
+      row.append(box, cp || h('span'));
+      row.style.gridTemplateColumns = '110px 1fr auto';
+    }
+    pane.append(row);
+  }
+}
+function buildHelp() {
+  $('#tab-help').innerHTML = `
+  <h4>Working with nodes</h4>
+  <div class="hint"><b>Every statement and operator in your GLSL is a node.</b> Variables (teal) are the named values of main(); wires carry their values. The <b>Surface</b> node at the end collects colour, shine, roughness, blow-out and bump height (the <code>gShine</code>, <code>gRough</code>… assignments and the <code>bumpFromHeight</code> block of the game's shaders).</div>
+  <div class="hint"><b>Add:</b> double-click or right-click the canvas, Shift+A, or drop a wire on empty space to create a node already connected.<br><b>Connect:</b> drag from a socket to a socket. Drag from a connected input to pick the wire up; right-click an input socket to cut it.<br><b>Values:</b> an unconnected input holds a typed value (any GLSL expression). Drag across a number to scrub it (Shift = fine, Ctrl = coarse).<br><b>Preview a node:</b> click ◉ in its header (or select it and press P) to see that value on the shape, unlit. Esc returns.<br><b>Select:</b> click, Shift+click, Shift-drag a box. <b>Delete</b> removes, <b>Ctrl+D</b> duplicates, <b>Ctrl+Z / Ctrl+Shift+Z</b> undo/redo, <b>F</b> fits the view.</div>
+  <h4>Code and nodes stay in sync</h4>
+  <div class="hint">Edit nodes and the code on the right is rewritten. Edit the code and the nodes are rebuilt (positions are kept where the nodes still match). Things that are not simple assignments, such as <code>if</code> or <code>for</code> blocks, become red <b>Code</b> nodes you can edit as text; their inputs and outputs are detected from the text. Helper functions, uniforms and comments before main() stay in the code pane. Comments next to a statement are kept as a note on its node.</div>
+  <h4>Game files</h4>
+  <div class="hint">The shaders that came with this app are your uploaded <code>_shaders.js</code>. Use <b>Import</b> to load a newer one and <b>Download _shaders.js</b> to write the whole library back in the same <code>export const shaderCode = {…}</code> format. <b>Load shaders.js</b> replaces the common prelude (lighting, noise, finish()) with the one from your game, so newly added helper functions show up in the node menu. Shadows and point lights are off in this preview.</div>`;
+}
+$('#libFilter').oninput = renderLib;
+function uniqueShaderName(base) { let n = base, k = 2; while (S.lib.some(e => e.name === n)) n = base + k++; return n; }
+$('#bNew').onclick = () => {
+  const name = prompt('Name of the new shader:', 'myShader'); if (!name) return;
+  const e = { name: uniqueShaderName(name.trim()), type: 'opaque', uvals: {}, layout: null, code: 'void main() {\n  vec3 c = vec3(0.7, 0.5, 0.3);\n  gl_FragColor = finish(c, 1.0);\n}' };
+  S.lib.push(e); openShader(e);
+};
+$('#bDup').onclick = () => { const e = Object.assign({}, S.entry, { name: uniqueShaderName(S.entry.name + 'Copy'), builtin: false, layout: S.entry.layout && Object.assign({}, S.entry.layout), uvals: JSON.parse(JSON.stringify(S.entry.uvals || {})) }); S.lib.push(e); openShader(e); };
+$('#bRen').onclick = () => { const n = prompt('New name:', S.entry.name); if (!n || n === S.entry.name) return; if (S.lib.some(e => e.name === n)) { toast('That name is taken'); return; } S.entry.name = n.trim(); S.entry.builtin = S.defaults.has(S.entry.name); $('#curName').textContent = S.entry.name; renderLib(); save(); };
+$('#bDel').onclick = () => { if (S.lib.length < 2) { toast('Keep at least one shader'); return; } if (!confirm('Delete "' + S.entry.name + '" from the library?')) return; const i = S.lib.indexOf(S.entry); S.lib.splice(i, 1); openShader(S.lib[Math.max(0, i - 1)]); };
+$('#bResetOne').onclick = () => { if (!S.defaults.has(S.entry.name)) { toast('This shader is not one of the defaults'); return; } if (!confirm('Restore "' + S.entry.name + '" to the version that came with the app?')) return; S.entry.code = S.defaults.get(S.entry.name); S.entry.layout = null; S.entry.uvals = {}; openShader(S.entry); };
+$('#bResetLib').onclick = () => { if (!confirm('Throw away all your changes and restore the default library?')) return; localStorage.removeItem(LS_KEY); location.reload(); };
+
+// ---- import / export
+function exportText() {
+  const esc = s => s.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+  if (S.entry && !S.noGraph) regenNow();
+  let out = '// Written by Shader Studio. Every shader of the game: name -> { type?, code }. See the notes at the top of the original _shaders.js.\nexport const shaderCode = {\n';
+  for (const e of S.lib) {
+    out += '  ' + (/^[A-Za-z_$][\w$]*$/.test(e.name) ? e.name : JSON.stringify(e.name)) + ': {\n';
+    if (e.type && e.type !== 'opaque') out += "    type: '" + e.type + "',\n";
+    out += '    code: `\n' + esc(e.code.trim()) + '`,\n  },\n';
+  }
+  return out + '};\n';
+}
+function regenNow() { clearTimeout(genT); const r = GC.generate(S.g, {}); S.entry.code = r.code; }
+const strip = t => t.replace(/\bexport\s+(?=const|let|var|function)/g, '');
+function importText(text, fname) {
+  try {
+    if (/\bconst\s+prelude\s*=/.test(text) && /\bexport\s+const\s+frag\b/.test(text)) {
+      const m = new Function(strip(text) + '\n;return { frag, vertexShader };')();
+      S.customPrelude = { frag: m.frag(''), vs: m.vertexShader };
+      setPrelude(S.customPrelude.frag, S.customPrelude.vs);
+      toast('Loaded the prelude from ' + (fname || 'shaders.js')); openShader(S.entry); return;
+    }
+    const sc = new Function(strip(text) + '\n;return typeof shaderCode !== "undefined" ? shaderCode : null;')();
+    if (!sc || typeof sc !== 'object') throw new Error('no shaderCode object found');
+    let n = 0;
+    for (const [name, d] of Object.entries(sc)) {
+      if (!d || typeof d.code !== 'string') continue;
+      const code = cleanCode(d.code), ex = S.lib.find(e => e.name === name);
+      if (ex) { ex.code = code; ex.type = d.type || 'opaque'; ex.layout = null; } else S.lib.push({ name, type: d.type || 'opaque', code, layout: null, uvals: {}, builtin: S.defaults.has(name) });
+      n++;
+    }
+    toast('Imported ' + n + ' shaders'); openShader(S.lib.find(e => e.name === S.entry.name) || S.lib[0]);
+  } catch (e) { toast('Could not read that file: ' + e.message, 5000); }
+}
+$('#bImport').onclick = () => { $('#file').dataset.mode = 'shaders'; $('#file').click(); };
+$('#bPrelude').onclick = () => { $('#file').dataset.mode = 'prelude'; $('#file').click(); };
+$('#file').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => importText(t, f.name)); e.target.value = ''; };
+$('#bExport').onclick = () => {
+  const blob = new Blob([exportText()], { type: 'text/javascript' }), a = h('a'); a.href = URL.createObjectURL(blob); a.download = '_shaders.js'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast('Downloaded _shaders.js with ' + S.lib.length + ' shaders');
+};
+$('#bCopyAll').onclick = () => { const t = exportText(); if (navigator.clipboard) navigator.clipboard.writeText(t).then(() => toast('Copied ' + S.lib.length + ' shaders as text'), () => toast('Clipboard blocked: use Download instead')); };
+let dragDepth = 0;
+addEventListener('dragenter', e => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { dragDepth++; $('#dropzone').style.display = 'flex'; } });
+addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $('#dropzone').style.display = 'none'; });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; $('#dropzone').style.display = 'none'; const f = e.dataTransfer.files[0]; if (f) f.text().then(t => importText(t, f.name)); });
+
+// ---- tabs, splitters, preview orbit
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === 'tab-' + b.dataset.tab));
+});
+function splitter(id, varName, dir, min, max) {
+  $(id).addEventListener('mousedown', e => {
+    e.preventDefault(); const x0 = e.clientX, w0 = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(varName));
+    const mv = ev => { document.documentElement.style.setProperty(varName, clamp(w0 + dir * (ev.clientX - x0), min, max) + 'px'); };
+    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); if (S.g) drawWires(); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  });
+}
+splitter('#lsplit', '--left', 1, 260, 800); splitter('#rsplit', '--right', -1, 240, 900);
+(function orbit() {
+  const c = $('#gl'); let d = null;
+  c.addEventListener('mousedown', e => { d = { x: e.clientX, y: e.clientY }; });
+  addEventListener('mouseup', () => { d = null; });
+  addEventListener('mousemove', e => { if (!d) return; S.scene.yaw -= (e.clientX - d.x) * 0.008; S.scene.pitch = clamp(S.scene.pitch + (e.clientY - d.y) * 0.008, -1.45, 1.45); d = { x: e.clientX, y: e.clientY }; });
+  c.addEventListener('wheel', e => { e.preventDefault(); S.scene.dist = clamp(S.scene.dist * Math.exp(e.deltaY * 0.001), 5, 30); buildScene(); }, { passive: false });
+  c.addEventListener('dblclick', () => { Object.assign(S.scene, { yaw: 0.55, pitch: 0.3, dist: 11 }); buildScene(); });
+})();
+
+// ================================================================= start
+function frameLoop() {
+  let last = performance.now();
+  const tick = now => {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (pv.ok) { try { pv.frame(dt); } catch (e) { console.error(e); } }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+function start() {
+  const entry = loadLib();
+  buildShapes(); buildScene(); buildHelp(); renderLib();
+  if (!pv.ok) { const m = $('#pvmsg'); m.style.display = 'flex'; m.textContent = 'This browser has no WebGL2, so the preview cannot run. The node editor and code still work.'; }
+  openShader(entry);
+  frameLoop();
+  addEventListener('beforeunload', save);
+  addEventListener('resize', () => { if (S.g) drawWires(); });
+}
+window.__studio = { S, GC, pv };
+start();
+})();
+</script>
+</body>
+</html>

@@ -862,6 +862,7 @@ export function validateDefinitions(defs, extra = {}) {
     if (!isNum(m.weight ?? 10)) err(`material ${k}: weight is not a number`);
     if (m.floatLevel !== undefined && !(m.floatLevel > 0 && m.floatLevel <= 1)) err(`material ${k}: floatLevel must be above 0 and at most 1`);
     if (m.stackLimit !== undefined && !(Number.isInteger(m.stackLimit) && m.stackLimit >= 0 && m.stackLimit <= 20)) err(`material ${k}: stackLimit must be a whole number from 0 to 20`);
+    if (m.explodesWith && !mats[m.explodesWith]) err(`material ${k}: explodesWith "${m.explodesWith}" is not a material`);
     shaderOk(m.shader, `material ${k}`);
   }
 

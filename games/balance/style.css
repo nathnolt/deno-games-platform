@@ -314,3 +314,6 @@ button.bb-card:disabled { opacity: .6; cursor: default; }
 .bb-gfx-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .22rem 0; }
 .bb-gfx-row select { max-width: 9rem; }
 .bb-gfx-hint { margin-top: .4rem; color: #94a3b8; font-size: 12px; }
+
+/* the flash of the whole screen when fuel and oxidizer explode */
+.bb-boom { position: absolute; inset: 0; z-index: 30; pointer-events: none; background: radial-gradient(circle, rgba(255,250,225,0.85), rgba(255,170,60,0.45) 60%, rgba(255,90,20,0.25)); opacity: 0.9; transition: opacity 0.55s ease-out; }

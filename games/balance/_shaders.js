@@ -431,4 +431,47 @@ void main() {
   gl_FragColor = finish(c, 1.0);
 }`,
   },
+  fuel: {
+    code: `
+// FUEL: a volatile, glowing orange-red liquid that boils and flickers, with warning stripes. It meets the oxidizer (blue-white) and both explode.
+void main() {
+  vec2 p = vP * 0.7 + uSeed * 13.0;
+  float t = uTime * 0.35;
+  float n = fbm(p * 1.3 + vec2(t, -t * 0.6));
+  float n2 = fbm(p * 2.6 - vec2(t * 0.8, t * 0.3) + n * 1.5);           // the boiling
+  float heat = smoothstep(0.2, 0.6, n2) * 0.8 + 0.2 * smoothstep(0.3, 0.9, n); // (a lot of the surface is hot)
+  vec3 c = mix(vec3(0.42, 0.06, 0.03), vec3(0.95, 0.2, 0.04), heat);
+  c = mix(c, vec3(1.0, 0.62, 0.12), smoothstep(0.55, 0.9, heat));
+  float stripe = step(0.5, fract((vP.x + vP.y) * 0.32));                    // diagonal warning stripes (dark / bright)
+  c *= 0.72 + 0.28 * stripe;
+  float pulse = 0.85 + 0.15 * sin(uTime * 3.2 + n * 6.0);
+  gShine = 0.25;
+  gRough = 0.45;
+  vec4 o = finish(c, 1.0);
+  o.rgb += vec3(1.0, 0.4, 0.08) * (0.25 + 0.6 * heat) * pulse;                // it glows
+  gl_FragColor = o;
+}`,
+  },
+  oxidizer: {
+    code: `
+// OXIDIZER: an icy blue-white crystal with electric cracks that flicker. Next to the fuel (orange-red) it is unmistakable: they explode when they touch.
+void main() {
+  vec2 p = vP * 0.9 + uSeed * 7.0;
+  float n = fbm(p * 2.0 + uTime * 0.12);
+  float ridges = 1.0 - abs(2.0 * fbm(p * 3.4 + 3.0) - 1.0);              // thin lines where a noise crosses its middle
+  float flick = 0.55 + 0.45 * sin(uTime * 7.0 + n * 12.0);
+  float arc = smoothstep(0.9, 1.0, ridges) * flick;
+  vec3 c = mix(vec3(0.03, 0.16, 0.30), vec3(0.12, 0.58, 0.85), n);
+  c = mix(c, vec3(0.8, 0.97, 1.0), smoothstep(0.62, 0.9, n) * 0.5);        // pale, frosty patches
+  float stripe = step(0.5, fract((vP.x - vP.y) * 0.32));                   // warning stripes, the other way round than the fuel
+  c *= 0.72 + 0.28 * stripe;
+  c += vec3(0.5, 0.9, 1.0) * arc;
+  float pulse = 0.85 + 0.15 * sin(uTime * 2.6 + n * 5.0);
+  gShine = 0.7;
+  gRough = 0.25;
+  vec4 o = finish(c, 1.0);
+  o.rgb += vec3(0.15, 0.6, 1.0) * (0.2 + 0.7 * arc) * pulse;                  // it glows
+  gl_FragColor = o;
+}`,
+  },
 };
