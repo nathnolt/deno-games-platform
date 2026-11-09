@@ -24,7 +24,7 @@ function loadStyles() {
 
 const SEND_GAP = 33; //          ms between move messages (~30 per second)
 const ROTATE_STEP = 45; //       a held block turns in steps of this many degrees (Q / E, or the mouse wheel)
-const BOWL_SEGS = 72;
+const BOWL_SEGS = 48; // points along the profile of the bowl (the turned shape); it is turned in LATHE_SEGS steps
 const SHADOW_NEAR = 60; //       the light camera looks at the table from 200 away
 const SHADOW_FAR = 340;
 const LAMP = ['#22c55e', '#f97316', '#ef4444']; // lamp on a fragile block: nothing on it, something on it, at its limit
@@ -45,9 +45,9 @@ const NO_BUILD_LINE = 0.12; // world units: the thickness of the red line around
 const GFX_STORE = 'balance.gfx'; // localStorage: the graphics settings
 /** Graphics presets. filter: 0 = off, 1 = trilinear, 2 = anisotropic 4x, 3 = anisotropic 16x (sampled textures and the smoothing of fine procedural patterns at steep angles); detail: 0 = flat surfaces, 1 = roughness maps, 2 = roughness and bump maps; scale = the share of the screen's pixels that is drawn. */
 const GFX_PRESETS = {
-  low: { detail: 0, filter: 0, shadows: false, reflection: false, blur: false, refraction: false, scale: 0.6 },
-  medium: { detail: 1, filter: 1, shadows: true, reflection: true, blur: true, refraction: true, scale: 0.85 },
-  high: { detail: 2, filter: 3, shadows: true, reflection: true, blur: true, refraction: true, scale: 1 },
+  low: { detail: 0, filter: 0, shadows: false, reflection: false, blur: false, refraction: false, scale: 0.6, shadowSize: 1024 },
+  medium: { detail: 1, filter: 1, shadows: true, reflection: true, blur: true, refraction: true, scale: 0.85, shadowSize: 2048 },
+  high: { detail: 2, filter: 3, shadows: true, reflection: true, blur: true, refraction: true, scale: 1, shadowSize: 4096 }, // shadowSize: the biggest shadow map this setting allows (a background asks for 2048 by default)
 };
 const STORE = 'balance.done'; // localStorage: the completed levels (world|name)
 const copyOf = (v) => JSON.parse(JSON.stringify(v));
@@ -435,6 +435,7 @@ function noiseTexture() {
  * time it is needed, and drawn again after material.userData.rebake() when a setting changed.
  *   spec = { code, fragment (the source of the baking pass), vertex (its vertex shader) }
  */
+const bakeEntries = new Set(); // every baked picture that exists (for the profiler)
 const bakePrograms = new Map(); // fragment source -> { scene, mat }  (one program per shader)
 const bakeCaches = new WeakMap(); // renderer -> Map(key -> { rt, refs })
 function attachBake(mat, spec, list) {
@@ -449,7 +450,7 @@ function attachBake(mat, spec, list) {
   const release = (renderer, key) => {
     const cache = bakeCaches.get(renderer);
     const e = cache?.get(key);
-    if (e && --e.refs <= 0) { e.rt.dispose(); cache.delete(key); }
+    if (e && --e.refs <= 0) { e.rt.dispose(); cache.delete(key); bakeEntries.delete(e); }
   };
   mat.userData.rebake = () => { version++; };
   mat.onBeforeRender = (renderer) => {
@@ -467,6 +468,7 @@ function attachBake(mat, spec, list) {
             anisotropy: Math.min(8, renderer.capabilities.getMaxAnisotropy()),
           });
           e = { rt, refs: 0 };
+          bakeEntries.add(e);
           cache.set(key, e);
           let prog = bakePrograms.get(spec.fragment);
           if (!prog) {
@@ -718,7 +720,7 @@ class BalanceView {
     uShadowMap: { value: null },
     uShadowMat: { value: new THREE.Matrix4() },
     uShadowStr: { value: 0 },
-    uShadowTexel: { value: new THREE.Vector2(1 / 4096, 1 / 4096) },
+    uShadowTexel: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
     uShadowRange: { value: 170 },
     uShadowDepth: { value: SHADOW_FAR - SHADOW_NEAR },
     uShadowR: { value: new THREE.Vector3(1, 0, 0) },
@@ -768,6 +770,8 @@ class BalanceView {
   sceneSig = null;
   groundY = -9; //           top of the table (set from the bowl of the level)
   bowlDef = null;
+  onStatsClosed = null; //    set by the debug menu: the profiler window was closed with its own button
+  stats = null; //            the performance overlay (debugStats), or null
   waterBlockMats = new Set(); // the 'waterBlock' blocks that are drawn with the water shader of the bowl
   blockMats = new Set(); //    the materials of blocks whose shader has settings (debugLiveBlocks changes them while a slider is dragged)
   waterSel = null; //   { shader, params } of the water of the background that is shown
@@ -1359,7 +1363,7 @@ class BalanceView {
   debugLiveBlocks(defs) {
     this.debugLiveWater(defs); // (water blocks)
     for (const m of this.blockMats) {
-      const params = defs?.materials?.[m.userData.materialKey]?.shaderParams ?? {};
+      const params = (m.userData.materialKey === '@table' ? defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.box?.shaderParams : defs?.materials?.[m.userData.materialKey]?.shaderParams) ?? {}; // ('@table' = the table of the background)
       for (const p of m.userData.blockParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
       m.userData.rebake?.(); // (a baked picture may depend on the settings; the same settings share one picture)
     }
@@ -1530,6 +1534,210 @@ class BalanceView {
         renderer.forceContextLoss?.(); // (a browser only allows about 16 WebGL contexts and takes the OLDEST away: a closed window must give its own back)
       },
     };
+  }
+
+  /**
+   * Debug: the performance overlay (top left of the page). `o` = { fps, calls, memory, gpu, passes } (each true / false; all false = the overlay is gone):
+   *   fps      frames per second and the time a frame takes (and how much of it is spent in the drawing code of the page)
+   *   calls    draw calls and triangles of the whole frame (all passes together)
+   *   memory   what three.js keeps: geometries, textures, shader programs
+   *   gpu      the time the GPU needs for the drawing (only on browsers that offer EXT_disjoint_timer_query_webgl2)
+   *   passes   every pass of the frame (shadow map, reflection, background, glass, bakes ...): its target, draw calls, triangles and time
+   */
+  debugStats(o) {
+    const on = !!o && Object.values(o).some(Boolean);
+    const r = this.renderer;
+    if (!on) {
+      if (this.stats) {
+        r.render = this.stats.render;
+        THREE.Object3D.prototype.onBeforeRender = this.stats.hook;
+        r.info.autoReset = true;
+        this.stats.el.remove();
+        this.stats.win?.remove();
+        this.stats = null;
+      }
+      return;
+    }
+    if (!this.stats) {
+      const el = document.createElement('pre');
+      el.style.cssText = 'position:fixed;left:6px;top:6px;z-index:99999;margin:0;padding:6px 8px;border-radius:6px;background:rgba(10,14,24,.78);color:#cfe8ff;font:11px/1.35 ui-monospace,Consolas,monospace;pointer-events:none;white-space:pre;max-width:46ch';
+      document.body.append(el);
+      const s = { el, render: r.render, hook: THREE.Object3D.prototype.onBeforeRender, passes: [], frames: 0, t0: performance.now(), fps: 0, ms: 0, cpu: 0, last: performance.now(), shown: 0, frameCalls: 0, frameTris: 0, gpuMs: null, query: null, ext: null, opts: o, win: null, curPass: '', seq: 0, frame: { obj: new Map(), mat: new Map(), pass: new Map(), kind: new Map(), pk: new Map() }, smooth: { obj: new Map(), mat: new Map(), pass: new Map(), kind: new Map(), pk: new Map() }, tab: 'obj' };
+      s.ext = r.getContext().getExtension?.('EXT_disjoint_timer_query_webgl2') ?? null;
+      r.info.autoReset = false; // (the game draws several times per frame: count them all, and start again every frame ourselves)
+      const orig = r.render;
+      r.render = (scene, camera) => { // note every pass
+        const info = r.info.render;
+        const c0 = info.calls;
+        const t0 = info.triangles;
+        const a = performance.now();
+        const rt = r.getRenderTarget();
+        const prev = s.curPass;
+        s.curPass = `${++s.seq} ${rt ? `${rt.width}x${rt.height}` : 'screen'}`; // (draw calls made while this runs belong to this pass)
+        try { orig.call(r, scene, camera); } finally { s.curPass = prev; }
+        s.passes.push({ target: rt ? `${rt.width}x${rt.height}` : 'screen', calls: info.calls - c0, tris: info.triangles - t0, ms: performance.now() - a });
+      };
+      const nameOf = (obj) => { // the first name on the way up: a block, a model, the bowl, the table ...
+        for (let p = obj; p; p = p.parent) if (p.name) return p.name;
+        return obj.isSprite ? 'sprite' : `unnamed ${obj.geometry?.type ?? obj.type}`;
+      };
+      const add = (map, key, tris, id) => {
+        const e = map.get(key) ?? { calls: 0, tris: 0, ids: new Set() };
+        e.calls++;
+        e.tris += tris;
+        e.ids.add(id); // (how many different meshes: a block made of three parts is three)
+        map.set(key, e);
+      };
+      THREE.Object3D.prototype.onBeforeRender = function (renderer, scene, camera, geometry, material) { // (three.js calls this once for every draw call, and once per render for the scene itself: that one is no draw call)
+        if (this.isScene || !geometry) return;
+        const tris = geometry ? (geometry.index ? geometry.index.count : geometry.attributes?.position?.count ?? 0) / 3 : 0;
+        const label = nameOf(this);
+        const kind = label.split(' ')[0];
+        add(s.frame.obj, label, tris, this.id);
+        add(s.frame.kind, kind, tris, this.id);
+        add(s.frame.mat, material?.userData?.label ?? `${material?.type ?? '?'} of ${label}`, tris, this.id);
+        add(s.frame.pass, s.curPass || '?', tris, this.id);
+        add(s.frame.pk, `${s.curPass || '?'}  ${kind}`, tris, this.id);
+      };
+      this.stats = s;
+    }
+    const s = this.stats;
+    s.opts = o;
+    if (o.window && !s.win) this.#statsWindow(s);
+    else if (!o.window && s.win) { s.win.remove(); s.win = null; }
+  }
+
+  /** The draggable window of the draw call profiler: where the draw calls of a frame come from (objects, kinds of objects, materials, passes). */
+  #statsWindow(s) {
+    const win = document.createElement('div');
+    win.style.cssText = 'position:fixed;left:40px;top:110px;width:460px;height:340px;min-width:260px;min-height:140px;z-index:99998;display:flex;flex-direction:column;resize:both;overflow:hidden;background:rgba(14,19,32,.94);color:#d7e6ff;border:1px solid #3a4870;border-radius:8px;font:11px/1.4 ui-monospace,Consolas,monospace;box-shadow:0 6px 24px rgba(0,0,0,.4)';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 6px;background:#243050;cursor:move;user-select:none;touch-action:none';
+    const title = document.createElement('strong');
+    title.textContent = 'Draw calls';
+    title.style.flex = '1';
+    bar.append(title);
+    const tabs = { obj: 'objects', kind: 'kinds', mat: 'materials', pass: 'passes', pk: 'pass x kind', tg: 'targets' };
+    const body = document.createElement('pre');
+    body.style.cssText = 'margin:0;padding:6px 8px;overflow:auto;flex:1;white-space:pre';
+    const btns = {};
+    for (const [key, label] of Object.entries(tabs)) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'font:inherit;padding:1px 7px;border-radius:4px;border:1px solid #4a5a88;background:#1a2340;color:inherit;cursor:pointer';
+      b.onclick = () => { s.tab = key; s.shown = 0; for (const [k2, b2] of Object.entries(btns)) b2.style.background = k2 === key ? '#3b5bb5' : '#1a2340'; };
+      btns[key] = b;
+      bar.append(b);
+    }
+    btns[s.tab].style.background = '#3b5bb5';
+    const close = document.createElement('button');
+    close.textContent = '×';
+    close.style.cssText = 'font:inherit;border:0;background:none;color:inherit;cursor:pointer;font-size:14px';
+    close.onclick = () => { s.opts.window = false; this.onStatsClosed?.(); this.debugStats(s.opts); };
+    bar.append(close);
+    let drag = null;
+    bar.addEventListener('pointerdown', (e) => { if (e.target.tagName === 'BUTTON') return; drag = { x: e.clientX - win.offsetLeft, y: e.clientY - win.offsetTop }; bar.setPointerCapture(e.pointerId); });
+    bar.addEventListener('pointermove', (e) => { if (!drag) return; win.style.left = `${Math.max(0, e.clientX - drag.x)}px`; win.style.top = `${Math.max(0, e.clientY - drag.y)}px`; });
+    bar.addEventListener('pointerup', () => { drag = null; });
+    win.append(bar, body);
+    win.body = body;
+    document.body.append(win);
+    s.win = win;
+  }
+
+  /** Every render target the game keeps (shadow map, reflection, blur, glass, baked pictures) and the memory it takes, estimated. */
+  #targetsReport() {
+    const list = [];
+    const seen = new Set();
+    const walk = (v, name, depth) => {
+      if (!v || typeof v !== 'object' || seen.has(v) || depth > 3) return;
+      seen.add(v);
+      if (v.isWebGLRenderTarget) { list.push([name, v]); return; }
+      for (const [k2, v2] of Object.entries(v)) walk(v2, `${name}.${k2}`, depth + 1);
+    };
+    for (const [key, v] of Object.entries(this.fx ?? {})) walk(v, key, 0);
+    for (const e of bakeEntries) list.push([`baked picture`, e.rt]);
+    const bytesOf = (t) => ({ [THREE.HalfFloatType]: 8, [THREE.FloatType]: 16 }[t?.type] ?? 4);
+    let total = 0;
+    const lines = ['render targets (memory is an estimate)', '        size   MB  name'];
+    for (const [name, rt] of list) {
+      const mips = rt.texture?.generateMipmaps ? 1.34 : 1;
+      const mb = (rt.width * rt.height * (bytesOf(rt.texture) * mips + (rt.depthBuffer || rt.depthTexture ? 4 : 0))) / 1048576;
+      total += mb;
+      lines.push(`${`${rt.width}x${rt.height}`.padStart(12)} ${mb.toFixed(1).padStart(4)}  ${name}${rt.depthTexture ? ' (+ depth texture)' : ''}`);
+    }
+    lines.push(`total about ${total.toFixed(0)} MB, plus the textures and geometries (see Memory)`);
+    return lines.join('\n');
+  }
+
+  #statsBegin(now) {
+    const s = this.stats;
+    s.ms += (now - s.last - s.ms) * 0.1; // (smoothed time between frames)
+    s.last = now;
+    this.renderer.info.reset();
+    s.passes = [];
+    s.seq = 0;
+    for (const m of Object.values(s.frame)) m.clear();
+    s.renderStart = now;
+    const gl = this.renderer.getContext();
+    if (s.opts.gpu && s.ext && !s.query) { s.query = gl.createQuery(); gl.beginQuery(s.ext.TIME_ELAPSED_EXT, s.query); s.querying = true; }
+  }
+
+  #statsEnd() {
+    const s = this.stats;
+    const now = performance.now();
+    const gl = this.renderer.getContext();
+    if (s.querying) { gl.endQuery(s.ext.TIME_ELAPSED_EXT); s.querying = false; }
+    if (s.query && !s.querying && gl.getQueryParameter(s.query, gl.QUERY_RESULT_AVAILABLE)) {
+      if (!gl.getParameter(s.ext.GPU_DISJOINT_EXT)) s.gpuMs = gl.getQueryParameter(s.query, gl.QUERY_RESULT) / 1e6;
+      gl.deleteQuery(s.query);
+      s.query = null;
+    }
+    s.cpu += (now - s.renderStart - s.cpu) * 0.1;
+    if (s.win) { // the draw calls of this frame, smoothed over a few frames
+      for (const name of Object.keys(s.frame)) {
+        const sm = s.smooth[name];
+        for (const [key, e] of s.frame[name]) {
+          const cur = sm.get(key) ?? { calls: e.calls, tris: e.tris, meshes: e.ids.size };
+          cur.calls += (e.calls - cur.calls) * 0.15;
+          cur.tris += (e.tris - cur.tris) * 0.15;
+          cur.meshes = e.ids.size;
+          sm.set(key, cur);
+        }
+        for (const [key, cur] of sm) if (!s.frame[name].has(key)) { cur.calls *= 0.85; cur.tris *= 0.85; if (cur.calls < 0.05) sm.delete(key); }
+      }
+    }
+    const info = this.renderer.info;
+    s.frameCalls = info.render.calls;
+    s.frameTris = info.render.triangles;
+    if (now - s.shown < 250) return;
+    s.shown = now;
+    const o = s.opts;
+    const L = [];
+    if (o.fps) L.push(`${(1000 / Math.max(0.1, s.ms)).toFixed(0)} fps   frame ${s.ms.toFixed(1)} ms   drawing code ${s.cpu.toFixed(1)} ms`);
+    if (o.gpu) L.push(s.ext ? `GPU ${s.gpuMs === null ? '...' : `${s.gpuMs.toFixed(1)} ms`}` : 'GPU timer: not offered by this browser');
+    if (o.calls) L.push(`draw calls ${s.frameCalls}   triangles ${s.frameTris.toLocaleString()}   lines/points ${info.render.lines + info.render.points}`);
+    if (o.memory) L.push(`geometries ${info.memory.geometries}   textures ${info.memory.textures}   programs ${info.programs?.length ?? '?'}`);
+    if (o.passes) {
+      L.push('passes:');
+      s.passes.slice(0, 14).forEach((p, i) => L.push(` ${String(i + 1).padStart(2)} ${p.target.padEnd(10)} ${String(p.calls).padStart(4)} calls ${String(p.tris).padStart(8)} tri ${p.ms.toFixed(1).padStart(5)} ms`));
+      if (s.passes.length > 14) L.push(` ... ${s.passes.length - 14} more`);
+    }
+    s.el.style.display = L.length ? '' : 'none';
+    s.el.textContent = L.join('\n');
+    if (s.win) {
+      if (s.tab === 'tg') {
+        s.win.body.textContent = this.#targetsReport();
+      } else {
+        const rows = [...s.smooth[s.tab]].sort((a, b) => b[1].calls - a[1].calls);
+        const total = rows.reduce((t, [, e]) => t + e.calls, 0) || 1;
+        const what = { obj: 'object', kind: 'kind of object', mat: 'material / shader', pass: 'pass (number, target)', pk: 'pass, kind of object' }[s.tab];
+        const lines = [`per frame: ${s.frameCalls} draw calls, ${s.frameTris.toLocaleString()} triangles (sorted by draw calls)`, ` calls    %  meshes  tri/call  ${what}`];
+        for (const [key, e] of rows.slice(0, 60)) lines.push(`${e.calls.toFixed(1).padStart(6)} ${(100 * e.calls / total).toFixed(0).padStart(4)}% ${String(e.meshes ?? '').padStart(6)} ${Math.round(e.tris / Math.max(0.01, e.calls)).toLocaleString().padStart(9)}  ${key}`);
+        if (rows.length > 60) lines.push(`... ${rows.length - 60} more`);
+        s.win.body.textContent = lines.join('\n');
+      }
+    }
   }
 
   /** Debug: switch one visual effect ('shadows', 'reflection', 'blur', 'refraction') off or on (it also comes back on after it had failed). */
@@ -1783,6 +1991,7 @@ class BalanceView {
     this.floorMesh = null;
     if (bg.ground?.style !== 'none') { // ('no floor': just the sky colour behind the table)
       const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), (this.floorMat = this.#floorMaterial(bg, fog)));
+      floor.name = 'floor';
       floor.rotation.x = -Math.PI / 2;
       floor.position.y = floorY;
       floor.userData.blurLevel = blurLevelOf(bg.ground?.blur);
@@ -1795,7 +2004,8 @@ class BalanceView {
       this.#addModel(main, bg.table, token, floorY, fog, TABLE_INDEX); // a model instead of the plain box
     } else {
       const th = Math.max(bowlH, 0.05);
-      const table = new THREE.Mesh(new THREE.BoxGeometry(bg.box.w, th, bg.box.d), this.#blockMaterial(bg.box.shader, 0.7));
+      const table = new THREE.Mesh(new THREE.BoxGeometry(bg.box.w, th, bg.box.d), this.#blockMaterial(bg.box.shader, 0.7, THREE.FrontSide, null, false, null, bg.box.shaderParams, '@table'));
+      table.name = 'table';
       table.position.set(0, this.groundY - th / 2, bg.box.z);
       main.add(table);
     }
@@ -1826,6 +2036,7 @@ class BalanceView {
     const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y)); // from the middle of the flat bottom up to the rim
     const profile = [...half(outer), ...half(inner).reverse()]; // the normals come out facing away from the wood
     const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain));
+    wood.name = 'bowl';
     wood.material.uniforms.uCausInward.value = 1;
 
     // the water: the inside of the bowl up to WATER_Y (a lathe for the sides and the bottom) and a finely meshed GRID for the surface,
@@ -1850,10 +2061,13 @@ class BalanceView {
     const sq = Math.max(2, bowl.squareBottom + (bowl.square - bowl.squareBottom) * f * f * (3 - 2 * f)); // the outline is a superellipse |x/rw|^n + |z/rz|^n = 1
     const foot = { rw, rz, n: sq };
     const water = new THREE.Group();
-    const sides = new THREE.Mesh(this.#squareLathe(wp, bowl), this.#waterMaterial(bowl, plain, null));
-    const gridGeo = new THREE.PlaneGeometry(rw * 2.02, rz * 2.02, 150, 60);
+    const sides = new THREE.Mesh(this.#squareLathe(wp, bowl, 64), this.#waterMaterial(bowl, plain, null)); // (the inside face of the water: fewer steps)
+    sides.name = 'bowl water sides';
+    const GRID = 0.6; // world units between the points of the surface: the smallest waves are about 6 units long, so a finer grid only costs triangles
+    const gridGeo = new THREE.PlaneGeometry(rw * 2.02, rz * 2.02, Math.max(12, Math.ceil(rw * 2.02 / GRID)), Math.max(8, Math.ceil(rz * 2.02 / GRID)));
     gridGeo.rotateX(-Math.PI / 2);
     const surface = new THREE.Mesh(gridGeo, this.#waterMaterial(bowl, plain, foot));
+    surface.name = 'bowl water surface';
     surface.position.y = WATER_Y;
     sides.renderOrder = 5;
     surface.renderOrder = 5;
@@ -2025,6 +2239,7 @@ void main() {
       this.#setParam(mat.uniforms[p.name], p, params?.[p.name]);
     }
     if (hasBake(code)) attachBake(mat, { code, fragment: waterFrag(code, true), vertex: BAKE_VERTEX_WATER }, list);
+    mat.userData.label = `water shader (${block ? 'block' : 'bowl'})`;
     mat.userData.waterParams = list; // (debugLiveWater changes their values while a slider is dragged)
     if (block) {
       this.waterBlockMats.add(mat);
@@ -2146,6 +2361,7 @@ void main() {
     }
     if (token !== this.worldToken) return; // the world was rebuilt while the file was loading
     const group = new THREE.Group();
+    group.name = `model ${inst.model}`;
     parts.forEach((p, i) => {
       const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
       const mat = this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, fog);
@@ -2201,7 +2417,7 @@ void main() {
    * Revolve a (radius, y) profile around the vertical axis. The plan shape goes from `squareBottom` at the bottom to `square` at the rim
    * (a superellipse: 2 = circle, higher = squarer). The slice at z = 0 is always exactly the profile, so it still matches the physics.
    */
-  #squareLathe(profile, bowl, segs = 128) {
+  #squareLathe(profile, bowl, segs = 96) {
     const yBot = bowl.rimY - bowl.b - bowl.t;
     const pos = [];
     for (const { x: r, y } of profile) {
@@ -2291,6 +2507,7 @@ void main() {
     }
     const bakeCode = draft ? draft.code : shaderCode[shaderName]?.code ?? '';
     if (hasBake(bakeCode)) attachBake(mat, { code: bakeCode, fragment: frag(bakeCode, true), vertex: BAKE_VERTEX_BLOCK }, list);
+    mat.userData.label = draft ? 'draft' : shaderName;
     if (list.length && materialKey) {
       mat.userData.blockParams = list;
       mat.userData.materialKey = materialKey;
@@ -2355,6 +2572,7 @@ void main() {
       const mat = this.#blockMaterial('outline', (id * 0.37 + 0.1) % 1, THREE.DoubleSide);
       Object.assign(mat, { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }); // (on top of the table, never flickering with it)
       const group = new THREE.Group();
+      group.name = 'ghost outline';
       const geos = [];
       const line = Math.min(0.35, Math.max(0.1, Math.min(shape.w, shape.h) * 0.08)); // width of the chalk line (a very small shape gets a thinner one)
       // the outline of the shape as the block has it (all parts merged, holes included), just outside the block
@@ -2416,6 +2634,7 @@ void main() {
 
     if (opts.table) mat.uniforms.uCausOn.value = 0; // (waiting on the table: no caustics)
     const group = new THREE.Group();
+    group.name = `block ${MATERIAL_KEYS[mi]} ${shapeKey}`;
     for (const { geo } of this.#geometries(shapeKey, deformShaders.has(shaderName))) {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.userData.id = id;
@@ -2452,6 +2671,7 @@ void main() {
       const sh = getShape(shapeKey);
       const r = THREE.MathUtils.clamp(Math.min(sh.w, sh.h) * 0.16, 0.3, 1.1);
       dot = new THREE.Mesh(this.dotGeo, new THREE.MeshBasicMaterial({ color: LAMP[0] }));
+      dot.name = 'stack lamp';
       dot.scale.set(r, r, 1);
       dot.position.set(0, lookSameWhenTurned(sh) ? 0 : sh.h / 2 - r - 0.55, DEPTH / 2 + 0.04); // (a block that looks the same turned round has it in the middle: it does not move when you turn the block)
       dot.userData.id = id;
@@ -2485,6 +2705,7 @@ void main() {
     const p = v.group.position;
     for (let i = 0; i < 16; i++) {
       const mesh = new THREE.Mesh(this.shardGeo, new THREE.MeshBasicMaterial({ color: '#bfe6f2', transparent: true, opacity: 0.8 }));
+      mesh.name = 'glass shard';
       const size = 0.35 + Math.random() * 0.7;
       mesh.scale.set(size, size * (0.4 + Math.random() * 0.8), size * 0.4);
       mesh.position.set(p.x + (Math.random() - 0.5) * v.size.w, p.y + (Math.random() - 0.5) * v.size.h, p.z);
@@ -2536,6 +2757,7 @@ void main() {
     const add = (map, color, life, from, to, opacity, step) => {
       const mat = new THREE.SpriteMaterial({ map, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, opacity });
       const sprite = new THREE.Sprite(mat);
+      sprite.name = 'effect sprite';
       sprite.position.set(x, y, z);
       sprite.renderOrder = 60;
       this.frontScene.add(sprite);
@@ -2562,6 +2784,7 @@ void main() {
     for (let i = 0; i < 12; i++) { // smoke (normal blending, so it is dark)
       const mat = new THREE.SpriteMaterial({ map: tex.glow, color: '#2a2220', transparent: true, depthWrite: false, depthTest: false, opacity: 0.55 });
       const sprite = new THREE.Sprite(mat);
+      sprite.name = 'shadow blob';
       const a = Math.random() * Math.PI * 2;
       const r = Math.random() * 5;
       sprite.position.set(x + Math.cos(a) * r, y + Math.sin(a) * r, z - 0.5);
@@ -3063,6 +3286,7 @@ void main() {
     const dt = Math.min(0.1, (now - this.lastFrame) / 1000);
     this.lastFrame = now;
     this.uTime.value += dt;
+    if (this.stats) this.#statsBegin(now);
     if (this.freeCam) this.#applyFreeCam();
 
     // the block we hold keeps following the pointer with its grab offset, which melts away as the block comes back into the play area
@@ -3140,6 +3364,7 @@ void main() {
       this.#showAll();
     } finally {
       if (cam0) { this.camera.position.copy(cam0); this.camera.updateMatrixWorld(true); }
+      if (this.stats) this.#statsEnd();
     }
   };
 
@@ -3247,7 +3472,7 @@ void main() {
       return false;
     }
     const fx = this.fx;
-    const size = Math.min(cfg.size, this.renderer.capabilities?.maxTextureSize ?? cfg.size); // (as big as the graphics card allows)
+    const size = Math.min(cfg.size, this.gfx?.shadowSize ?? Infinity, this.renderer.capabilities?.maxTextureSize ?? cfg.size); // (as big as the graphics card and the graphics setting allow)
     const half = cfg.range / 2;
     if (!fx.shadowRT || fx.shadowRT.width !== size) {
       fx.shadowRT?.dispose();
@@ -3258,7 +3483,8 @@ void main() {
         depthTexture: new THREE.DepthTexture(size, size),
       });
     }
-    if (!fx.depthMat) fx.depthMat = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4 }); // (the usual hardware slope bias: occluders are stored a little further away)
+    if (!fx.depthMat) fx.depthMat = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4 });
+    fx.depthMat.userData.label = 'shadow depth (replaces every material in the shadow pass)'; // (the usual hardware slope bias: occluders are stored a little further away)
     if (!fx.shadowCam) {
       fx.shadowCam = new THREE.OrthographicCamera(-half, half, half, -half, SHADOW_NEAR, SHADOW_FAR);
       fx.shadowCam.layers.enable(2); // (glass casts a shadow too)
@@ -3479,6 +3705,7 @@ void main() {
       }));
       const scene = new THREE.Scene();
       const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), down);
+      quad.name = 'post-processing quad';
       quad.frustumCulled = false;
       scene.add(quad);
       fx.kawase = { scene, quad, down, up, mix, maskMats, maskRT: null, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), rts: [], nearUp: [], farUp: [], key: '' };

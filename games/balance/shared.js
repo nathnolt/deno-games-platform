@@ -668,7 +668,7 @@ export const BOWL_DEFAULTS = {
 /** Shadow settings. Global in `tuning.shadows`, and a background may override them with `light.shadows` (any of the fields).
  *   on          shadows at all        size   resolution of the shadow map (1024 - 8192)   range  width of the area the sun shades, world units
  *   softness    1 = crisp (3 texels wide edge), 2 = soft, 3 = softer     bias  depth offset in world units    normalBias  push along the surface, in texels */
-export const SHADOW_DEFAULTS = { on: true, size: 4096, range: 170, softness: 1, bias: 0.12, normalBias: 1.5 };
+export const SHADOW_DEFAULTS = { on: true, size: 2048, range: 170, softness: 1, bias: 0.12, normalBias: 1.5 };
 export const shadowSettings = (light) => ({ ...SHADOW_DEFAULTS, ...(tuning.shadows ?? {}), ...(light?.shadows ?? {}) });
 export const MAX_LIGHTS = 8; // point lights per background (the shaders have room for this many)
 export const BLUR_CHOICES = ['none', 'light', 'heavy'];
@@ -952,6 +952,10 @@ export function validateDefinitions(defs, extra = {}) {
       for (const f of ['w', 'd']) if (b.box[f] !== undefined && !(isNum(b.box[f]) && b.box[f] >= 10 && b.box[f] <= 1000)) err(`background ${k}: box.${f} must be a number from 10 to 1000`);
       if (b.box.z !== undefined && !isNum(b.box.z)) err(`background ${k}: box.z must be a number`);
       if (b.box.shader !== undefined) shaderOk(b.box.shader, `background ${k}, table box`);
+      if (b.box.shaderParams !== undefined) {
+        if (!b.box.shaderParams || typeof b.box.shaderParams !== 'object' || Array.isArray(b.box.shaderParams)) err(`background ${k}: box.shaderParams must be an object`);
+        else for (const [pk, pv] of Object.entries(b.box.shaderParams)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`background ${k}: box.shaderParams.${pk} must be a number, a colour or a list of numbers`);
+      }
     }
     if (b.bowlHeight !== undefined && !(isNum(b.bowlHeight) && b.bowlHeight >= 0 && b.bowlHeight <= 100)) err(`background ${k}: bowlHeight must be a number from 0 to 100`);
     if (b.table) {

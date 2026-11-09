@@ -322,3 +322,8 @@ button.bb-card:disabled { opacity: .6; cursor: default; }
 .bb-wp-row { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
 .bb-wp-range { width: 9em; }
 .bb-wp-num { display: inline-block; box-sizing: border-box; min-width: 4.8em; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* the Performance menu of the debug header */
+.bb-dbg-perf { position: relative; }
+.bb-dbg-perf > summary { cursor: pointer; font-size: .85em; }
+.bb-dbg-perf > div { position: absolute; left: 0; top: 1.6em; z-index: 5; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; background: #1b2438; border: 1px solid #2b3550; border-radius: 8px; white-space: nowrap; }

@@ -19,7 +19,7 @@
 // After a confirmation they send that ONE level / shape to the server, which writes _levels.js / _shapes.js; every room then uses it.
 
 import * as S from './shared.js';
-import { waterControls } from './water-ui.js';
+import { blockShaderControls, waterControls } from './water-ui.js';
 import { shaderStudio } from './shader-studio.js';
 import { clone, h, svg } from './ui.js';
 
@@ -2306,7 +2306,8 @@ function backgroundStudio(view, api) {
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table width (x)'), numIn(() => bg.box.w, (v) => { if (v >= 10) { bg.box.w = v; api.touch('backgrounds'); } }, 1)),
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table depth (z)'), numIn(() => bg.box.d, (v) => { if (v >= 10) { bg.box.d = v; api.touch('backgrounds'); } }, 1)),
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table centre z'), numIn(() => bg.box.z, (v) => { bg.box.z = v; api.touch('backgrounds'); }, 1)),
-        w.select('table shader', view.shaderNames, bg.box, 'shader', 'backgrounds')),
+        w.select('table shader', view.shaderNames, bg.box, 'shader', 'backgrounds'),
+        ...blockShaderControls({ h, view, mat: bg.box, touch: api.touch, draft: api.draft, rerender: renderBody, kind: 'backgrounds' })),
       tableBox,
       h('div', { class: 'bb-st-sub' }, `Models (${ms.length})`, h('span', { class: 'bb-dbg-grow' }),
         btn('Collapse all', () => { openRows.clear(); renderBody(); }, '')),

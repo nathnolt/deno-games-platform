@@ -41,16 +41,16 @@ export function waterControls({ h, view, bg, touch, draft, rerender }) {
  * Controls for the parameters (uniforms with a default in a comment) of a BLOCK shader, for a material: `mat.shaderParams = { uBump: 0.2 }`.
  * @param o  { h, view, mat, touch(kind, quiet?, live?), draft(), rerender() }  Returns a list of nodes (empty when the shader has no parameters).
  */
-export function blockShaderControls({ h, view, mat, touch, draft, rerender, shader = mat.shader }) {
+export function blockShaderControls({ h, view, mat, touch, draft, rerender, shader = mat.shader, kind = 'materials' }) {
   const list = view.debugShaderParams(shader).filter((p) => p.name !== 'uBlockOpacity');
   if (!list.length) return [];
   const params = (mat.shaderParams ??= {});
   const prune = () => { if (!Object.keys(params).length) delete mat.shaderParams; };
   return paramRows({
     h, view, list, params,
-    live: () => { touch('materials', true, true); view.debugLiveBlocks(draft()); },
-    commit: () => { prune(); touch('materials'); },
-    reset: () => { prune(); touch('materials'); view.debugLiveBlocks(draft()); rerender(); },
+    live: () => { touch(kind, true, true); view.debugLiveBlocks(draft()); },
+    commit: () => { prune(); touch(kind); },
+    reset: () => { prune(); touch(kind); view.debugLiveBlocks(draft()); rerender(); },
   });
 }
 

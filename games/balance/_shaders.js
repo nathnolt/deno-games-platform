@@ -124,24 +124,40 @@ void main() {
   },
   floorwood: {
     code: `
+// Wood planks as a 3D solid: the grain is carved through the whole object, so it never stretches on
+// curved or sloped surfaces. Planks are stacked along the Y axis, the grain runs along X.
+uniform vec3  uLight;     // color 0.60 0.40 0.20
+uniform vec3  uDark;      // color 0.44 0.27 0.12
+uniform float uSize;      // 2.8 [0.2, 5]     overall scale (bigger = larger planks and grain)
+uniform float uPlank;     // 0.62 [0.1, 2]     plank width
+uniform float uVariant;   // 0.0 [0, 10]      another arrangement of the grain (was uSeed: that name is the block's own seed)
+uniform float uGrain;     // 0.4 [0, 1.5]     dark grain lines
+uniform float uWobble;    // 6.3 [0, 8]      how much the grain wanders
+uniform float uSeam;      // 0.3 [0, 1]       gap between planks
+uniform float uBump;      // 0.1 [0, 0.2]
+uniform float uShine;     // 0.0 [0, 3]
+
 void main() {
-  vec2 p = vec2(vP3.x, vP3.z + vP3.y) + uSeed * 9.0;
-  float plank = floor(p.y / 3.2);
-  vec2 q = vec2(p.x * 0.35 + hash(vec2(plank, 3.0)) * 40.0, p.y);
-  float warp = fbm(vec2(q.x * 0.5, q.y * 2.5));
-  float grain = sin((q.y * 2.0 + warp * 6.0) * 3.14159) * aaFade(fwidth(q.y * 2.0 + warp * 6.0) * 0.5);
-  float fib = fbm(q * vec2(1.0, 4.0));
-  vec3 base = mix(vec3(0.60, 0.40, 0.20), vec3(0.44, 0.27, 0.12), hash(vec2(plank, 7.0)));
-  vec3 c = mix(base, base * 0.8, 0.5 + 0.3 * grain);
-  c *= 0.9 + 0.2 * fib;
-  float f = fract(p.y / 3.2);
-  float sw = 0.03 + fwidth(p.y) / 3.2;                              // the seam stays at least about a pixel wide, and fainter when it is wider (no dotted lines)
-  float seam = smoothstep(sw, 0.0, min(f, 1.0 - f)) * (0.03 / sw);
-  c *= 1.0 - seam * 0.5;
-  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.5 * grain + 0.5 * fib - 1.5 * seam, 0.041); gHasN = 1.0; } // grain and the grooves between the planks
-  gBlow = 0.3;
-  gShine = 0.3;
-  gRough = roughMap(vec3(p * 0.7, 2.0), 0.6, 0.3);
+  vec3 p = vPos / uSize + uVariant * 9.0;
+  float u = p.y / uPlank;
+  float plank = floor(u);
+  p.x += hash11(plank) * 40.0;                              // each plank gets different grain
+
+  float lines = (p.y + p.z) * 4.0 + fbm3T(p * vec3(0.5, 2.0, 2.0)) * uWobble;
+  float grain = sin(lines * 3.14159) * uGrain;
+  float fibre = fbm3T(p * vec3(1.0, 6.0, 6.0));
+
+  vec3 c = mix(uLight, uDark, hash11(plank + 7.0));         // each plank gets a different colour
+  c *= 0.85 + 0.2 * fibre - 0.15 * grain;
+
+  float edge = min(fract(u), 1.0 - fract(u));
+  float seam = smoothstep(0.03 + fwidth(u), 0.0, edge);
+  c *= 1.0 - seam * uSeam;
+
+  gNormal = bumpFromHeight(0.5 * grain + 0.5 * fibre - seam, uBump);
+  gHasN = 1.0;
+  gShine = uShine;
+  gRough = 0.4;
   gl_FragColor = finish(c, 1.0);
 }`,
   },

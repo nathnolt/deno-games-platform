@@ -62,6 +62,7 @@ export function createDebugMenu(view) {
   const state = {
     tab: 'settings', open: false, sel: {}, freeCam: false, showDrop: false, autoRestart: false,
     needsRestart: false, dirty: false, problems: [], viewProblems: [],
+    perf: { fps: false, calls: false, memory: false, gpu: false, passes: false, window: false },
     fxShadows: true, fxReflection: true, fxBlur: true, fxRefraction: true,
     local: false, localError: '', localBeforeStudio: false, // the local game: is it what the view shows, why it could not start, was it on before a studio opened
   };
@@ -790,7 +791,8 @@ export function createDebugMenu(view) {
         num('table width (x)', bg.box, 'w', 'backgrounds', { min: 10, max: 1000 }),
         num('table depth (z)', bg.box, 'd', 'backgrounds', { min: 10, max: 1000 }),
         num('table centre z', bg.box, 'z', 'backgrounds'),
-        select('table shader', shaderNames(), bg.box, 'shader', 'backgrounds'),
+        select('table shader', shaderNames(), bg.box, 'shader', 'backgrounds', () => { delete bg.box.shaderParams; render(); }),
+        ...blockShaderControls({ h, view, mat: bg.box, touch, draft: () => draft, rerender: render, kind: 'backgrounds' }),
         ),
       section('Water of the bowl', ...waterControls({ h, view, bg, touch, draft: () => draft, rerender: render })),
       section('Light and time of day',
@@ -906,6 +908,17 @@ export function createDebugMenu(view) {
     i.addEventListener('change', () => { state[key] = i.checked; apply?.(i.checked); });
     return h('label', { class: 'bb-dbg-chk' }, i, label);
   };
+  // a little menu: what the performance overlay shows (three.js renderer.info, frame times, passes)
+  const perfBoxes = {};
+  const perfMenu = h('details', { class: 'bb-dbg-perf' }, h('summary', {}, 'Performance'),
+    h('div', {},
+      ...[['fps', 'FPS and frame time'], ['calls', 'Draw calls and triangles'], ['memory', 'Memory: geometries, textures, programs'], ['gpu', 'GPU time (if the browser offers it)'], ['passes', 'Every pass of the frame (shadow, reflection, bakes ...)'], ['window', 'Draw call profiler (window: which objects, materials, passes)']].map(([key, label]) => {
+        const i = h('input', { type: 'checkbox', checked: state.perf[key] });
+        i.addEventListener('change', () => { state.perf[key] = i.checked; view.debugStats(state.perf); });
+        perfBoxes[key] = i;
+        return h('label', { class: 'bb-dbg-chk' }, i, label);
+      })));
+  view.onStatsClosed = () => { state.perf.window = false; perfBoxes.window.checked = false; };
   let reloadArmed = 0;
   const reloadBtn = btn('Reload from game', () => {
     if (state.dirty && !reloadArmed) { // unsent edits would be thrown away: ask by pressing it twice
@@ -934,6 +947,7 @@ export function createDebugMenu(view) {
     helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
     helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
     helper('Glass bending', 'fxRefraction', (on) => view.debugFx('refraction', on)),
+    perfMenu,
     h('span', { class: 'bb-dbg-grow' }),
     reloadBtn,
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
@@ -1106,6 +1120,7 @@ export function createDebugMenu(view) {
       studio.dispose();
       modelPrev?.dispose();
       matPrev?.dispose();
+      view.debugStats(null);
       clearTimeout(localTimer);
       view.onRun = null;
       view.onSandbox = null;
