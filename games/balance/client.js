@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, levels, LOSE_TEXT, paramValue, parseShaderParams, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, LAMP_RADIUS, levels, LOSE_TEXT, paramValue, parseShaderParams, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
@@ -380,6 +380,54 @@ function lookSameWhenTurned(shape) {
   }
   centreMemo.set(shape, known);
   return known;
+}
+
+/**
+ * Where the stack-limit lamp of a fragile block goes: as close as it can to the top middle, but with its whole circle on the block (a block with a corner cut off,
+ * or a hole, has nothing at the top middle). Returns { x, y, r } (r is made smaller when the block is too thin for a full lamp). Remembered per shape.
+ */
+const lampMemo = new WeakMap();
+function lampSpot(shape, r) {
+  const key = `${r}`;
+  let byR = lampMemo.get(shape);
+  if (!byR) lampMemo.set(shape, (byR = new Map()));
+  if (byR.has(key)) return byR.get(key);
+  const outlines = shapeOutlines(shape, tuning.mergeParts !== false);
+  const loops = outlines.flatMap((o) => [o.pts, ...(o.holes ?? [])]);
+  const inside = (x, y) => outlines.some((o) => insidePoly(o.pts, x, y) && !(o.holes ?? []).some((hole) => insidePoly(hole, x, y)));
+  const segDist = (x, y, a, b) => {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const t = THREE.MathUtils.clamp(((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1), 0, 1);
+    return Math.hypot(x - (a[0] + t * dx), y - (a[1] + t * dy));
+  };
+  const clearance = (x, y) => { // how far the point is from the nearest edge (negative = outside the block)
+    let d = Infinity;
+    for (const L of loops) for (let i = 0, j = L.length - 1; i < L.length; j = i++) d = Math.min(d, segDist(x, y, L[j], L[i]));
+    return inside(x, y) ? d : -d;
+  };
+  const wantY = shape.h / 2 - r - 0.55;
+  let best = { x: 0, y: wantY, r };
+  if (clearance(0, wantY) < r * 0.9) {
+    let bestScore = -Infinity;
+    let widest = { x: 0, y: 0, c: -Infinity };
+    const N = 60;
+    for (let i = 0; i <= N; i++) {
+      for (let j = 0; j <= N; j++) {
+        const x = -shape.w / 2 + (i / N) * shape.w;
+        const y = -shape.h / 2 + (j / N) * shape.h;
+        const c = clearance(x, y);
+        if (c > widest.c) widest = { x, y, c };
+        if (c >= r * 0.9) { // a whole lamp fits here: the nearest to the old place wins
+          const score = -Math.hypot(x, (y - wantY) * 0.7);
+          if (score > bestScore) { bestScore = score; best = { x, y, r }; }
+        }
+      }
+    }
+    if (bestScore === -Infinity) best = { x: widest.x, y: widest.y, r }; // (no whole lamp fits: the roomiest place, the lamp keeps its size)
+  }
+  byR.set(key, best);
+  return best;
 }
 
 /** Outline of a circle part as a counter-clockwise point list. */
@@ -2670,11 +2718,13 @@ void main() {
     let dot = null;
     if (limit !== undefined && !materials[MATERIAL_KEYS[mi]].noLamp) {
       const sh = getShape(shapeKey);
-      const r = THREE.MathUtils.clamp(Math.min(sh.w, sh.h) * 0.16, 0.3, 1.1);
+      const r0 = LAMP_RADIUS;
+      const same = lookSameWhenTurned(sh);
+      const spot = sh.lamp ? { x: sh.lamp[0], y: sh.lamp[1], r: r0 } : same ? { x: 0, y: 0, r: r0 } : lampSpot(sh, r0); // (a block that looks the same turned round has it in the middle: it does not move when you turn the block. Any other: near the top, but on the block)
       dot = new THREE.Mesh(this.dotGeo, new THREE.MeshBasicMaterial({ color: LAMP[0] }));
       dot.name = 'stack lamp';
-      dot.scale.set(r, r, 1);
-      dot.position.set(0, lookSameWhenTurned(sh) ? 0 : sh.h / 2 - r - 0.55, DEPTH / 2 + 0.04); // (a block that looks the same turned round has it in the middle: it does not move when you turn the block)
+      dot.scale.set(spot.r, spot.r, 1);
+      dot.position.set(spot.x, spot.y, DEPTH / 2 + 0.04);
       dot.userData.id = id;
       group.add(dot);
     }

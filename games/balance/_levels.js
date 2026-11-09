@@ -146,7 +146,7 @@ export const levels = {
         initialBlocks: [
           { shape: 'B', material: 'static', rot: 45, x: -0.25, y: -4 },
           { shape: 'triangle', material: 'wood', rot: -45, x: 0.2, y: 2.7 },
-          { shape: 'B', material: 'static', rot: 45, x: 0.7000000000000001, y: -4 },
+          { shape: 'B', material: 'static', rot: 45, x: 0.7, y: -4 },
         ],
         chooseShapes: 3,
         shapes: [
@@ -163,7 +163,7 @@ export const levels = {
         background: 'zen1',
         initialBlocks: [
           { shape: 'B', material: 'floatBlockHeavy', rot: 0, x: -0.5, y: -0.01 },
-          { shape: 'B', material: 'floatBlockHeavy', rot: 0, x: 3.8000000000000003, y: 0 },
+          { shape: 'B', material: 'floatBlockHeavy', rot: 0, x: 3.8, y: 0 },
         ],
         chooseShapes: 3,
         shapes: [{ shape: 'B', material: 'wood' }],

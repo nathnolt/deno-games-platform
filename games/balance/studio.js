@@ -256,6 +256,14 @@ function boxOf(def) {
   }
   return Number.isFinite(b[0]) && b.every(Number.isFinite) ? b : [0, 0, 1, 1];
 }
+/** The lamp override of a shape as [x, y] (editor coordinates) or null; stored as `lamp: 'x,y'` on the first subshape. */
+const lampOf = (def) => S.lampOverride(def);
+function setLamp(def, q) {
+  for (const p of def) delete p.lamp;
+  if (q && def[0]) def[0].lamp = `${f3(q[0])},${f3(q[1])}`;
+}
+/** Where the lamp starts when you take it over: where the game puts it by default for a simple block (top middle). */
+const lampStart = (def) => { const b = boxOf(def); return [(b[0] + b[2]) / 2, b[3] - S.LAMP_RADIUS - 0.55]; };
 const shapeCache = new Map();
 /** The built shape (centred, counter-clockwise) of a shape definition, or null while it is not valid. */
 function built(def) {
@@ -556,6 +564,10 @@ function shapeStudio(view, api) {
         drawClick(w);
         return { move() {}, up() {} };
       }
+      if (role === 'l' && def && st.editing) {
+        const sh = shift(st.sel);
+        return { move(q) { setLamp(def, [snapV(q.x - sh.x), snapV(q.y - sh.y)]); edited(true); }, up() { edited(); renderInspector(); } };
+      }
       if (role && def && st.editing) {
         const part = def[+t.dataset.part];
         const sh = shift(st.sel);
@@ -722,7 +734,9 @@ function shapeStudio(view, api) {
     const def = D().shapes[st.sel];
     if (!def) return;
     if (def.length <= 1) return fail('A shape needs at least one subshape (delete the whole shape from the list instead).');
+    const lamp0 = lampOf(def);
     def.splice(i, 1);
+    setLamp(def, lamp0);
     st.part = Math.max(0, Math.min(st.part, def.length - 1));
     st.msg = '';
     renderList();
@@ -836,6 +850,11 @@ function shapeStudio(view, api) {
             pts.forEach((a, i) => hg.append(svg('circle', { cx: a[0], cy: a[1], r: 5.5 * px, fill: p.visual ? '#fde68a' : '#fff', stroke: ACCENT, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'data-role': 'v', 'data-part': pi, 'data-idx': i, class: 'bb-st-handle' })));
           }
           top.append(hg);
+        }
+        const lamp = st.editing ? lampOf(def) : null;
+        if (lamp) { // the stack-limit lamp (glass blocks): drag it where it should sit
+          top.append(svg('g', { transform: `translate(${sh.x} ${sh.y})` },
+            svg('circle', { cx: lamp[0], cy: lamp[1], r: S.LAMP_RADIUS, fill: 'rgba(34,197,94,.75)', stroke: '#fff', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke', 'data-role': 'l', class: 'bb-st-handle' })));
         }
       }
     }
@@ -976,6 +995,8 @@ function shapeStudio(view, api) {
   /** Apply fn([x, y]) -> [x, y] to every corner and circle centre, then move the lot so its lower left corner is 0,0. */
   function transform(fn) {
     const def = D().shapes[st.sel];
+    const lamp0 = lampOf(def);
+    if (lamp0) setLamp(def, fn(lamp0));
     for (const p of def) {
       if (p.type === 'circle') {
         const c = circleOf(p);
@@ -992,6 +1013,8 @@ function shapeStudio(view, api) {
   const scaleBy = (kx, ky = kx) => {
     if (!(kx > 0 && ky > 0)) return fail('A scale must be a number above 0.');
     const def = D().shapes[st.sel];
+    const lamp0 = lampOf(def);
+    if (lamp0) setLamp(def, [lamp0[0] * kx, lamp0[1] * ky]);
     for (const p of def) {
       if (p.type === 'circle') { const c = circleOf(p); p.diameter *= Math.sqrt(kx * ky); p.x = c.x * kx; p.y = c.y * ky; } else p.points = ptsStr(parsePts(p.points).map(([x, y]) => [x * kx, y * ky]));
     }
@@ -1044,6 +1067,8 @@ function shapeStudio(view, api) {
   function toOrigin() {
     const def = D().shapes[st.sel];
     const b = boxOf(def);
+    const lamp0 = lampOf(def);
+    if (lamp0) setLamp(def, [lamp0[0] - b[0], lamp0[1] - b[1]]);
     for (const p of def) {
       if (p.type === 'circle') {
         const c = circleOf(p);
@@ -1167,9 +1192,21 @@ function shapeStudio(view, api) {
       head.addEventListener('click', (e) => { if (!e.target.closest('button,input,label') && i !== st.part) focusPart(i); });
       return h('div', { class: `bb-dbg-part${i === st.part ? ' bb-st-focus' : ''}` }, head, body);
     });
+    const lamp = lampOf(def);
+    const lampBox = h('input', { type: 'checkbox', checked: !!lamp });
+    lampBox.addEventListener('change', () => { setLamp(def, lampBox.checked ? lampStart(def) : null); edited(); renderInspector(); });
+    const lampRow = h('div', { class: 'bb-st-row' },
+      h('label', { class: 'bb-dbg-chk', title: 'Glass blocks carry a lamp. By default the game puts it near the top middle, on the block. Tick this to place it yourself (drag the green circle on the board).' }, lampBox, 'own lamp position'),
+      ...(lamp ? [['x', 0], ['y', 1]].map(([label, k]) => {
+        const inp = h('input', { type: 'number', step: 'any', value: f3(lamp[k]) });
+        inp.addEventListener('input', () => { const v = parseFloat(inp.value); if (Number.isFinite(v)) { const q = [...lampOf(def)]; q[k] = v; setLamp(def, q); edited(true); } });
+        inp.addEventListener('change', () => edited());
+        return h('label', { class: 'bb-st-mini' }, label, inp);
+      }) : [h('span', { class: 'bb-dbg-note' }, 'automatic')]));
     put(inspEl,
       h('div', { class: 'bb-st-row' }, toggle),
       ...rows,
+      lampRow,
       h('div', { class: 'bb-st-row' },
         btn('+ polygon', startDraw),
         btn('+ circle', () => { def.push({ type: 'circle', diameter: 2 }); st.part = def.length - 1; edited(); })),

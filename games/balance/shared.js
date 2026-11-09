@@ -201,6 +201,15 @@ export function roundOutline(pts, R, minTurn = (20 * Math.PI) / 180, step = (30 
  * Throws on a broken definition. (getShape() is the cached version for shapes by key.)
  * @returns {{ parts: ({type:'poly', pts:number[][]}|{type:'circle', cx:number, cy:number, r:number})[], visual: {pts:number[][]}[]|null, w:number, h:number, radius:number }}
  */
+export const LAMP_RADIUS = 0.6; // the stack-limit lamp of a fragile block: the same size on every block
+
+/** The lamp position a shape definition overrides (`lamp: 'x,y'` on one of its parts, in the editor's coordinates), or null. */
+export function lampOverride(def) {
+  const s = def?.find?.((p) => typeof p.lamp === 'string')?.lamp;
+  const q = s ? s.trim().split(/[\s,]+/).map(Number) : null;
+  return q && q.length === 2 && q.every(Number.isFinite) ? q : null;
+}
+
 export function buildShape(def, key = '?') {
   if (!Array.isArray(def) || def.length === 0) throw new Error(`shape "${key}" has no parts`);
   const all = def.map((p) => {
@@ -283,7 +292,8 @@ export function buildShape(def, key = '?') {
   const shiftPts = (pts) => pts.map(([x, y]) => [x - mx, y - my]);
   const visual = vis.length ? vis.map((p) => ({ pts: shiftPts(R > 0 ? roundOutline(p.pts, R) : p.pts), holes: [] }))
     : visualFine ? visualFine.map((r) => ({ pts: shiftPts(r.outer), holes: r.holes.map(shiftPts) })) : null;
-  return { parts, visual, w: x1 - x0, h: y1 - y0, radius, ox: mx, oy: my };
+  const lo = lampOverride(def);
+  return { parts, visual, w: x1 - x0, h: y1 - y0, radius, ox: mx, oy: my, lamp: lo ? [lo[0] - mx, lo[1] - my] : null };
 }
 
 /**
