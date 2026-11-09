@@ -2320,10 +2320,14 @@ function backgroundStudio(view, api) {
         h('div', { class: 'bb-st-instbody' },
           w.color('mist (sky, distance)', bg, 'mist', 'backgrounds'),
           w.field('fog near / far', ...[0, 1].map((k) => numIn(() => bg.fog[k], (v) => { bg.fog[k] = v; api.touch('backgrounds'); }, 10))),
-          w.color('sand grooves', bg.ground, 'colorA', 'backgrounds'),
-          w.color('sand ridges', bg.ground, 'colorB', 'backgrounds'),
-          w.slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1),
-          w.select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks'], ['none', 'no floor']], bg.ground, 'style', 'backgrounds'),
+          w.color(bg.ground.style === 'grass' ? 'grass roots' : 'sand grooves', bg.ground, 'colorA', 'backgrounds'),
+          w.color(bg.ground.style === 'grass' ? 'grass tips' : 'sand ridges', bg.ground, 'colorB', 'backgrounds'),
+          ...(bg.ground.style === 'grass'
+            ? [w.slider('blade height', bg.ground, 'grassHeight', 'backgrounds', 0.3, 5, 0.1),
+              w.slider('tufts (1 = 9000)', bg.ground, 'grassDensity', 'backgrounds', 0, 4, 0.05),
+              w.slider('wind', bg.ground, 'grassWind', 'backgrounds', 0, 3, 0.05)]
+            : [w.slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1)]),
+          w.select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks'], ['grass', 'grass'], ['none', 'no floor']], bg.ground, 'style', 'backgrounds', () => { w.grassDefaults(bg.ground); renderBody(); }),
           w.slider('time of day (hour)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
           w.slider('shadow darkness', bg.light, 'shadow', 'backgrounds', 0, 1, 0.05),
           row3('light direction', bg.light.dir, -1, 0.1))),
@@ -2343,10 +2347,17 @@ function backgroundStudio(view, api) {
       h('div', { class: 'bb-st-sub' }, 'Table and bowl'),
       h('label', { class: 'bb-dbg-field' }, h('span', {}, 'bowl height above the floor'), numIn(() => bg.bowlHeight ?? 4, (v) => { if (v >= 0) { bg.bowlHeight = v; api.touch('backgrounds'); } }, 0.5)),
       bg.table ? null : h('div', { class: 'bb-st-instbody' },
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table (the base the bowl rests on)'), (() => {
+          const c = h('input', { type: 'checkbox', checked: bg.box.show !== false });
+          c.addEventListener('change', () => { if (c.checked) delete bg.box.show; else bg.box.show = false; api.touch('backgrounds'); renderBody(); });
+          return c;
+        })()),
+        bg.box.show === false ? h('div', { class: 'bb-st-hint' }, 'No table: the bowl stands on the floor. The size below is the free space round it where no grass grows.') : null,
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table width (x)'), numIn(() => bg.box.w, (v) => { if (v >= 10) { bg.box.w = v; api.touch('backgrounds'); } }, 1)),
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table depth (z)'), numIn(() => bg.box.d, (v) => { if (v >= 10) { bg.box.d = v; api.touch('backgrounds'); } }, 1)),
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table centre z'), numIn(() => bg.box.z, (v) => { bg.box.z = v; api.touch('backgrounds'); }, 1)),
-        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table shader'), shaderPicker({
+        bg.box.show === false ? null : h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table corner radius'), numIn(() => bg.box.radius ?? 0, (v) => { if (v >= 0) { bg.box.radius = v; api.touch('backgrounds'); } }, 0.5)),
+        bg.box.show === false ? null : h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table shader'), shaderPicker({
           view, table: () => api.draft().shaderCode ?? {}, value: bg.box.shader ?? '',
           onPick: (name) => { bg.box.shader = name; api.touch('backgrounds'); renderBody(); },
         }))),

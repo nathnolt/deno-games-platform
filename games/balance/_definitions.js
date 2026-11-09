@@ -176,9 +176,11 @@ export const models = {
 //   fog     [near, far] distance from the camera where models start / finish fading into the mist
 //   ground  raked sand around the table: colorA / colorB are the two sand tones the rake lines alternate between, ripple = how tight the rake lines are
 //   blur    how much the scenery is blurred (pixels; 0 = sharp), light  { dir: [x, y, z] towards the light, shadow: 0..1 how dark the shadows are }
-//   ground.style  'sand' (rake lines) or 'wood' (planks)
+//   ground.style  'sand' (rake lines), 'wood' (planks), 'grass' or 'none'. Grass: colorA = the roots, colorB = the tips of the blades; grassHeight (default 1.6),
+//                 grassDensity (default 1 = 9000 tufts sticking out of the lawn, one draw call) and grassWind (default 1) are optional
 //   bowlHeight  how high the bowl stands above the floor (the thickness of the table), default 4
-//   box     the plain wooden table: { w, d, z, shader } = width (x), depth (z), z of its centre, shader (default 110, 52, 2, floorwood)
+//   box     the plain table: { w, d, z, shader, radius, show } = width (x), depth (z), z of its centre, shader, corner radius (default 0 = square corners),
+//           show: false = no table at all, the bowl stands on the floor (default 110, 52, 2, floorwood, 0, true). Without a table w / d / z are only the free space where no grass grows
 //   table   optional: a model for the table top instead of the plain wooden box { model, scale, rotation, translate } (translate y = 0 is the floor)
 //   models  [{ model, scale, rotation: [x, y, z] in degrees, translate: [x, y, z] }]
 export const backgrounds = {
@@ -187,21 +189,21 @@ export const backgrounds = {
     fog: [150, 520],
     ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2, blur: 'light', style: 'sand' },
     models: [
-      { model: 'rock', scale: 5, rotation: [0, 20, 0], translate: [-66, 0, -28] },
-      { model: 'rock', scale: 7, rotation: [0, 140, 0], translate: [64, 0, -44] },
-      { model: 'rock', scale: 3.5, rotation: [0, 70, 0], translate: [-28, 0, -78] },
-      { model: 'lantern', scale: 2, rotation: [0, 25, 0], translate: [-66, 0, 12] },
-      { model: 'bamboo', scale: 3, rotation: [0, 0, 0], translate: [78, 0, -22] },
-      { model: 'bamboo', scale: 3.4, rotation: [0, 40, 0], translate: [-84, 0, -40] },
-      { model: 'tree', scale: 6, rotation: [0, 200, 0], translate: [34, 0, -96] },
-      { model: 'mountain', scale: 5, rotation: [0, 0, 0], translate: [0, 0, -300] },
-      { model: 'mountain', scale: 4, rotation: [0, 90, 0], translate: [-170, 0, -280] },
+      { model: 'rock', scale: 5, rotation: [0, 20, 0], translate: [-66, 0, -28], blur: 'light' },
+      { model: 'rock', scale: 7, rotation: [0, 140, 0], translate: [64, 0, -44], blur: 'light' },
+      { model: 'rock', scale: 3.5, rotation: [0, 70, 0], translate: [-28, 0, -78], blur: 'light' },
+      { model: 'lantern', scale: 2, rotation: [0, 25, 0], translate: [-66, 0, 12], blur: 'light' },
+      { model: 'bamboo', scale: 3, rotation: [0, 0, 0], translate: [78, 0, -22], blur: 'light' },
+      { model: 'bamboo', scale: 3.4, rotation: [0, 40, 0], translate: [-84, 0, -40], blur: 'light' },
+      { model: 'tree', scale: 6, rotation: [0, 200, 0], translate: [34, 0, -96], blur: 'light' },
+      { model: 'mountain', scale: 5, rotation: [0, 0, 0], translate: [0, 0, -300], blur: 'light' },
+      { model: 'mountain', scale: 4, rotation: [0, 90, 0], translate: [-170, 0, -280], blur: 'light' },
     ],
     blur: 3,
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor', radius: 4 },
     lights: [],
     water: { shader: 'calmOcean' },
   },
@@ -222,8 +224,39 @@ export const backgrounds = {
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor', radius: 5 },
     lights: [],
+  },
+  zen3: {
+    mist: '#000000',
+    fog: [150, 520],
+    ground: {
+      colorA: '#15260d',
+      colorB: '#3d472e',
+      ripple: 2.2,
+      blur: 'light',
+      style: 'grass',
+      grassHeight: 1.6,
+      grassDensity: 1,
+      grassWind: 1,
+    },
+    models: [
+      { model: 'rock', scale: 5, rotation: [0, 20, 0], translate: [-66, 0, -28], blur: 'light' },
+      { model: 'rock', scale: 7, rotation: [0, 140, 0], translate: [64, 0, -44], blur: 'light' },
+      { model: 'rock', scale: 6, rotation: [0, 240, 0], translate: [-34, 0, 11.5], blur: 'light' },
+      { model: 'lantern', scale: 2, rotation: [0, 25, 0], translate: [-9, 0, -59], blur: 'light' },
+      { model: 'bamboo', scale: 3, rotation: [0, 180, 0], translate: [-28, 0, -45.5], blur: 'light' },
+      { model: 'stones', scale: 1.5, rotation: [0, 40, 0], translate: [3, 0, -67], blur: 'light' },
+      { model: 'sakura', scale: 6, rotation: [0, 200, 0], translate: [-34.5, 0, -214], blur: 'light' },
+      { model: 'sakura', scale: 6, rotation: [0, 30, 0], translate: [38, 0, -23], blur: 'light' },
+    ],
+    blur: 3,
+    blurFar: 10,
+    light: { dir: [-2, 0.6, 0.55], shadow: 1, time: 18.75 },
+    bowlHeight: 4,
+    box: { w: 40, d: 40, z: 2, shader: 'bowlwood', radius: 4, show: false },
+    lights: [{ color: '#ffd9a0', intensity: 1.2, range: 115, translate: [-10.5, 5, -56.5] }],
+    water: { shader: 'nightOcean' },
   },
   room1: {
     mist: '#f3ecdd',
@@ -241,8 +274,8 @@ export const backgrounds = {
       { model: 'mountain', scale: 4, rotation: [0, 0, 0], translate: [0, 0, -330] },
     ],
     blurFar: 10,
-    bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
+    bowlHeight: 2,
+    box: { w: 52, d: 52, z: 2, shader: 'plankFloor', radius: 25 },
     lights: [],
   },
 };

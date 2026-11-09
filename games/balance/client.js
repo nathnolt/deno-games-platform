@@ -573,6 +573,107 @@ varying vec3 vRY;
 varying vec3 vRZ;
 void main() { vP = uv * 4.0; vP3 = vec3(0.0); vN = vec3(0.0, 0.0, 1.0); vW = vec3(0.0); vWN = vN; vDist = 1.0; vRX = vec3(1.0, 0.0, 0.0); vRY = vec3(0.0, 1.0, 0.0); vRZ = vN; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
+/**
+ * A table top with rounded corners: a slab of w (x) by d (z) and h high, corner radius r, its top at y = h / 2. The outline is a rounded rectangle; the
+ * side is one smooth strip (the normals turn with the corner), the top is a fan. UVs are world units (the top: x, z; the side: along the edge, up).
+ */
+function roundedSlabGeometry(w, d, h, r) {
+  const R = Math.max(0, Math.min(r, w / 2 - 0.01, d / 2 - 0.01));
+  const seg = 10; // steps per corner
+  const outline = []; // { x, z, nx, nz } counter-clockwise seen from above (+y)
+  const corners = [[w / 2 - R, d / 2 - R, 0], [-(w / 2 - R), d / 2 - R, Math.PI / 2], [-(w / 2 - R), -(d / 2 - R), Math.PI], [w / 2 - R, -(d / 2 - R), Math.PI * 1.5]];
+  for (const [cx, cz, a0] of corners) {
+    for (let i = 0; i <= seg; i++) {
+      const a = a0 + (i / seg) * (Math.PI / 2);
+      // (x to the right, z towards the camera: the angle runs from +x round to +z, which is clockwise seen from above, so the list is reversed below)
+      outline.push({ x: cx + Math.cos(a) * R, z: cz + Math.sin(a) * R, nx: Math.cos(a), nz: Math.sin(a) });
+    }
+  }
+  outline.reverse(); // now counter-clockwise seen from above
+  const n = outline.length;
+  const pos = [];
+  const nor = [];
+  const uv = [];
+  const idx = [];
+  let s = 0;
+  const y1 = h / 2;
+  const y0 = -h / 2;
+  for (let i = 0; i < n; i++) { // the side: two vertices per outline point (bottom, top)
+    const p = outline[i];
+    if (i > 0) s += Math.hypot(p.x - outline[i - 1].x, p.z - outline[i - 1].z);
+    pos.push(p.x, y0, p.z, p.x, y1, p.z);
+    nor.push(p.nx, 0, p.nz, p.nx, 0, p.nz);
+    uv.push(s, 0, s, h);
+  }
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const a = i * 2, b = a + 1, c = j * 2, e = c + 1;
+    idx.push(a, c, b, b, c, e);
+  }
+  const base = pos.length / 3; // the top: a fan round the middle
+  pos.push(0, y1, 0);
+  nor.push(0, 1, 0);
+  uv.push(0, 0);
+  for (const p of outline) { pos.push(p.x, y1, p.z); nor.push(0, 1, 0); uv.push(p.x, p.z); }
+  for (let i = 0; i < n; i++) idx.push(base, base + 1 + i, base + 1 + ((i + 1) % n)); // (counter-clockwise from above: the top faces up)
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  return geo;
+}
+
+/** A small seeded random number generator (the grass looks the same every time the world is built). */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * One tuft of grass: 5 blades, each a tapered strip of 3 rows and 5 vertices (3 triangles), leaning outwards. 15 triangles; the geometry is 1 unit high
+ * (the real height is set by the shader). Thousands of them are drawn as ONE instanced mesh, so the whole lawn is a single draw call.
+ */
+function grassTuftGeometry() {
+  const rnd = mulberry32(7);
+  const pos = [];
+  const nor = [];
+  const idx = [];
+  const BLADES = 5;
+  for (let b = 0; b < BLADES; b++) {
+    const yaw = (b / BLADES) * Math.PI * 2 + rnd() * 0.9;
+    const dx = Math.cos(yaw), dz = Math.sin(yaw); // which way the blade leans
+    const px = -dz, pz = dx; // across the blade
+    const off = 0.05 + 0.06 * rnd();
+    const hgt = 0.6 + 0.4 * rnd();
+    const w = 0.05 * (0.8 + 0.5 * rnd());
+    const lean = 0.2 + 0.4 * rnd();
+    const v0 = pos.length / 3;
+    const row = (t, half) => {
+      const y = hgt * t;
+      const out = off + lean * hgt * t * t;
+      for (const side of half > 0 ? [-1, 1] : [0]) pos.push(dx * out + px * half * side, y, dz * out + pz * half * side);
+    };
+    row(0, w);
+    row(0.5, w * 0.7);
+    row(1, 0);
+    const nn = new THREE.Vector3(dx, 0.5, dz).normalize(); // the face of the blade looks outwards and a little up
+    for (let i = 0; i < 5; i++) nor.push(nn.x, nn.y, nn.z);
+    idx.push(v0, v0 + 1, v0 + 2, v0 + 1, v0 + 3, v0 + 2, v0 + 2, v0 + 3, v0 + 4);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  geo.setIndex(idx);
+  return geo;
+}
+
 /** Multiply the texture coordinates of a stock three.js shape (they run 0..1): block shaders read them as sizes in world units, so 0..1 would look blurry. */
 function scaleUv(geo, k = 4) {
   const uv = geo.getAttribute('uv');
@@ -1055,6 +1156,7 @@ class BalanceView {
   scenery = null; //  the part of the world that is blurred: the floor and the models of the background
   mainGroup = null; // the table, the bowl and the water
   floorMesh = null;
+  grassMesh = null;
   water = null;
   instGroups = new Map(); // debug: background model instance index -> its 3D group (the background studio picks and moves them)
   selIndex = null; //       debug: selected instance
@@ -2287,7 +2389,8 @@ class BalanceView {
     this.bowlDef = bowl;
     this.waterSel = bg.water ?? null; // (which water shader the bowl's water uses: chosen in the background; its settings come with the shader)
     this.groundY = groundYOf(bowl);
-    const bowlH = bg.bowlHeight ?? TABLE.h; // how high the bowl (= the top of the table) stands above the floor
+    const baseOn = !!bg.table?.model || bg.box?.show !== false; // false = no table: the bowl stands right on the floor
+    const bowlH = baseOn ? (bg.bowlHeight ?? TABLE.h) : 0; // how high the bowl (= the top of the table) stands above the floor
     const floorY = this.groundY - bowlH;
     this.floorY = floorY;
     this.scene.background = new THREE.Color(bg.mist);
@@ -2314,16 +2417,29 @@ class BalanceView {
       scenery.add(floor);
       this.floorMesh = floor;
     }
+    this.grassMesh = null;
+    if (bg.ground?.style === 'grass') { // tufts of grass sticking out of the lawn (one instanced mesh)
+      const tufts = this.#buildGrass(bg, fog, floorY);
+      if (tufts) {
+        tufts.userData.blurLevel = blurLevelOf(bg.ground?.blur);
+        scenery.add(tufts);
+        this.grassMesh = tufts;
+      }
+    }
 
     // the table: a 3D wooden rectangle (or a model). The bowl stands on it at the back, the waiting blocks lie on it at the front.
     if (bg.table?.model && models[bg.table.model]) {
       this.#addModel(main, bg.table, token, floorY, fog, TABLE_INDEX); // a model instead of the plain box
     } else {
-      const th = Math.max(bowlH, 0.05);
-      const table = new THREE.Mesh(new THREE.BoxGeometry(bg.box.w, th, bg.box.d), this.#blockMaterial(bg.box.shader, 0.7, THREE.FrontSide, null, false));
-      table.name = 'table';
-      table.position.set(0, this.groundY - th / 2, bg.box.z);
-      main.add(table);
+      if (baseOn) {
+        const th = Math.max(bowlH, 0.05);
+        const radius = bg.box.radius ?? 0;
+        const geo = radius > 0.01 ? roundedSlabGeometry(bg.box.w, bg.box.d, th, radius) : new THREE.BoxGeometry(bg.box.w, th, bg.box.d);
+        const table = new THREE.Mesh(geo, this.#blockMaterial(bg.box.shader, 0.7, THREE.FrontSide, null, false));
+        table.name = 'table';
+        table.position.set(0, this.groundY - th / 2, bg.box.z);
+        main.add(table);
+      }
     }
 
     // the bowl: the profile turned around the vertical axis (flat bottom, rounded corners), or a model if the bowl has one
@@ -2565,6 +2681,103 @@ void main() {
     return mat;
   }
 
+  /**
+   * The tufts of the grass style of the floor: one InstancedMesh (a single draw call). The positions are random (seeded) over the part of the ground the camera
+   * sees, leaving out the table's footprint. Everything that moves happens on the graphics card: the vertex shader scales every tuft to its own height and
+   * sways it in the wind (a slow gust that rolls over the field, plus a quicker wobble of every tuft). The tufts do not cast shadows, but receive the light
+   * and the shadows of the scene, and they fade into the mist like the floor.
+   */
+  #buildGrass(bg, fog, floorY) {
+    const g = bg.ground;
+    const density = g.grassDensity ?? 1;
+    const count = Math.round(9000 * density);
+    if (count <= 0) return null;
+    const rnd = mulberry32(1337);
+    const geo = grassTuftGeometry();
+    const rand = new Float32Array(count * 4);
+    const hx = (bg.box?.w ?? TABLE.w) / 2 + 4; // (leave the table's footprint and a margin free: that is where the blocks stand)
+    const hz = (bg.box?.d ?? TABLE.d) / 2 + 4;
+    const cz = bg.box?.z ?? TABLE.z;
+    const m = new THREE.Matrix4();
+    const mesh = new THREE.InstancedMesh(geo, new THREE.ShaderMaterial({
+      uniforms: {
+        uMist: fog.uFogColor, uFogRange: fog.uFog, uTime: this.uTime,
+        uA: { value: rawColor(g.colorA) }, uB: { value: rawColor(g.colorB) },
+        uHeight: { value: g.grassHeight ?? 1.6 }, uWind: { value: g.grassWind ?? 1 },
+        ...this.shadowU,
+      },
+      vertexShader: /* glsl */ `
+attribute vec4 aRand; // x = phase of the wobble, y = height factor, z = colour, w = brightness
+uniform float uTime;
+uniform float uHeight;
+uniform float uWind;
+varying vec3 vW;
+varying vec3 vN;
+varying float vT;
+varying vec4 vR;
+void main() {
+  float s = uHeight * aRand.y;
+  mat4 M = modelMatrix * instanceMatrix;
+  vec4 w = M * vec4(position * s, 1.0);
+  vec3 root = M[3].xyz;
+  float t = position.y; // 0 at the root, up to 1 at the tip
+  float gust = sin(uTime * 0.8 + root.x * 0.045 + root.z * 0.03); // a slow wave that rolls over the field
+  float wobble = sin(uTime * 2.3 + aRand.x * 6.2831 + root.x * 0.2);
+  float bend = t * t * s * uWind * 0.28; // the tip moves most, the root not at all
+  w.x += bend * (0.45 + 0.55 * gust + 0.3 * wobble);
+  w.z += bend * 0.25 * sin(uTime * 1.7 + aRand.x * 5.0 + root.z * 0.17);
+  vW = w.xyz;
+  vT = t;
+  vR = aRand;
+  vN = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * normal);
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`,
+      fragmentShader: /* glsl */ `
+precision highp float;
+varying vec3 vW;
+varying vec3 vN;
+varying float vT;
+varying vec4 vR;
+uniform vec3 uMist;
+uniform vec2 uFogRange;
+uniform vec3 uA;
+uniform vec3 uB;
+${SHADOW_GLSL}
+void main() {
+  vec3 n = normalize(vN);
+  if (!gl_FrontFacing) n = -n;
+  n = normalize(mix(vec3(0.0, 1.0, 0.0), n, 0.35)); // mostly lit like the ground, a little by the way the blade faces
+  float t = clamp(vT / 0.9, 0.0, 1.0);
+  vec3 c = mix(uA, uB, pow(t, 0.8) * (0.55 + 0.45 * vR.z)); // roots colour at the bottom, tip colour at the top, every tuft a little different
+  c *= (0.82 + 0.3 * vR.w) * (0.5 + 0.5 * t); // the roots are in shade
+  c *= sceneLight(vW, n) * 0.86;
+  float dc = length(vW - cameraPosition);
+  gl_FragColor = vec4(mix(c, uMist, smoothstep(uFogRange.x * 0.9, uFogRange.y, dc)), 1.0);
+}`,
+      side: THREE.DoubleSide,
+    }), count);
+    mesh.name = 'grass';
+    let n = 0;
+    for (let tries = 0; n < count && tries < count * 4; tries++) {
+      const x = (rnd() * 2 - 1) * 130;
+      const z = -140 + rnd() * 190;
+      if (Math.abs(x) < hx && Math.abs(z - cz) < hz) { rnd(); rnd(); rnd(); rnd(); rnd(); continue; }
+      m.makeRotationY(rnd() * Math.PI * 2).setPosition(x, floorY, z);
+      mesh.setMatrixAt(n, m);
+      rand[n * 4] = rnd();
+      rand[n * 4 + 1] = 0.6 + rnd() * 0.8;
+      rand[n * 4 + 2] = rnd();
+      rand[n * 4 + 3] = rnd();
+      n++;
+    }
+    mesh.count = n;
+    geo.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 4));
+    mesh.frustumCulled = false; // (the tufts are spread over the whole ground)
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.material.userData.label = 'grass';
+    return mesh;
+  }
+
   #floorMaterial(bg, fog) {
     return new THREE.ShaderMaterial({
       uniforms: {
@@ -2575,7 +2788,8 @@ void main() {
         uRipple: { value: bg.ground.ripple },
         uHalf: { value: new THREE.Vector2((bg.box?.w ?? TABLE.w) / 2, (bg.box?.d ?? TABLE.d) / 2) },
         uC: { value: new THREE.Vector2(0, bg.box?.z ?? TABLE.z) },
-        uStyle: { value: bg.ground.style === 'wood' ? 1 : 0 },
+        uStyle: { value: bg.ground.style === 'wood' ? 1 : bg.ground.style === 'grass' ? 2 : 0 },
+        uRadius: { value: bg.box?.radius ?? 0 },
         ...this.shadowU,
       },
       vertexShader: /* glsl */ `
@@ -2596,6 +2810,7 @@ uniform float uRipple;
 uniform vec2 uHalf;
 uniform vec2 uC;
 uniform float uStyle;
+uniform float uRadius;
 ${SHADOW_GLSL}
 float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 float noise(vec2 p) {
@@ -2604,15 +2819,22 @@ float noise(vec2 p) {
   return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
 void main() {
-  vec2 d = abs(vW.xz - uC) - uHalf;
-  float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); // distance to the table's edge
+  vec2 d = abs(vW.xz - uC) - uHalf + uRadius;
+  float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - uRadius; // distance to the table's edge (rounded corners)
   float dc = length(vW - cameraPosition);
   float wob = noise(vW.xz * 0.05) * 3.0 + noise(vW.xz * 0.3) * 0.35;
   float rake = 0.5 + 0.5 * sin((dist + wob) * uRipple);
   rake = mix(0.5, rake, 1.0 - smoothstep(70.0, 220.0, dc)); // far away the lines would shimmer: let them melt into plain sand
   vec3 sand = mix(uA, uB, rake);
   sand *= 0.97 + 0.06 * noise(vW.xz * 2.5);
-  if (uStyle > 0.5) { // wooden planks: rows 6 units wide, boards 36 long, every row shifted
+  if (uStyle > 1.5) { // grass: roots colour (uA) to tip colour (uB), in big soft patches, with a fine blade-like speckle that fades out with distance (no shimmer)
+    float blotch = noise(vW.xz * 0.045) * 0.6 + noise(vW.xz * 0.17) * 0.4;
+    float mow = 0.5 + 0.5 * sin(vW.x * 0.11 + noise(vW.xz * 0.03) * 5.0); // faint broad stripes, like a mown lawn
+    float fine = 0.5 * noise(vW.xz * vec2(7.0, 7.0)) + 0.5 * noise(vW.xz * 19.0);
+    float near = 1.0 - smoothstep(25.0, 90.0, dc);
+    sand = mix(uA, uB, clamp(0.25 + 0.4 * blotch + 0.12 * mow, 0.0, 1.0));
+    sand *= 1.0 + near * (fine - 0.5) * 0.45;
+  } else if (uStyle > 0.5) { // wooden planks: rows 6 units wide, boards 36 long, every row shifted
     float row = floor(vW.z / 6.0);
     float off = hash(vec2(row, 1.0)) * 40.0;
     float col = floor((vW.x + off) / 36.0);
@@ -3778,6 +4000,7 @@ void main() {
     if (this.scenery) this.scenery.visible = true;
     if (this.mainGroup) this.mainGroup.visible = true;
     if (this.floorMesh) this.floorMesh.visible = true;
+    if (this.grassMesh) this.grassMesh.visible = true;
     if (this.water) this.water.visible = true;
     this.scene.overrideMaterial = null;
     this.frontScene.overrideMaterial = null;
@@ -3837,6 +4060,7 @@ void main() {
     if (this.water) this.water.visible = false;
     if (this.lightMarkers) this.lightMarkers.visible = false;
     if (this.floorMesh) this.floorMesh.visible = false;
+    if (this.grassMesh) this.grassMesh.visible = false; // (the grass casts no shadows: thousands of blades would only cost time)
     this.scene.overrideMaterial = fx.depthMat;
     this.frontScene.overrideMaterial = fx.depthMat;
     r.setClearColor(0xffffff, 1); // white = infinitely far = nothing in the way
@@ -3852,6 +4076,7 @@ void main() {
     if (this.water) this.water.visible = true;
     if (this.lightMarkers) this.lightMarkers.visible = this.markersOn;
     if (this.floorMesh) this.floorMesh.visible = true;
+    if (this.grassMesh) this.grassMesh.visible = true;
     u.uShadowMap.value = fx.shadowRT.depthTexture;
     u.uShadowStr.value = L.shadow;
     return true;
@@ -3872,6 +4097,7 @@ void main() {
     }
     if (this.mainGroup) this.mainGroup.visible = !on;
     if (hideFloor && this.floorMesh) this.floorMesh.visible = !on;
+    if (hideFloor && this.grassMesh) this.grassMesh.visible = !on;
   }
 
   /** Planar reflection: the scenery seen from a camera mirrored in the water surface, drawn into a texture the water shader looks up. */
@@ -4020,7 +4246,13 @@ void main() {
   gl_FragColor = vec4(c, 1.0);
 }`, { uNear: { value: null }, uFar: { value: null }, uMask: { value: null } });
       const maskMats = [0, 0.5, 1].map((v) => new THREE.ShaderMaterial({
-        vertexShader: /* glsl */ `void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        vertexShader: /* glsl */ `void main() {
+  vec4 p = vec4(position, 1.0);
+#ifdef USE_INSTANCING
+  p = instanceMatrix * p; // (the tufts of grass are an instanced mesh)
+#endif
+  gl_Position = projectionMatrix * modelViewMatrix * p;
+}`,
         fragmentShader: /* glsl */ `precision highp float;\nvoid main() { gl_FragColor = vec4(${v.toFixed(3)}, 0.0, 0.0, 1.0); }`,
         side: THREE.DoubleSide,
       }));

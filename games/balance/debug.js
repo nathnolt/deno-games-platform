@@ -211,6 +211,16 @@ export function createDebugMenu(view) {
     });
     return field(label, i);
   }
+  /** Picking the grass floor for the first time: green colours and the usual grass settings (nothing is changed afterwards). */
+  function grassDefaults(g) {
+    if (g.style !== 'grass' || g.grassHeight !== undefined) return;
+    g.colorA = '#3f6a2b';
+    g.colorB = '#8dbb4a';
+    g.grassHeight = 1.6;
+    g.grassDensity = 1;
+    g.grassWind = 1;
+    touch('backgrounds');
+  }
   function check(label, obj, key, kind, then) {
     const i = h('input', { type: 'checkbox', checked: !!obj[key] });
     i.addEventListener('change', () => {
@@ -768,15 +778,25 @@ export function createDebugMenu(view) {
           n.addEventListener('input', () => { const v = parseFloat(n.value); if (Number.isFinite(v)) { bg.fog[i] = v; touch('backgrounds'); } });
           return n;
         })),
-        color('sand grooves', bg.ground, 'colorA', 'backgrounds'),
-        color('sand ridges', bg.ground, 'colorB', 'backgrounds'),
-        slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1),
-        select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks'], ['none', 'no floor']], bg.ground, 'style', 'backgrounds'),
+        color(bg.ground.style === 'grass' ? 'grass roots' : 'sand grooves', bg.ground, 'colorA', 'backgrounds'),
+        color(bg.ground.style === 'grass' ? 'grass tips' : 'sand ridges', bg.ground, 'colorB', 'backgrounds'),
+        ...(bg.ground.style === 'grass'
+          ? [slider('blade height', bg.ground, 'grassHeight', 'backgrounds', 0.3, 5, 0.1),
+            slider('tufts (1 = 9000)', bg.ground, 'grassDensity', 'backgrounds', 0, 4, 0.05),
+            slider('wind', bg.ground, 'grassWind', 'backgrounds', 0, 3, 0.05)]
+          : [slider('rake spacing', bg.ground, 'ripple', 'backgrounds', 0.3, 6, 0.1)]),
+        select('floor', [['sand', 'raked sand'], ['wood', 'wooden planks'], ['grass', 'grass'], ['none', 'no floor']], bg.ground, 'style', 'backgrounds', () => { grassDefaults(bg.ground); render(); }),
         num('bowl height above the floor', bg, 'bowlHeight', 'backgrounds', { min: 0, max: 100 }),
+        field('table (the base the bowl rests on)', (() => {
+          const c = h('input', { type: 'checkbox', checked: bg.box.show !== false });
+          c.addEventListener('change', () => { if (c.checked) delete bg.box.show; else bg.box.show = false; touch('backgrounds'); render(); });
+          return c;
+        })()),
+        ...(bg.box.show === false ? [note('No table: the bowl stands on the floor (the bowl height above is not used). The size below is only the free space round it where no grass grows.')] : []),
         num('table width (x)', bg.box, 'w', 'backgrounds', { min: 10, max: 1000 }),
         num('table depth (z)', bg.box, 'd', 'backgrounds', { min: 10, max: 1000 }),
         num('table centre z', bg.box, 'z', 'backgrounds'),
-        shader('table shader', bg.box, 'shader', 'backgrounds')),
+        ...(bg.box.show === false ? [] : [num('table corner radius', bg.box, 'radius', 'backgrounds', { min: 0, max: 500 }), shader('table shader', bg.box, 'shader', 'backgrounds')])),
       section('Water of the bowl',
         field('water shader', shaderPicker({
           view, table: () => draft.shaderCode ?? {}, value: bg.water?.shader ?? '', water: true, allowEmpty: true, emptyLabel: '(classic water)',
@@ -987,7 +1007,7 @@ export function createDebugMenu(view) {
       el.title = state.problems.join('\n');
       el.classList.toggle('bb-on', n > 0);
     },
-    w: { field, section, num, text, check, select, shader, color, slider, btn, note },
+    w: { field, section, num, text, check, select, shader, color, slider, btn, note, grassDefaults },
     open: (name) => openStudio(name),
     close: () => closeStudio(),
     /** Playtest: leave the studio and the menu, and play the level as an ordinary game in the local game (it stays on until you go back to the room). */

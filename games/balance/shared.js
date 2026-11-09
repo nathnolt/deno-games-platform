@@ -685,6 +685,7 @@ export const BLUR_CHOICES = ['none', 'light', 'heavy'];
 export const BACKGROUND_DEFAULTS = {
   mist: '#e7e2d6',
   fog: [150, 520],
+  // style: 'sand' | 'wood' | 'grass' | 'none'. Grass: colorA = the roots, colorB = the tips of the blades; grassHeight, grassDensity (tufts, 1 = 9000) and grassWind are optional.
   ground: { colorA: '#cdc3a8', colorB: '#e6dec9', ripple: 2.2, style: 'sand', blur: 'light' },
   // The scenery is blurred in two strengths: `blur` (light) and `blurFar` (heavy), both in pixels. Every background model says which one it gets
   // (`blur: 'none' | 'light' | 'heavy'`, default light) and so does the floor (`ground.blur`). 0 for both = no blur at all.
@@ -692,7 +693,7 @@ export const BACKGROUND_DEFAULTS = {
   blurFar: 10,
   light: { dir: [-0.45, 0.85, 0.55], shadow: 0.55, time: 12 }, // where the light comes from (towards the light) and how dark its shadows are (0 = no shadows)
   bowlHeight: 4, // how high the bowl stands above the floor (= the thickness of the table)
-  box: { w: 110, d: 52, z: 2, shader: 'floorwood' }, // the plain wooden table: width (x), depth (z), centre z, shader (unused when `table` is a model)
+  box: { w: 110, d: 52, z: 2, shader: 'floorwood', radius: 0 }, // the plain table: width (x), depth (z), centre z, shader, corner radius; `show: false` = no table at all, the bowl stands on the floor (unused when `table` is a model)
   models: [],
 };
 
@@ -941,7 +942,8 @@ export function validateDefinitions(defs, extra = {}) {
         if (b.water.shader !== undefined && b.water.shader !== '' && extra.waterShaderNames && !extra.waterShaderNames.includes(b.water.shader)) err(`background ${k}: water.shader "${b.water.shader}" is not a water shader (type 'water' in _shaders.js)`);
       }
     }
-    if (b.ground?.style !== undefined && !['sand', 'wood', 'none'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand, wood or none`);
+    if (b.ground?.style !== undefined && !['sand', 'wood', 'grass', 'none'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand, wood, grass or none`);
+    for (const [f, lo, hi] of [['grassHeight', 0.2, 8], ['grassDensity', 0, 4], ['grassWind', 0, 3]]) if (b.ground?.[f] !== undefined && !(isNum(b.ground[f]) && b.ground[f] >= lo && b.ground[f] <= hi)) err(`background ${k}: ground.${f} must be a number from ${lo} to ${hi}`);
     if (b.light?.shadows !== undefined) shadowErrors(b.light.shadows, `background ${k}: light.shadows`, err);
     if (b.lights !== undefined) {
       if (!Array.isArray(b.lights)) err(`background ${k}: lights must be a list`);
@@ -958,6 +960,8 @@ export function validateDefinitions(defs, extra = {}) {
     if (b.box !== undefined) {
       for (const f of ['w', 'd']) if (b.box[f] !== undefined && !(isNum(b.box[f]) && b.box[f] >= 10 && b.box[f] <= 1000)) err(`background ${k}: box.${f} must be a number from 10 to 1000`);
       if (b.box.z !== undefined && !isNum(b.box.z)) err(`background ${k}: box.z must be a number`);
+      if (b.box.radius !== undefined && !(isNum(b.box.radius) && b.box.radius >= 0 && b.box.radius <= 500)) err(`background ${k}: box.radius (corner radius) must be a number from 0 to 500`);
+      if (b.box.show !== undefined && typeof b.box.show !== 'boolean') err(`background ${k}: box.show must be true or false`);
       if (b.box.shader !== undefined) shaderOk(b.box.shader, `background ${k}, table box`);
     }
     if (b.bowlHeight !== undefined && !(isNum(b.bowlHeight) && b.bowlHeight >= 0 && b.bowlHeight <= 100)) err(`background ${k}: bowlHeight must be a number from 0 to 100`);

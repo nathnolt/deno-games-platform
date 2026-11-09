@@ -657,6 +657,9 @@ void main() {
 // and every frame only reads that picture (2 texture reads instead of ~10 fbm calls).
 
 uniform vec3 uHighlight;      // color 1.0 0.95 0.8
+uniform vec3 uDeepColor;      // color 0.02 0.1 0.3   the water where it is deep (the dark patches)
+uniform vec3 uLightColor;     // color 0.1 0.55 0.85   the water where it is light (the bright patches)
+uniform vec3 uTint;           // color 0.9 0.95 1.0   tint of the mirrored sky
 uniform float uGlitter;       // 1.0 [0, 3]
 uniform float uWaves;         // 0.14 [0, 0.4]
 uniform float uFlow;          // 1.0 [0, 4]
@@ -699,9 +702,9 @@ vec3 env(vec3 r) {
 
 void main() {
   // the two water colours
-  vec3 deepBlue = vec3(0.02, 0.1, 0.3);
-  vec3 lightBlue = vec3(0.1, 0.55, 0.85);
-  vec3 tint = vec3(0.9, 0.95, 1.0);
+  vec3 deepBlue = uDeepColor;
+  vec3 lightBlue = uLightColor;
+  vec3 tint = uTint;
 
   // two copies of the baked picture drifting in different directions
   float t = uTime * 0.02 * uFlow;
@@ -815,8 +818,6 @@ void main() {
       uWaves: 0.19,
       uSunOwn: 0.87,
       uSunTurn: 176.1,
-      uMirror: 0.305,
-      uReflect: 0.71,
     },
   },
   terracotta: {
@@ -836,6 +837,23 @@ void main() {
       uWindow: 1.365,
       uGrain: 0.32,
       uTop: '#11bde8',
+    },
+  },
+  nightOcean: {
+    base: 'ocean',
+    category: 'Water',
+    params: {
+      uSunHeight: -10,
+      uHighlight: '#ffffff',
+      uGlitter: 0,
+      uWaves: 0.198,
+      uSunOwn: 0,
+      uSunTurn: 1.2,
+      uLightColor: '#1b3546',
+      uTint: '#ffffff',
+      uReflect: 0,
+      uMirror: 0.09,
+      uDeepColor: '#01091e',
     },
   },
 };

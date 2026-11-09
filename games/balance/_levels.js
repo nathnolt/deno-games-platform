@@ -204,7 +204,7 @@ export const levels = {
         name: 'Level 1',
         difficulty: 'hard',
         bowl: 'bowl1',
-        background: 'zen1',
+        background: 'zen3',
         initialBlocks: [
           { shape: 'I', material: 'glass', rot: 0, x: 1.75, y: 2 },
           { shape: 'triangle', material: 'static', rot: 0, x: -5, y: -1.75 },
