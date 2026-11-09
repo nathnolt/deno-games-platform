@@ -128,14 +128,14 @@ void main() {
 // curved or sloped surfaces. Planks are stacked along the Y axis, the grain runs along X.
 uniform vec3  uLight;     // color 0.60 0.40 0.20
 uniform vec3  uDark;      // color 0.44 0.27 0.12
-uniform float uSize;      // 2.8 [0.2, 5]     overall scale (bigger = larger planks and grain)
-uniform float uPlank;     // 0.62 [0.1, 2]     plank width
+uniform float uSize;      // 0.5 [0.2, 5]     overall scale (bigger = larger planks and grain)
+uniform float uPlank;     // 0.58 [0.1, 2]     plank width
 uniform float uVariant;   // 0.0 [0, 10]      another arrangement of the grain (was uSeed: that name is the block's own seed)
-uniform float uGrain;     // 0.4 [0, 1.5]     dark grain lines
-uniform float uWobble;    // 6.3 [0, 8]      how much the grain wanders
-uniform float uSeam;      // 0.3 [0, 1]       gap between planks
+uniform float uGrain;     // 0.9 [0, 1.5]     dark grain lines
+uniform float uWobble;    // 5.8 [0, 8]      how much the grain wanders
+uniform float uSeam;      // 0.2 [0, 1]       gap between planks
 uniform float uBump;      // 0.1 [0, 0.2]
-uniform float uShine;     // 0.0 [0, 3]
+uniform float uShine;     // 0.8 [0, 3]
 
 void main() {
   vec3 p = vPos / uSize + uVariant * 9.0;
@@ -453,6 +453,79 @@ void main() {
   gRough = roughMap(q * 1.2, 0.14, 0.12);
   gl_FragColor = finish(c, 1.0);
 }`,
+  },
+  ceramicGlaze: {
+    code: `
+// Teal-green stoneware glaze: vertical streaks where the glaze ran down, a fine speckle, rust brown
+// where it thins out near the top, and a glossy mirror coat on top. 3D, so it fits any shape.
+// The up direction of the glaze is the object's Y axis. The reflection comes from a pre-drawn map
+// (bake), so it costs one texture read; edit uTop / uHorizon / uBottom to match your own background.
+uniform vec3  uTeal; // color 0.07 0.46 0.42   main glaze colour
+uniform vec3  uDeep; // color 0.03 0.22 0.26   darker streaks
+uniform vec3  uPale; // color 0.4 0.72 0.6   lighter patches
+uniform vec3  uRust; // color 0.388 0.851 0.698   tint where the glaze is thin (near the top)
+uniform float uScale; // 2.927 [0.3, 4]   size of the pattern
+uniform float uStreak; // 0.55 [0, 1]   how streaky (1 = long drips, 0 = cloudy)
+uniform float uRustAmt; // 0.46 [0, 1]   brown near the top
+uniform float uReflect; // 0.598 [0, 1]   mirror reflection over the whole surface
+uniform float uGloss; // 0.863 [0, 1.5]   brightness of the highlights
+uniform float uVariant; // 0.0 [0, 10]   a different pattern
+uniform vec3  uTop; // color 0 0.8 1   reflected colour straight up
+uniform vec3  uHorizon; // color 0.984 0.855 0.576   reflected colour at eye level
+uniform vec3  uBottom; // color 0.157 0.051 0.349   reflected colour straight down
+uniform float uGrain; // 0.481 [0, 0.5]   grain in the reflected scene
+uniform float uWindow; // 0.802 [0, 3]   brightness of the soft light panel in the reflection
+
+// REFLECTION MAP, drawn ONCE (the studio bakes this into uBake whenever you change code or a slider).
+// It is a "sphere of surroundings" unrolled into a picture: x = direction around, y = up/down.
+// bake 256
+vec3 dirFromMap(vec2 uv) {
+  float lon = (uv.x - 0.5) * 6.2831853, lat = (uv.y - 0.5) * 3.1415927;
+  return vec3(cos(lat) * cos(lon), sin(lat), cos(lat) * sin(lon));
+}
+vec4 bake(vec2 uv) {
+  vec3 r = dirFromMap(uv);
+  vec3 c = r.y > 0.0 ? mix(uHorizon, uTop, pow(r.y, 0.6)) : mix(uHorizon, uBottom, pow(-r.y, 0.5));
+  c += vec3(1.0, 0.98, 0.94) * smoothstep(0.80, 0.90, dot(r, normalize(vec3(0.5, 0.55, 0.65)))) * 1.8 * uWindow;  // soft light panel
+  c += vec3(1.0, 0.7, 0.4) * smoothstep(0.93, 0.96, dot(r, normalize(vec3(-0.7, 0.3, 0.4)))) * 1.5 * uWindow;      // warm lamp
+  c *= 1.0 + (noise3T(r * 60.0) - 0.5) * uGrain * 2.0;                                                            // grain
+  return vec4(c, 1.0);
+}
+// look the surroundings up for a direction
+vec3 room(vec3 r) {
+  vec2 uv = vec2(atan(r.z, r.x) / 6.2831853 + 0.5, asin(clamp(r.y, -1.0, 1.0)) / 3.1415927 + 0.5);
+  return textureLod(uBake, uv, 0.0).rgb;
+}
+
+// three layers of noise are plenty for the fine streaks (fbm3T uses five)
+float fbm3Fine(vec3 p) { return (0.5 * noise3T(p) + 0.25 * noise3T(p * 2.03 + 17.1) + 0.125 * noise3T(p * 4.1 + 9.2)) / 0.875; }
+
+void main() {
+  vec3 p = vPos * uScale + uVariant * 7.0;
+  vec3 s = mix(vec3(1.0), vec3(5.0, 0.7, 5.0), uStreak);            // squash the noise along Y: streaks run up and down
+  float a = fbm3T(p * s);                                            // big streaks
+  float b = fbm3Fine(p * s * 3.0 + 11.0);                               // finer streaks
+  float t = clamp(a * 0.7 + b * 0.5, 0.0, 1.0);
+
+  vec3 c = mix(uDeep, uTeal, smoothstep(0.2, 0.55, t));
+  c = mix(c, uPale, smoothstep(0.55, 0.85, t) * 0.8);
+  c *= 0.9 + 0.2 * noise3T(p * 14.0);                                  // fine speckle in the glaze
+
+  float top = smoothstep(0.45, 1.0, vPos.y * 0.7 + 0.5 + (b - 0.5) * 0.7);
+  c = mix(c, uRust, top * top * uRustAmt);                          // brown near the top, broken up by the streaks
+
+  gNormal = bumpFromHeight(a, 0.004);
+  gHasN = 1.0;
+
+  vec3 n = gNormal, v = viewDir();
+  float k = 1.0 - clamp(dot(n, v), 0.0, 1.0), k2 = k * k;
+  float f = 0.05 + 0.95 * k2 * k2;                                  // fresnel: pow(k, 4) by multiplying
+  gSpec = room(reflect(-v, n)) * mix(uReflect * 0.35, 1.0, f) * uGloss;
+  gShine = 1.8 * uGloss;
+  gRough = 0.15;
+  gl_FragColor = finish(c, 1.0);
+}
+`,
   },
   bark: {
     code: `

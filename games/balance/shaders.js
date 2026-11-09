@@ -171,6 +171,17 @@ void main() {
 export const deformShaders = new Set([]); // (the water block no longer uses it: no subdivided faces, the ripples are in the fragment shader only)
 
 // ── helpers every shader gets (block shaders and water shaders): the "Shader Studio helpers" ──
+const HASH_GLSL = /* glsl */ `
+// ---- random numbers: an integer hash (Chris Wellons' "lowbias32") run on the float's own bits, so ANY input works: whole numbers, smooth ramps, negatives, big values ----
+uint hashBits(uint x) { x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }
+float hashToFloat(uint h) { return float(h >> 8u) * (1.0 / 16777216.0); }
+float hash11(float p) { return hashToFloat(hashBits(floatBitsToUint(p))); }
+float hash21(vec2 p) { uvec2 b = floatBitsToUint(p); return hashToFloat(hashBits(b.x * 0x9e3779b1u + b.y * 0x85ebca6bu)); }
+vec2 hash22(vec2 p) { uvec2 b = floatBitsToUint(p); uint h = hashBits(b.x * 0x9e3779b1u + b.y * 0x85ebca6bu); return vec2(hashToFloat(h), hashToFloat(hashBits(h + 0x9e3779b9u))); }
+float hash31(vec3 p) { uvec3 b = floatBitsToUint(p); return hashToFloat(hashBits(b.x * 0x9e3779b1u + b.y * 0x85ebca6bu + b.z * 0xc2b2ae35u)); }
+vec3 hash33(vec3 p) { uvec3 b = floatBitsToUint(p); uint h = hashBits(b.x * 0x9e3779b1u + b.y * 0x85ebca6bu + b.z * 0xc2b2ae35u); return vec3(hashToFloat(h), hashToFloat(hashBits(h + 0x9e3779b9u)), hashToFloat(hashBits(h + 0x3c6ef372u))); }
+float hash(vec2 p) { return hash21(p); }
+`;
 const HELPERS_COMMON = /* glsl */ `
 const float PI = 3.14159265359;
 const float TAU = 6.28318530718;
@@ -180,11 +191,6 @@ vec3 saturate(vec3 x) { return clamp(x, 0.0, 1.0); }
 float remap(float v, float a, float b, float c, float d) { return c + (v - a) * (d - c) / (b - a); }
 mat2 rot2(float a) { float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-float hash11(float p) { p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
-float hash21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
-vec2 hash22(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973)); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.xx + p3.yz) * p3.zy); }
-float hash31(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
-vec3 hash33(vec3 p3) { p3 = fract(p3 * vec3(0.1031, 0.1030, 0.0973)); p3 += dot(p3, p3.yxz + 33.33); return fract((p3.xxy + p3.yxx) * p3.zyx); }
 vec3 voronoi(vec2 p) { // x = distance to the nearest point, y = (second nearest - nearest) = the edges of the cells, z = a random number per cell
   vec2 i = floor(p), f = fract(p); float d1 = 8.0, d2 = 8.0, id = 0.0;
   for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
@@ -195,7 +201,7 @@ vec3 voronoi(vec2 p) { // x = distance to the nearest point, y = (second nearest
 }
 uniform sampler2D uNoiseTex; // 256 x 256 random numbers (green = red shifted by 37, 17 texels), repeating, linear: see noiseTexture() in client.js
 // ---- fast versions: read the random-number picture (uNoiseTex) instead of calculating hashes ----
-vec4 hashT(vec2 p) { return texture2D(uNoiseTex, (mod(floor(p), 256.0) + 0.5) * (1.0 / 256.0)); }
+vec4 hashT(vec2 p) { return texelFetch(uNoiseTex, ivec2(floor(p)) & ivec2(255), 0); }
 float noiseT(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return texture2D(uNoiseTex, (i + f + 0.5) * (1.0 / 256.0)).r; }
 float noise3T(vec3 p) {
   vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -277,6 +283,13 @@ vec3 graphBG(vec2 uv) {
   c += vec3(0.055) * (1.0 - smoothstep(0.0, 1.2, min(g.x, g.y)));
   return c;
 }
+// ---- how big is the surface under this pixel? Worked out from how vUv and the world position change between neighbouring pixels ----
+uniform vec2 uUvSize; // world size of one uv unit for curved shapes (0 = measure it per pixel)
+mat2 uvToPixels() { mat2 m = mat2(dFdx(vUv), dFdy(vUv)); if (abs(determinant(m)) < 1e-12) return mat2(1.0); return inverse(m); }
+vec2 uvPixelSize() { mat2 s = uvToPixels(); return vec2(length(s[0]), length(s[1])); }
+vec2 uvWorldSize() { if (uUvSize.x > 0.0) return uUvSize; mat2 s = uvToPixels(); vec3 dx = dFdx(vW), dy = dFdy(vW); return vec2(length(dx * s[0].x + dy * s[0].y), length(dx * s[1].x + dy * s[1].y)); }
+vec2 uvFit(vec2 uv, float tile) { return uv * uvWorldSize() / tile; }
+vec2 uvFitWrap(vec2 uv, float tile, vec2 stretch) { return uv * max(floor(uvWorldSize() * stretch / tile + 0.5), 1.0); }
 vec3 surfNormal() { vec3 n = normalize(vWN); return gl_FrontFacing ? n : -n; }
 float lambert(vec3 n, vec3 l) { return max(dot(n, l), 0.0); }
 float blinn(vec3 n, vec3 l, vec3 v, float shininess) { vec3 h = normalize(l + v); return pow(max(dot(n, h), 0.0), shininess) * step(0.0, dot(n, l)); }
@@ -296,7 +309,7 @@ float fresnel(vec3 n, vec3 v, float power) { return pow(1.0 - clamp(dot(n, v), 0
 
 const PERLIN_GLSL = /* glsl */ `
 // PERLIN (gradient) noise in 3D, from -1 to 1: every lattice point has a random direction, smooth quintic blending. pfbm = several octaves of it.
-float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+float h13(vec3 p) { return hash31(p); }
 vec3 pgrad(vec3 p) { return vec3(h13(p), h13(p + 19.19), h13(p + 47.77)) * 2.0 - 1.0; } // (a random direction: no sin / cos / sqrt, this runs 8 times per noise call)
 float perlin(vec3 x) {
   vec3 i = floor(x), f = fract(x);
@@ -347,7 +360,7 @@ uniform vec2 uResolution; // the size of the baked picture
 uniform float uQuality; // graphics setting: 0 = low (no extra surface detail), 1 = medium (roughness maps), 2 = high (roughness maps and bump maps)
 
 ${SHADOW_GLSL}
-float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+${HASH_GLSL}
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
@@ -512,8 +525,8 @@ uniform vec3 uSky;       // the colour of the mist / sky
 uniform float uSeed;
 uniform vec2 uResolution; // the size of the baked picture (see bake below)
 uniform sampler2D uBake;  // the picture drawn ONCE by  vec4 bake(vec2 uv)  (when the shader has one; the first line  // bake 1024  sets its size)
-float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 float whash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+${HASH_GLSL}
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   f = f * f * (3.0 - 2.0 * f);

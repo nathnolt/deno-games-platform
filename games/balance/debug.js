@@ -99,7 +99,7 @@ export function createDebugMenu(view) {
       validate();
       renderStatus();
     }
-    if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
+    if (kind === 'models' && modelPrev) { const md = draft.models[state.sel.model] ?? {}; if (live) modelPrev.setParams(md); else modelPrev.set(md); }
     if (kind === 'materials' && matPrev) updateMatPrev();
     if (live) localKinds.add(kind); // (the studio gives it to the local game itself, once the drag pauses: see syncNow)
     else if (!quiet) touchLocal(kind);
@@ -670,7 +670,8 @@ export function createDebugMenu(view) {
         slider('square at the bottom', b, 'squareBottom', 'bowls', 2, 10, 0.1),
         note('2 = round, 5 = rounded square, higher = boxier.')),
       section('Look',
-        select('shader', shaderNames(), b, 'shader', 'bowls'),
+        select('shader', shaderNames(), b, 'shader', 'bowls', () => { delete b.shaderParams; render(); }),
+        ...blockShaderControls({ h, view, mat: b, touch, draft: () => draft, rerender: render, kind: 'bowls' }),
         color('water colour', b.water, 'color', 'bowls'),
         slider('water opacity', b.water, 'opacity', 'bowls', 0, 1, 0.05),
         slider('water reflection', b.water, 'reflect', 'bowls', 0, 1, 0.05),
@@ -713,9 +714,20 @@ export function createDebugMenu(view) {
           if (s.value) m.shaders[p.name] = s.value;
           else delete m.shaders[p.name];
           if (!Object.keys(m.shaders).length) delete m.shaders;
+          delete m.shaderParams?.[p.name];
+          if (m.shaderParams && !Object.keys(m.shaderParams).length) delete m.shaderParams;
           touch('models');
+          render();
         });
-        return field(`${p.name} (${p.triangles} tri)`, s);
+        // the settings of this part's shader (kept in m.shaderParams[part]): a stand-in object that is copied back after every change
+        const shader = m.shaders?.[p.name] ?? m.shader ?? 'stone1';
+        const tmp = { shaderParams: m.shaderParams?.[p.name] };
+        const sync = () => {
+          if (tmp.shaderParams && Object.keys(tmp.shaderParams).length) (m.shaderParams ??= {})[p.name] = tmp.shaderParams;
+          else if (m.shaderParams) { delete m.shaderParams[p.name]; if (!Object.keys(m.shaderParams).length) delete m.shaderParams; }
+        };
+        const rows = blockShaderControls({ h, view, mat: tmp, shader, touch: (k, q, l) => { sync(); touch(k, q, l); }, draft: () => draft, rerender: render, kind: 'models' });
+        return h('div', {}, field(`${p.name} (${p.triangles} tri)`, s), ...rows);
       }));
       if (!parts.length) list.replaceChildren(err('The file has no faces.'));
     }).catch((e) => { if (token === infoToken) list.replaceChildren(err(`Cannot load ${m.file}: ${e.message}`)); });
@@ -733,7 +745,7 @@ export function createDebugMenu(view) {
       section('Preview', prevBox),
       section(null,
         text('file in ./models', m, 'file', 'models'),
-        select('default shader', [['', '(stone1)'], ...shaderNames()], m, 'shader', 'models'),
+        select('default shader', [['', '(stone1)'], ...shaderNames()], m, 'shader', 'models', () => { delete m.shaderParams; render(); }),
         check('smooth (use normals of the file)', m, 'smooth', 'models'),
         h('div', { class: 'bb-dbg-row' }, btn('Reload the file', () => view.debugReloadModels()), btn('Show this part list again', () => render()))),
       section('Parts and their shaders', note('A part is a `usemtl` name (or the `o` / `g` name when there is none) in the .obj file.'), list),

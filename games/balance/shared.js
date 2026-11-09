@@ -914,8 +914,18 @@ export function validateDefinitions(defs, extra = {}) {
     }
   }
 
+  const paramsOk = (o, where) => {
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return err(`${where}: shaderParams must be an object`);
+    for (const [pk, pv] of Object.entries(o)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`${where}: shaderParams.${pk} must be a number, a colour or a list of numbers`);
+    return undefined;
+  };
+  for (const [k, b] of Object.entries(d.bowls ?? {})) if (b.shaderParams !== undefined) paramsOk(b.shaderParams, `bowl ${k}`);
   // models
   for (const [k, m] of Object.entries(d.models ?? {})) {
+    if (m.shaderParams !== undefined) {
+      if (!m.shaderParams || typeof m.shaderParams !== 'object' || Array.isArray(m.shaderParams)) err(`model ${k}: shaderParams must be an object (one entry per part)`);
+      else for (const [part, o] of Object.entries(m.shaderParams)) paramsOk(o, `model ${k}, part ${part}`);
+    }
     if (typeof m.file !== 'string' || !/^[\w\- .]+\.obj$/i.test(m.file)) err(`model ${k}: file must be the name of an .obj file`);
     if (m.shader !== undefined) shaderOk(m.shader, `model ${k}`);
     for (const [part, sh] of Object.entries(m.shaders ?? {})) shaderOk(sh, `model ${k}, part ${part}`);

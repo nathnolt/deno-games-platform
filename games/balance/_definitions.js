@@ -143,6 +143,35 @@ export const bowls = {
     shader: 'ceramic',
     water: { color: '#6cc3d5', opacity: 0.45, reflect: 0.6 },
   },
+  bowl3: {
+    a: 20.5,
+    b: 8,
+    t: 0.9,
+    rimY: 1.5,
+    r: 3.3,
+    zscale: 0.6,
+    square: 8.6,
+    squareBottom: 9.1,
+    shader: 'ceramicGlaze',
+    water: { color: '#004585', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
+    shaderParams: {
+      uScale: 1.299,
+      uTeal: '#e8d454',
+      uDeep: '#ac8b16',
+      uPale: '#db9f1f',
+      uRust: '#6d6e21',
+      uVariant: 7.1,
+      uGrain: 0.5,
+      uWindow: 1.155,
+      uTop: '#03a1c9',
+      uHorizon: '#dfc690',
+      uBottom: '#372b10',
+      uStreak: 0.15,
+      uRustAmt: 0.57,
+      uReflect: 0.46,
+      uGloss: 0.48,
+    },
+  },
   canoe: {
     a: 40,
     b: 7,
@@ -217,7 +246,24 @@ export const backgrounds = {
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'floorwood' },
+    box: {
+      w: 110,
+      d: 52,
+      z: 2,
+      shader: 'floorwood',
+      shaderParams: {
+        uSize: 1.664,
+        uPlank: 1.1545,
+        uVariant: 4.05,
+        uGrain: 0.5625,
+        uWobble: 4.88,
+        uSeam: 0.1,
+        uBump: 0.104,
+        uShine: 0.84,
+        uLight: '#d6a371',
+        uDark: '#714219',
+      },
+    },
     lights: [],
     water: {
       shader: 'ocean',
@@ -263,6 +309,7 @@ export const backgrounds = {
     ],
   },
 };
+
 
 
 

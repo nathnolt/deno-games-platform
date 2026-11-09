@@ -1411,10 +1411,21 @@ class BalanceView {
   debugLiveBlocks(defs) {
     this.debugLiveWater(defs); // (water blocks)
     for (const m of this.blockMats) {
-      const params = (m.userData.materialKey === '@table' ? defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.box?.shaderParams : defs?.materials?.[m.userData.materialKey]?.shaderParams) ?? {}; // ('@table' = the table of the background)
+      const params = this.#paramsOfKey(defs, m.userData.materialKey); // ('@table' = the table of the background)
       for (const p of m.userData.blockParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
       m.userData.rebake?.(); // (a baked picture may depend on the settings; the same settings share one picture)
     }
+  }
+
+  /** The settings a material key stands for: a material, '@table', '@bowl:key' or '@model:key:part'. */
+  #paramsOfKey(defs, key) {
+    if (key === '@table') return defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.box?.shaderParams ?? {};
+    if (key?.startsWith('@bowl:')) return defs?.bowls?.[key.slice(6)]?.shaderParams ?? {};
+    if (key?.startsWith('@model:')) {
+      const [, model, ...part] = key.split(':');
+      return defs?.models?.[model]?.shaderParams?.[part.join(':')] ?? {};
+    }
+    return defs?.materials?.[key]?.shaderParams ?? {};
   }
 
   #setParam(u, p, v) {
@@ -1487,7 +1498,7 @@ class BalanceView {
   /**
    * A small 3D window that shows one model with its shaders (for the Models tab and the background studio).
    *   preview.set(def)   def = { file, shader?, shaders?, smooth? } (a draft entry of `models`)     preview.dispose()
-   * It turns slowly; drag to turn it yourself, wheel to zoom.
+   * It turns slowly; drag to turn it yourself, right-drag (or shift-drag) to pan, wheel to zoom.
    */
   debugModelPreview(canvas) {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -1528,9 +1539,17 @@ class BalanceView {
       place();
       renderer.render(scene, camera);
     };
-    const onDown = (e) => { drag = { x: e.clientX, y: e.clientY }; cam.auto = false; canvas.setPointerCapture(e.pointerId); };
+    const onDown = (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.button !== 0 || e.shiftKey }; cam.auto = false; canvas.setPointerCapture(e.pointerId); };
     const onMove = (e) => {
       if (!drag) return;
+      if (drag.pan) { // right or middle button, or shift: slide the picture (the view's own right and up)
+        const k = (cam.dist * 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / Math.max(1, canvas.clientHeight);
+        const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+        const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+        cam.target.addScaledVector(right, -(e.clientX - drag.x) * k).addScaledVector(up, (e.clientY - drag.y) * k);
+        drag = { x: e.clientX, y: e.clientY, pan: true };
+        return;
+      }
       cam.yaw -= (e.clientX - drag.x) * 0.008;
       cam.pitch = THREE.MathUtils.clamp(cam.pitch + (e.clientY - drag.y) * 0.008, -0.3, 1.5);
       drag = { x: e.clientX, y: e.clientY };
@@ -1542,9 +1561,21 @@ class BalanceView {
     canvas.addEventListener('pointerup', onUp);
     canvas.addEventListener('pointercancel', onUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
+    const onMenu = (e) => e.preventDefault(); // (the right button pans)
+    canvas.addEventListener('contextmenu', onMenu);
     raf = requestAnimationFrame(loop);
 
     return {
+      /** The settings of the shaders changed (a slider is dragged): update the uniforms of the parts, without loading anything. */
+      setParams: (def) => {
+        group?.traverse((o) => {
+          const m = o.material;
+          if (!m?.userData?.paramList) return;
+          const params = def.shaderParams?.[o.userData.part] ?? {};
+          for (const p of m.userData.paramList) this.#setParam(m.uniforms[p.name], p, params[p.name]);
+          m.userData.rebake?.();
+        });
+      },
       set: async (def) => {
         const mine = ++token;
         let parts;
@@ -1561,7 +1592,9 @@ class BalanceView {
         group = new THREE.Group();
         parts.forEach((p, i) => {
           const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
-          group.add(new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, null, true)));
+          const mesh = new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, null, true, null, def.shaderParams?.[p.name], null));
+          mesh.userData.part = p.name;
+          group.add(mesh);
         });
         scene.add(group);
         const box = new THREE.Box3().setFromObject(group);
@@ -1577,6 +1610,7 @@ class BalanceView {
         canvas.removeEventListener('pointerup', onUp);
         canvas.removeEventListener('pointercancel', onUp);
         canvas.removeEventListener('wheel', onWheel);
+        canvas.removeEventListener('contextmenu', onMenu);
         if (group) group.traverse((o) => o.material?.dispose());
         renderer.dispose();
         renderer.forceContextLoss?.(); // (a browser only allows about 16 WebGL contexts and takes the OLDEST away: a closed window must give its own back)
@@ -2059,7 +2093,7 @@ class BalanceView {
     }
 
     // the bowl: the profile turned around the vertical axis (flat bottom, rounded corners), or a model if the bowl has one
-    const [wood, water] = this.#bowlMeshes(bowl);
+    const [wood, water] = this.#bowlMeshes(bowl, false, bowlKeyOf(this.currentLevel));
     if (bowl.model) {
       wood.geometry.dispose();
       wood.material.dispose();
@@ -2079,11 +2113,11 @@ class BalanceView {
   }
 
   /** The two meshes of a generated bowl: the wood (turned profile, outer wall up and inner wall down) and the water inside it. */
-  #bowlMeshes(bowl, plain = false) {
+  #bowlMeshes(bowl, plain = false, bowlKey = null) {
     const { inner, outer } = bowlProfile(BOWL_SEGS, bowl);
     const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y)); // from the middle of the flat bottom up to the rim
     const profile = [...half(outer), ...half(inner).reverse()]; // the normals come out facing away from the wood
-    const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain));
+    const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain, null, bowl.shaderParams, plain || !bowlKey ? null : `@bowl:${bowlKey}`));
     wood.name = 'bowl';
     wood.material.uniforms.uCausInward.value = 1;
 
@@ -2412,7 +2446,7 @@ void main() {
     group.name = `model ${inst.model}`;
     parts.forEach((p, i) => {
       const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
-      const mat = this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, fog);
+      const mat = this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, fog, false, null, def.shaderParams?.[p.name], `@model:${inst.model}:${p.name}`);
       if (fog === null && index === undefined) mat.uniforms.uCausInward.value = 1; // (a model bowl)
       group.add(new THREE.Mesh(p.geo, mat));
     });
@@ -2557,6 +2591,7 @@ void main() {
     const bakeCode = draft ? draft.code : shaderCode[shaderName]?.code ?? '';
     if (hasBake(bakeCode)) attachBake(mat, { code: bakeCode, fragment: frag(bakeCode, true), vertex: BAKE_VERTEX_BLOCK }, list);
     mat.userData.label = draft ? 'draft' : shaderName;
+    mat.userData.paramList = list;
     if (list.length && materialKey) {
       mat.userData.blockParams = list;
       mat.userData.materialKey = materialKey;
