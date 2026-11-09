@@ -53,42 +53,13 @@ export const tuning = {
 // noBuild:  (with static) a NO-BUILD ZONE: not solid, blocks fall straight through, but a block you hold turns red inside it and cannot be put down there
 // explodesWith: key of another material: when a block of this material touches a block of that one, both explode (they vanish and throw nearby blocks away)
 // noLamp:   no coloured dot on a block with a stackLimit (for blocks that look cracked already)
-// shader:   name of a GLSL shader in client/shaders.js
+// shader:   name of a shader of _shaders.js (a base shader, or a parameterised one made in the Shaders menu of the debug menu)
 export const materials = {
-    wood: {
-    friction: 10,
-    weight: 10,
-    shader: 'woodBaked',
-    shaderParams: {
-      uRings: 4.47,
-      uCurl: 0.465,
-      uArch: 0.15,
-      uShine: 1.26,
-      uCurls: 1,
-      uSize: 1.041,
-      uBump: 0.1395,
-      uWoodLight: '#d2aa79',
-      uWoodDark: '#754a29',
-    },
-  },
+  wood: { friction: 10, weight: 10, shader: 'oakWood' },
   glass:           { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
   crackedGlass:    { friction: 4, weight: 5, shader: 'crackedGlass', stackLimit: 0, noLamp: true }, // breaks as soon as one block rests on it
-  static: { static: true, friction: 12, shader: 'stone1', shaderParams: { uBump: 0.255, uScale: 3.945, uColor: '#6e6e6e' } },
-  waterBlock: {
-    static: true,
-    friction: 0,
-    hazard: true,
-    shader: 'waterBlock',
-    shaderParams: {
-      uBlockOpacity: 0.9,
-      uGlitter: 2.52,
-      uWaves: 0.378,
-      uFlow: 2.02,
-      uSunOwn: 0.615,
-      uSunTurn: -3.5,
-      uSunHeight: -10,
-    },
-  },
+  static: { static: true, friction: 12, shader: 'slateStone' },
+  waterBlock: { static: true, friction: 0, hazard: true, shader: 'seaBlock' },
   floatBlock:      { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
   floatierBlock:   { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.9 },
   floatBlockHeavy: { float: true, friction: 8, weight: 30, shader: 'float', floatLevel: 0.5 },
@@ -152,25 +123,8 @@ export const bowls = {
     zscale: 0.6,
     square: 8.6,
     squareBottom: 9.1,
-    shader: 'ceramicGlaze',
+    shader: 'yellowGlaze',
     water: { color: '#004585', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
-    shaderParams: {
-      uScale: 1.299,
-      uTeal: '#e8d454',
-      uDeep: '#ac8b16',
-      uPale: '#db9f1f',
-      uRust: '#6d6e21',
-      uVariant: 7.1,
-      uGrain: 0.5,
-      uWindow: 1.155,
-      uTop: '#03a1c9',
-      uHorizon: '#dfc690',
-      uBottom: '#372b10',
-      uStreak: 0.15,
-      uRustAmt: 0.57,
-      uReflect: 0.46,
-      uGloss: 0.48,
-    },
   },
   canoe: {
     a: 40,
@@ -208,11 +162,12 @@ export const models = {
   bamboo: { file: 'bamboo.obj', shaders: { stalk: 'bamboo', leaves: 'leaves' } },
   mountain: { file: 'mountain.obj', shader: 'mountain' },
   board: { file: 'board.obj', shader: 'floorwood' },
-  window: { file: 'window.obj', shader: 'mahogany' },                       // 24 x 30, origin at the middle of the bottom edge
-  wall: { file: 'wall.obj', shaders: { plaster: 'plaster', trim: 'mahogany' } }, // 200 x 90 with a hole for the window (x -12..12, y 4..34)
-  plant: { file: 'plant.obj', shaders: { pot: 'ceramic', soil: 'bark', leaves: 'leaves' } },
-  stones: { file: 'stones.obj', shader: 'blackstone' },                      // three small black stones stacked up
+  window: { file: 'window.obj', shader: 'mahogany' },
+  wall: { file: 'wall.obj', shaders: { plaster: 'plaster', trim: 'mahogany' } },
+  plant: { file: 'plant.obj', shaders: { pot: 'terracotta', soil: 'bark', leaves: 'leaves' } },
+  stones: { file: 'stones.obj', shader: 'blackstone' },
 };
+
 
 // ── Backgrounds ──────────────────────────────────────────────────────────────────────────────────────────────
 // What surrounds the table. Positions are in WORLD units, relative to the middle of the table: x = right, z = towards the camera
@@ -246,42 +201,14 @@ export const backgrounds = {
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: {
-      w: 110,
-      d: 52,
-      z: 2,
-      shader: 'floorwood',
-      shaderParams: {
-        uSize: 1.664,
-        uPlank: 1.1545,
-        uVariant: 4.05,
-        uGrain: 0.5625,
-        uWobble: 4.88,
-        uSeam: 0.1,
-        uBump: 0.104,
-        uShine: 0.84,
-        uLight: '#d6a371',
-        uDark: '#714219',
-      },
-    },
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
     lights: [],
-    water: {
-      shader: 'ocean',
-      params: {
-        uSunHeight: -0.1,
-        uHighlight: '#ffffff',
-        uGlitter: 0.165,
-        uWaves: 0.19,
-        uSunOwn: 0.87,
-        uSunTurn: 176.1,
-        uSunSize: 0.2,
-      },
-    },
+    water: { shader: 'calmOcean' },
   },
   zen2: {
     mist: '#dde4df',
     fog: [130, 460],
-    ground: { colorA: '#b4bfa9', colorB: '#d3dac8', ripple: 1.8 },
+    ground: { colorA: '#b4bfa9', colorB: '#d3dac8', ripple: 1.8, blur: 'light', style: 'sand' },
     models: [
       { model: 'pine', scale: 4, rotation: [0, 0, 0], translate: [-72, 0, -34] },
       { model: 'pine', scale: 5, rotation: [0, 80, 0], translate: [70, 0, -52] },
@@ -291,13 +218,19 @@ export const backgrounds = {
       { model: 'mountain', scale: 6, rotation: [0, 30, 0], translate: [60, 0, -320] },
       { model: 'mountain', scale: 4.5, rotation: [0, 0, 0], translate: [-140, 0, -280] },
     ],
+    blur: 3,
+    blurFar: 10,
+    light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
+    bowlHeight: 4,
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
+    lights: [],
   },
   room1: {
     mist: '#f3ecdd',
     fog: [220, 700],
-    ground: { colorA: '#7e4f2c', colorB: '#a46c3c', ripple: 2.2, style: 'wood' },
+    ground: { colorA: '#7e4f2c', colorB: '#a46c3c', ripple: 2.2, style: 'wood', blur: 'light' },
     blur: 3,
-    light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4 },
+    light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     models: [
       { model: 'wall', scale: 1.6, rotation: [0, 0, 0], translate: [0, 0, -62] },
       { model: 'window', scale: 1.6, rotation: [0, 0, 0], translate: [0, 6.4, -61.4] },
@@ -307,8 +240,13 @@ export const backgrounds = {
       { model: 'stones', scale: 1.4, rotation: [0, 30, 0], translate: [74, 0, 14] },
       { model: 'mountain', scale: 4, rotation: [0, 0, 0], translate: [0, 0, -330] },
     ],
+    blurFar: 10,
+    bowlHeight: 4,
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
+    lights: [],
   },
 };
+
 
 
 

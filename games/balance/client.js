@@ -2,7 +2,7 @@ import * as THREE from 'three'; // resolved by the import map in client/index.ht
 import { el } from '../../client/dom.js';
 import {
   applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
-  HOVER_Z, LAMP_RADIUS, levels, LOSE_TEXT, paramValue, parseShaderParams, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
+  HOVER_Z, LAMP_RADIUS, levels, LOSE_TEXT, paramValue, parseShaderParams, resolveShader, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
 // The definitions as the files have them (debug: every new game starts from these, because the definitions in this page are edited in place).
@@ -822,7 +822,7 @@ class BalanceView {
   stats = null; //            the performance overlay (debugStats), or null
   waterBlockMats = new Set(); // the 'waterBlock' blocks that are drawn with the water shader of the bowl
   blockMats = new Set(); //    the materials of blocks whose shader has settings (debugLiveBlocks changes them while a slider is dragged)
-  waterSel = null; //   { shader, params } of the water of the background that is shown
+  waterSel = null; //   { shader } of the water of the background that is shown
   currentLevel = null;
   userCam = { yaw: 0, pitch: 0, zoom: 1, pan: new THREE.Vector3() }; // the player's own view change on top of the fitted camera
   fit = null; //            { pos, target } of the fitted camera (what 'reset camera' goes back to)
@@ -1364,68 +1364,49 @@ class BalanceView {
     return obj.parts.map((p) => ({ name: p.name, triangles: p.triangles }));
   }
 
-  get shaderNames() { //      the shaders a block, bowl or table can use (not the water shaders)
-    return Object.keys(shaderCode).filter((n) => shaderCode[n].type !== 'water');
+  get shaderNames() { //      the shaders a block, bowl or table can use (not the water shaders): base and parameterised ones
+    return Object.keys(shaderCode).filter((n) => { const r = resolveShader(n); return r && r.type !== 'water'; });
   }
 
   get waterShaderNames() { //  the shaders the water of a bowl can use
-    return Object.keys(shaderCode).filter((n) => shaderCode[n].type === 'water');
+    return Object.keys(shaderCode).filter((n) => resolveShader(n)?.type === 'water');
   }
 
-  /** The parameters (uniforms with a default in a comment) of a shader: [{ name, type, color, def, min?, max? }]. */
-  debugShaderParams(name) {
-    return parseShaderParams(shaderCode[name]?.code ?? '');
+  /** The parameters (uniforms with a default in a comment) of a shader (a base shader or a parameterised one): [{ name, type, color, def, min?, max? }]. */
+  debugShaderParams(name, table = shaderCode) {
+    return parseShaderParams(resolveShader(name, table)?.code ?? '');
   }
 
-  /** While a parameter of the water is dragged: change the uniforms of the water that is drawn, without rebuilding anything. */
+  /** While a setting is dragged in the Shaders menu: change the uniforms of the water that is drawn, without rebuilding anything. */
   debugLiveWater(defs) {
-    const params = defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.water?.params ?? {};
-    if (this.waterSel) this.waterSel.params = params;
-    const apply = (m, bgParams = params) => {
-      const own = defs?.materials?.[m.userData.materialKey]?.shaderParams ?? {}; // (a water block: the settings of its material win over those of the background)
-      const all = { ...bgParams, ...(m.userData.materialKey ? own : {}) };
-      if (m.userData.materialKey !== undefined && m.userData.materialKey !== null) m.uniforms.uOpacity.value = all.uBlockOpacity ?? WATER_BLOCK_OPACITY;
+    const table = defs?.shaderCode ?? shaderCode;
+    const sel = defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.water;
+    const bgParams = (sel?.shader ? resolveShader(sel.shader, table)?.params : null) ?? {};
+    const apply = (m) => {
+      const block = m.userData.shaderName;
+      const all = block ? { ...bgParams, ...(resolveShader(block, table)?.params ?? {}) } : bgParams; // (a water block: the settings of its own shader win over those of the background)
+      if (block) m.uniforms.uOpacity.value = all.uBlockOpacity ?? WATER_BLOCK_OPACITY;
       for (const p of m.userData.waterParams) this.#setParam(m.uniforms[p.name], p, all[p.name]);
       m.userData.rebake?.(); // (a baked picture may depend on the parameters)
     };
     this.mainGroup?.traverse((o) => { if (o.material?.userData?.waterParams) apply(o.material); });
-    this.waterBlockMats.forEach((m) => apply(m, params));
+    this.waterBlockMats.forEach(apply);
   }
 
   /** The name of the water shader the bowl of the level uses now ('' = the classic water): the water block uses it too. */
   get debugWaterShaderName() {
-    return this.waterSel?.shader && shaderCode[this.waterSel.shader]?.type === 'water' ? this.waterSel.shader : '';
+    return this.waterSel?.shader && resolveShader(this.waterSel.shader)?.type === 'water' ? this.waterSel.shader : '';
   }
 
-  /** A small window with a sphere and a block in the material `{ shader, params }` (the Materials tab). update(entry) shows another version. */
-  debugMaterialPreview(host) {
-    return shaderPreview3d(host, (e) => {
-      const ws = e.shader === 'waterBlock' && this.debugWaterShaderName ? shaderCode[this.debugWaterShaderName] : null;
-      return ws
-        ? this.#waterBlockMaterial(ws, { ...this.waterSel.params, ...e.params }, null, true)
-        : this.#blockMaterial(e.shader, 0.3, THREE.FrontSide, null, true, null, e.params, null);
-    });
-  }
-
-  /** While a setting of a block shader is dragged: change the uniforms of the blocks that are drawn, without rebuilding anything. */
+  /** While a setting of a shader is dragged in the Shaders menu: change the uniforms of the blocks that are drawn, without rebuilding anything. */
   debugLiveBlocks(defs) {
     this.debugLiveWater(defs); // (water blocks)
+    const table = defs?.shaderCode ?? shaderCode;
     for (const m of this.blockMats) {
-      const params = this.#paramsOfKey(defs, m.userData.materialKey); // ('@table' = the table of the background)
+      const params = resolveShader(m.userData.shaderName, table)?.params ?? {};
       for (const p of m.userData.blockParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
       m.userData.rebake?.(); // (a baked picture may depend on the settings; the same settings share one picture)
     }
-  }
-
-  /** The settings a material key stands for: a material, '@table', '@bowl:key' or '@model:key:part'. */
-  #paramsOfKey(defs, key) {
-    if (key === '@table') return defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.box?.shaderParams ?? {};
-    if (key?.startsWith('@bowl:')) return defs?.bowls?.[key.slice(6)]?.shaderParams ?? {};
-    if (key?.startsWith('@model:')) {
-      const [, model, ...part] = key.split(':');
-      return defs?.models?.[model]?.shaderParams?.[part.join(':')] ?? {};
-    }
-    return defs?.materials?.[key]?.shaderParams ?? {};
   }
 
   #setParam(u, p, v) {
@@ -1435,51 +1416,62 @@ class BalanceView {
     else u.value.set(...val);
   }
 
-  // ── the shader studio (debug): what it needs from the view ──
-  /** (There are no built-in shaders any more: all of them are in _shaders.js.) */
-  get debugBuiltinNames() {
-    return [];
+  // ── the Shaders menu and the shader chooser (debug): what they need from the view ──
+  /** The material that shows a shader in a preview. entry = { name?, base, code, type, params } (see resolveShader). */
+  #previewMaterial(entry) {
+    if (entry.type === 'water') return this.#waterMaterial({ water: { color: this.bowlDef?.water?.color ?? '#004585', opacity: 1 } }, true, null, entry);
+    return this.#blockMaterial(entry.name ?? '', 0.3, THREE.FrontSide, null, true, entry);
   }
 
-  /** The code of a built-in shader, the part you edit (what is in shaders.js, without the common part every shader starts with). */
-  debugShaderBody(name) {
-    return shaderCode[name]?.code ?? '';
-  }
-
-  /** The type ('opaque' | 'transparent' | 'refract') the built-in shader of that name has. */
-  debugBuiltinType(name) {
-    return shaderCode[name]?.type ?? 'opaque';
+  /** A small stand-alone window with a sphere and a block in a shader (the Shaders menu). update(entry) shows another version; see shaderPreview3d. */
+  debugShaderPreview(host) {
+    return shaderPreview3d(host, (entry) => this.#previewMaterial(entry));
   }
 
   /**
-   * Compile `code` (what comes after the common part) in a scratch WebGL context, without drawing anything.
-   * @returns {{ ok: boolean, errors: { line: number, text: string }[] }} the lines are lines of `code` (line 1 = its first line)
+   * Pictures of shaders on a ball, for the shader chooser: items = [{ key, entry }] (entry as in #previewMaterial). They are drawn one by one (the dialog stays
+   * usable) in one scratch WebGL context; onThumb(key, dataUrl | null) is called for each. Returns { cancel() }.
    */
-  debugCheckShader(code, type = 'opaque') {
-    const gl = (this.scratchGl ??= document.createElement('canvas').getContext('webgl2')); // (WebGL 2 = GLSL ES 3.00: what the game's own context speaks)
-    if (!gl) return { ok: true, errors: [] }; // (no way to check here: the game will say)
-    const water = type === 'water';
-    // the same few lines three.js puts above every shader (one line each, so that the line numbers can be worked out)
-    const head = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n#define varying in\nout highp vec4 pc_fragColor;\n#define gl_FragColor pc_fragColor\n#define texture2D texture\nuniform vec3 cameraPosition;\n';
-    const headLines = (head.match(/\n/g) ?? []).length;
-    const src = head + (water ? waterFrag(code) : frag(code)).replace('precision highp float;', '');
-    const sh = gl.createShader(gl.FRAGMENT_SHADER);
-    gl.shaderSource(sh, src);
-    gl.compileShader(sh);
-    const ok = !!gl.getShaderParameter(sh, gl.COMPILE_STATUS);
-    const log = ok ? '' : gl.getShaderInfoLog(sh) ?? '';
-    gl.deleteShader(sh);
-    const errors = [];
-    for (const m of log.matchAll(/ERROR:\s*\d+:(\d+):\s*(.*)/g)) errors.push({ line: Math.max(1, +m[1] - headLines - (water ? WATER_PRELUDE_LINES : PRELUDE_LINES)), text: m[2].trim() });
-    if (!ok && !errors.length) errors.push({ line: 1, text: log.trim() || 'the shader does not compile' });
-    return { ok, errors };
-  }
-
-  /** A small stand-alone window that shows a sphere and a block with a shader made from `{ code, type }`: see shaderPreview3d. */
-  debugShaderPreview(host) {
-    return shaderPreview3d(host, (entry) => (entry.type === 'water'
-      ? this.#waterMaterial({ water: { color: this.bowlDef?.water?.color ?? '#004585', opacity: 1 } }, true, null, entry)
-      : this.#blockMaterial('stone1', 0.3, THREE.FrontSide, null, true, entry)));
+  debugShaderThumbs(items, onThumb, size = 128) {
+    let dead = false;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(1);
+    renderer.setSize(size, size, false);
+    renderer.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+    camera.position.set(0, 0, 8);
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(1.8, 48, 32));
+    ball.rotation.set(-0.35, 0.6, 0);
+    scene.add(ball);
+    const out = document.createElement('canvas');
+    out.width = out.height = size;
+    const ctx = out.getContext('2d');
+    (async () => {
+      for (const { key, entry } of items) {
+        if (dead) break;
+        let url = null;
+        let mat = null;
+        try {
+          mat = this.#previewMaterial(entry);
+          ball.material = mat;
+          renderer.clear();
+          renderer.render(scene, camera);
+          ctx.clearRect(0, 0, size, size);
+          ctx.drawImage(renderer.domElement, 0, 0);
+          url = out.toDataURL('image/png');
+        } catch (e) {
+          console.warn(`balance: the shader "${entry.name ?? key}" could not be drawn`, e);
+        }
+        mat?.dispose();
+        onThumb(key, url);
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      ball.geometry.dispose();
+      renderer.dispose();
+      renderer.forceContextLoss?.();
+    })();
+    return { cancel: () => { dead = true; } };
   }
 
   /** Orbit camera: drag = turn, right-drag = move, wheel = zoom. Off = the normal camera again. */
@@ -1566,16 +1558,6 @@ class BalanceView {
     raf = requestAnimationFrame(loop);
 
     return {
-      /** The settings of the shaders changed (a slider is dragged): update the uniforms of the parts, without loading anything. */
-      setParams: (def) => {
-        group?.traverse((o) => {
-          const m = o.material;
-          if (!m?.userData?.paramList) return;
-          const params = def.shaderParams?.[o.userData.part] ?? {};
-          for (const p of m.userData.paramList) this.#setParam(m.uniforms[p.name], p, params[p.name]);
-          m.userData.rebake?.();
-        });
-      },
       set: async (def) => {
         const mine = ++token;
         let parts;
@@ -1592,8 +1574,7 @@ class BalanceView {
         group = new THREE.Group();
         parts.forEach((p, i) => {
           const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
-          const mesh = new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, null, true, null, def.shaderParams?.[p.name], null));
-          mesh.userData.part = p.name;
+          const mesh = new THREE.Mesh(p.geo, this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, null, true));
           group.add(mesh);
         });
         scene.add(group);
@@ -2051,7 +2032,7 @@ class BalanceView {
     const world = (this.world = new THREE.Group());
     this.scene.add(world);
     this.bowlDef = bowl;
-    this.waterSel = bg.water ?? null; // (which water shader the bowl's water uses, and its parameters: chosen in the background)
+    this.waterSel = bg.water ?? null; // (which water shader the bowl's water uses: chosen in the background; its settings come with the shader)
     this.groundY = groundYOf(bowl);
     const bowlH = bg.bowlHeight ?? TABLE.h; // how high the bowl (= the top of the table) stands above the floor
     const floorY = this.groundY - bowlH;
@@ -2086,14 +2067,14 @@ class BalanceView {
       this.#addModel(main, bg.table, token, floorY, fog, TABLE_INDEX); // a model instead of the plain box
     } else {
       const th = Math.max(bowlH, 0.05);
-      const table = new THREE.Mesh(new THREE.BoxGeometry(bg.box.w, th, bg.box.d), this.#blockMaterial(bg.box.shader, 0.7, THREE.FrontSide, null, false, null, bg.box.shaderParams, '@table'));
+      const table = new THREE.Mesh(new THREE.BoxGeometry(bg.box.w, th, bg.box.d), this.#blockMaterial(bg.box.shader, 0.7, THREE.FrontSide, null, false));
       table.name = 'table';
       table.position.set(0, this.groundY - th / 2, bg.box.z);
       main.add(table);
     }
 
     // the bowl: the profile turned around the vertical axis (flat bottom, rounded corners), or a model if the bowl has one
-    const [wood, water] = this.#bowlMeshes(bowl, false, bowlKeyOf(this.currentLevel));
+    const [wood, water] = this.#bowlMeshes(bowl);
     if (bowl.model) {
       wood.geometry.dispose();
       wood.material.dispose();
@@ -2113,11 +2094,11 @@ class BalanceView {
   }
 
   /** The two meshes of a generated bowl: the wood (turned profile, outer wall up and inner wall down) and the water inside it. */
-  #bowlMeshes(bowl, plain = false, bowlKey = null) {
+  #bowlMeshes(bowl, plain = false) {
     const { inner, outer } = bowlProfile(BOWL_SEGS, bowl);
     const half = (pts) => pts.slice(BOWL_SEGS / 2).map(([x, y]) => new THREE.Vector2(Math.abs(x), y)); // from the middle of the flat bottom up to the rim
     const profile = [...half(outer), ...half(inner).reverse()]; // the normals come out facing away from the wood
-    const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain, null, bowl.shaderParams, plain || !bowlKey ? null : `@bowl:${bowlKey}`));
+    const wood = new THREE.Mesh(this.#squareLathe(profile, bowl), this.#blockMaterial(bowl.shader, 0.35, THREE.DoubleSide, null, plain));
     wood.name = 'bowl';
     wood.material.uniforms.uCausInward.value = 1;
 
@@ -2205,8 +2186,9 @@ void main() {
   gl_Position = projectionMatrix * viewMatrix * w;
 }`;
     const sel = this.waterSel ?? {}; //  the water shader and its parameters come from the background of the level (see #buildWorld)
-    const ws = draft ?? (sel.shader && shaderCode[sel.shader]?.type === 'water' ? shaderCode[sel.shader] : null);
-    if (ws) return this.#customWaterMaterial(ws.code, draft ? {} : sel.params, uniforms, vertexShader);
+    const rsel = sel.shader ? resolveShader(sel.shader) : null;
+    const ws = draft ?? (rsel?.type === 'water' ? rsel : null);
+    if (ws) return this.#customWaterMaterial(ws.code, draft ? draft.params ?? {} : rsel.params, uniforms, vertexShader);
     return new THREE.ShaderMaterial({
       uniforms,
       vertexShader,
@@ -2271,7 +2253,7 @@ void main() {
 
   /** The water of a bowl drawn by a water shader of _shaders.js (see WATER_PRELUDE in shaders.js); its parameters come from the bowl's water.params. */
   /** The water of the bowl, drawn on a block (the 'waterBlock' material): the same shader and settings as the water of the bowl, seen from the front. */
-  #waterBlockMaterial(ws, params, materialKey = null, plain = false) {
+  #waterBlockMaterial(ws, params, shaderName = null, plain = false) {
     const bowl = this.bowlDef ?? { water: { color: '#004585', opacity: 0.55 } };
     const uniforms = {
       ...(plain ? { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 }, ...this.#plainLight() } : { ...this.waterU, ...this.shadowU }), // (the preview windows are other WebGL contexts)
@@ -2293,7 +2275,7 @@ void main() {
   gl_Position = projectionMatrix * viewMatrix * w;
 }`;
     const mat = this.#customWaterMaterial(ws.code, params, uniforms, vertexShader, true);
-    mat.userData.materialKey = materialKey;
+    mat.userData.shaderName = shaderName; // (the Shaders menu: which parameterised shader's settings win over those of the background)
     return mat;
   }
 
@@ -2446,7 +2428,7 @@ void main() {
     group.name = `model ${inst.model}`;
     parts.forEach((p, i) => {
       const shader = def.shaders?.[p.name] ?? def.shader ?? 'stone1';
-      const mat = this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, fog, false, null, def.shaderParams?.[p.name], `@model:${inst.model}:${p.name}`);
+      const mat = this.#blockMaterial(shader, (i * 0.37) % 1, THREE.DoubleSide, fog);
       if (fog === null && index === undefined) mat.uniforms.uCausInward.value = 1; // (a model bowl)
       group.add(new THREE.Mesh(p.geo, mat));
     });
@@ -2540,25 +2522,26 @@ void main() {
     };
   }
 
-  /** One ShaderMaterial per block; the time uniform is shared by all of them. */
-  /** 'opaque' | 'transparent' | 'refract': what the blocks of this shader need (a shader of the shader studio brings its own type; a replaced built-in keeps the old one). */
+  /** 'opaque' | 'transparent' | 'refract' | 'water': what the blocks of this shader need (a parameterised shader has the type of its base shader). */
   #shaderType(name) {
-    return shaderCode[name]?.type ?? 'opaque';
+    return resolveShader(name)?.type ?? 'opaque';
   }
 
-  /** The source of a shader: its entry in _shaders.js. */
-  #fragmentOf(name) {
-    return frag((shaderCode[name] ?? shaderCode.stone1)?.code ?? 'void main() { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); }'); // (an unknown name looks like stone1)
-  }
-
-  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false, draft = null, params = null, materialKey = null) {
-    const ws = !draft && shaderName === 'waterBlock' && this.waterSel?.shader && shaderCode[this.waterSel.shader]?.type === 'water' ? shaderCode[this.waterSel.shader] : null;
-    if (ws) return this.#waterBlockMaterial(ws, { ...this.waterSel.params, ...params }, materialKey, plain); // (the water block looks like the water of the bowl; the settings of the material win)
-    const type = draft ? draft.type ?? 'opaque' : this.#shaderType(shaderName); // (`draft` = { code, type } of a shader that is being edited: the preview of the shader studio)
+  /**
+   * One ShaderMaterial per block; the time uniform is shared by all of them. `shaderName` = a base or a parameterised shader of _shaders.js (an unknown name
+   * looks like stone1); its settings come with it. `draft` = { name?, base?, code, type?, params? } shows a shader that is not (yet) in the table: the previews.
+   */
+  #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false, draft = null) {
+    const rs = draft
+      ? { base: draft.base ?? '', code: draft.code, type: draft.type ?? 'opaque', params: draft.params ?? {} }
+      : resolveShader(shaderName) ?? resolveShader('stone1') ?? { base: '', code: 'void main() { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); }', type: 'opaque', params: {} };
+    const bgWater = this.waterSel?.shader ? resolveShader(this.waterSel.shader) : null;
+    if (rs.base === 'waterBlock' && bgWater?.type === 'water') return this.#waterBlockMaterial(bgWater, { ...bgWater.params, ...rs.params }, draft ? null : shaderName, plain); // (the water block looks like the water of the bowl; the settings of its own shader win)
+    const type = rs.type;
     const transparent = type !== 'opaque';
     const mat = new THREE.ShaderMaterial({
-      vertexShader: deformShaders.has(shaderName) ? waveVertexShader : vertexShader,
-      fragmentShader: draft ? frag(draft.code) : this.#fragmentOf(shaderName),
+      vertexShader: deformShaders.has(rs.base) ? waveVertexShader : vertexShader,
+      fragmentShader: frag(rs.code),
       uniforms: {
         uTime: this.uTime,
         uSeed: { value: seed },
@@ -2582,19 +2565,18 @@ void main() {
       side,
       extensions: { derivatives: true }, // (the cheap bump map reads the difference between neighbouring pixels)
     });
-    // the settings of the shader: uniforms it declares with a default in a comment (see parseShaderParams); the values come from the material
-    const list = parseShaderParams(draft ? draft.code : shaderCode[shaderName]?.code ?? '');
+    // the settings of the shader: uniforms it declares with a default in a comment (see parseShaderParams); the values come with the parameterised shader
+    const list = parseShaderParams(rs.code);
     for (const p of list) {
       mat.uniforms[p.name] = { value: p.color ? new THREE.Color() : p.def.length === 1 ? 0 : new THREE[`Vector${p.def.length}`]() };
-      this.#setParam(mat.uniforms[p.name], p, params?.[p.name]);
+      this.#setParam(mat.uniforms[p.name], p, rs.params[p.name]);
     }
-    const bakeCode = draft ? draft.code : shaderCode[shaderName]?.code ?? '';
+    const bakeCode = rs.code;
     if (hasBake(bakeCode)) attachBake(mat, { code: bakeCode, fragment: frag(bakeCode, true), vertex: BAKE_VERTEX_BLOCK }, list);
     mat.userData.label = draft ? 'draft' : shaderName;
-    mat.userData.paramList = list;
-    if (list.length && materialKey) {
+    if (list.length && !draft && !plain) { // (the Shaders menu changes these uniforms while a setting is dragged: debugLiveBlocks)
       mat.userData.blockParams = list;
-      mat.userData.materialKey = materialKey;
+      mat.userData.shaderName = shaderName;
       this.blockMats.add(mat);
       mat.addEventListener('dispose', () => this.blockMats.delete(mat));
     }
@@ -2714,7 +2696,7 @@ void main() {
   #makeView(map, id, si, mi, opts) {
     const shapeKey = SHAPE_KEYS[si];
     const shaderName = materials[MATERIAL_KEYS[mi]].shader;
-    const mat = this.#blockMaterial(shaderName, (id * 0.6180339) % 1, THREE.FrontSide, null, false, null, materials[MATERIAL_KEYS[mi]].shaderParams, MATERIAL_KEYS[mi]);
+    const mat = this.#blockMaterial(shaderName, (id * 0.6180339) % 1, THREE.FrontSide, null, false);
 
     if (opts.table) mat.uniforms.uCausOn.value = 0; // (waiting on the table: no caustics)
     const group = new THREE.Group();

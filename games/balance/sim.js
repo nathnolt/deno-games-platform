@@ -400,8 +400,11 @@ export class BalanceGame {
         delete next.shaderCode[key];
       } else {
         const v = req.value;
-        if (!v || typeof v !== 'object' || typeof v.code !== 'string') return fail('that is not a shader');
-        next.shaderCode[key] = { ...(v.type ? { type: v.type } : {}), code: v.code };
+        if (!v || typeof v !== 'object' || (typeof v.code !== 'string' && typeof v.base !== 'string')) return fail('that is not a shader');
+        const cat = typeof v.category === 'string' && v.category.trim() ? { category: v.category.trim().slice(0, 40) } : {};
+        next.shaderCode[key] = typeof v.code === 'string'
+          ? { ...(v.type ? { type: v.type } : {}), ...cat, code: v.code }
+          : { base: v.base, ...cat, ...(v.params && Object.keys(v.params).length ? { params: v.params } : {}) }; // (a base shader with its settings)
       }
       file = '_shaders.js';
       text = serializeShaders(next.shaderCode);

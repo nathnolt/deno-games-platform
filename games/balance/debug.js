@@ -27,7 +27,7 @@
 // Changes that touch the physics (shapes, bowls, materials, tuning, levels) take effect when the level restarts (or switch on "auto-restart").
 
 import * as S from './shared.js';
-import { blockShaderControls, waterControls } from './water-ui.js';
+import { shaderPicker } from './shader-ui.js';
 import { createStudio } from './studio.js';
 import { clone, h, NS, svg } from './ui.js';
 
@@ -68,8 +68,9 @@ export function createDebugMenu(view) {
   };
   let infoToken = 0;
   let modelPrev = null; // the preview window of the Models tab
-  let matPrev = null; //   the preview window of the Materials tab
-  const shaderNames = () => view.shaderNames;
+  // (the shaders the draft has, base and parameterised ones: a shader you just made is not in the room's table yet)
+  const shaderNames = () => Object.keys(draft.shaderCode ?? {}).filter((n) => { const r = S.resolveShader(n, draft.shaderCode); return r && r.type !== 'water'; });
+  const waterShaderNames = () => Object.keys(draft.shaderCode ?? {}).filter((n) => S.resolveShader(n, draft.shaderCode)?.type === 'water');
   const keys = (table) => Object.keys(draft[table]);
   const pick = (name, list) => {
     if (!list.includes(state.sel[name])) state.sel[name] = list[0];
@@ -78,7 +79,7 @@ export function createDebugMenu(view) {
 
   // ── draft -> server ──────────────────────────────────────────────────────────────────────────────────────
   function validate() {
-    state.problems = S.validateDefinitions(draft, { shaderNames: shaderNames(), waterShaderNames: view.waterShaderNames });
+    state.problems = S.validateDefinitions(draft, { shaderNames: shaderNames(), waterShaderNames: waterShaderNames() });
     renderStatus();
     return state.problems.length === 0;
   }
@@ -99,8 +100,7 @@ export function createDebugMenu(view) {
       validate();
       renderStatus();
     }
-    if (kind === 'models' && modelPrev) { const md = draft.models[state.sel.model] ?? {}; if (live) modelPrev.setParams(md); else modelPrev.set(md); }
-    if (kind === 'materials' && matPrev) updateMatPrev();
+    if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
     if (live) localKinds.add(kind); // (the studio gives it to the local game itself, once the drag pauses: see syncNow)
     else if (!quiet) touchLocal(kind);
     studio.changed(kind, live); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
@@ -232,6 +232,22 @@ export function createDebugMenu(view) {
       then?.();
     });
     return field(label, s);
+  }
+  /**
+   * A shader chooser (a dialog with every shader on a 3D ball, in categories) for obj[key]. `water` = the water shaders; `allowEmpty` = "none" is a choice
+   * (the key is then deleted). `then` runs after a pick.
+   */
+  function shader(label, obj, key, kind, { water = false, allowEmpty = false, emptyLabel = '(none)', then } = {}) {
+    return field(label, shaderPicker({
+      view, table: () => draft.shaderCode ?? {}, value: obj[key] ?? '', water, allowEmpty, emptyLabel,
+      onPick: (name) => {
+        if (name === '') delete obj[key];
+        else obj[key] = name;
+        touch(kind);
+        render();
+        then?.();
+      },
+    }));
   }
   function color(label, obj, key, kind) {
     const v = /^#[0-9a-f]{6}$/i.test(obj[key] ?? '') ? obj[key] : '#888888';
@@ -579,38 +595,9 @@ export function createDebugMenu(view) {
     return h('div', { class: 'bb-dbg-preview' }, root, h('div', { class: 'bb-dbg-hint' }, `${sh.w.toFixed(2)} × ${sh.h.toFixed(2)} units`));
   }
 
-  /** The settings of the water block: its own opacity, and the settings of the water shader of the bowl (a setting you leave alone follows the background). */
-  function waterBlockControls(m) {
-    const water = view.debugWaterShaderName;
-    const params = (m.shaderParams ??= {});
-    const op = h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: params.uBlockOpacity ?? 0.85 });
-    const num = h('code', { class: 'bb-wp-num' }, (params.uBlockOpacity ?? 0.85).toFixed(2));
-    op.addEventListener('input', () => { params.uBlockOpacity = parseFloat(op.value); num.textContent = params.uBlockOpacity.toFixed(2); touch('materials', true, true); view.debugLiveBlocks(draft); });
-    op.addEventListener('change', () => touch('materials'));
-    return [
-      field('block opacity (see-through-ness)', h('span', { class: 'bb-wp-row' }, op, num)),
-      water
-        ? note(`The water block shows the water shader of the background ("${water}"). The settings below replace the ones of the background for this block only; a setting marked (default) is not replaced.`)
-        : note('The background uses the classic water, so the block keeps its own look. Pick a water shader in the Backgrounds tab to use it here.'),
-      ...(water ? blockShaderControls({ h, view, mat: m, touch, draft: () => draft, rerender: render, shader: water }) : []),
-    ];
-  }
-  function updateMatPrev() {
-    const m = draft.materials[state.sel.material];
-    if (m && matPrev) matPrev.update({ shader: m.shader, params: m.shaderParams ?? {} });
-  }
-
   function tabMaterials() {
     const out = [tableBar('materials', 'material', 'material', () => ({ friction: 10, weight: 10, shader: 'wood' }))];
     const m = draft.materials[state.sel.material];
-    matPrev?.dispose(); // a little window with a block and a sphere in this material (drag to turn)
-    matPrev = null;
-    const prevHost = h('div', { style: 'border-radius:8px;overflow:hidden' });
-    try {
-      matPrev = view.debugMaterialPreview(prevHost);
-      matPrev.update({ shader: m.shader, params: m.shaderParams ?? {} });
-    } catch (e) { prevHost.append(h('div', { class: 'bb-dbg-err' }, String(e.message ?? e))); }
-    out.push(section('Preview', prevHost));
     if (m.float) m.floatLevel ??= 0.5;
     out.push(
       section(null,
@@ -624,10 +611,9 @@ export function createDebugMenu(view) {
         num('stack limit (breaks above this many)', m, 'stackLimit', 'materials', { min: 0, max: 20, int: true, optional: true }),
         select('explodes when it touches', [['', '(nothing)'], ...Object.keys(draft.materials)], m, 'explodesWith', 'materials'),
         m.stackLimit !== undefined ? check('no lamp (looks cracked already)', m, 'noLamp', 'materials') : null,
-        select('shader', shaderNames(), m, 'shader', 'materials', () => { delete m.shaderParams; render(); }),
-        ...(m.shader === 'waterBlock' ? waterBlockControls(m) : blockShaderControls({ h, view, mat: m, touch, draft: () => draft, rerender: render })),
+        shader('shader', m, 'shader', 'materials'),
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),
-      note('Block shaders (wood, glass, crackedGlass, stone1, stone2, float) use the face of the block; 3D shaders (wood2, ceramic, bark ...) work everywhere.'),
+      note('The shader chooser shows base shaders and the parameterised shaders you make in the Shaders menu. Base shaders that use the face of the block (wood, glass ...) work on blocks; 3D ones (bark, ceramic ...) work everywhere.'),
     );
     return out;
   }
@@ -670,8 +656,7 @@ export function createDebugMenu(view) {
         slider('square at the bottom', b, 'squareBottom', 'bowls', 2, 10, 0.1),
         note('2 = round, 5 = rounded square, higher = boxier.')),
       section('Look',
-        select('shader', shaderNames(), b, 'shader', 'bowls', () => { delete b.shaderParams; render(); }),
-        ...blockShaderControls({ h, view, mat: b, touch, draft: () => draft, rerender: render, kind: 'bowls' }),
+        shader('shader', b, 'shader', 'bowls'),
         color('water colour', b.water, 'color', 'bowls'),
         slider('water opacity', b.water, 'opacity', 'bowls', 0, 1, 0.05),
         slider('water reflection', b.water, 'reflect', 'bowls', 0, 1, 0.05),
@@ -707,27 +692,15 @@ export function createDebugMenu(view) {
     const load = () => view.debugModelInfo(m.file).then((parts) => {
       if (token !== infoToken) return;
       list.replaceChildren(...parts.map((p) => {
-        const s = h('select', {}, [h('option', { value: '' }, `(default: ${m.shader ?? 'stone1'})`), ...shaderNames().map((n) => h('option', { value: n }, n))]);
-        s.value = m.shaders?.[p.name] ?? '';
-        s.addEventListener('change', () => {
-          m.shaders ??= {};
-          if (s.value) m.shaders[p.name] = s.value;
-          else delete m.shaders[p.name];
-          if (!Object.keys(m.shaders).length) delete m.shaders;
-          delete m.shaderParams?.[p.name];
-          if (m.shaderParams && !Object.keys(m.shaderParams).length) delete m.shaderParams;
-          touch('models');
-          render();
-        });
-        // the settings of this part's shader (kept in m.shaderParams[part]): a stand-in object that is copied back after every change
-        const shader = m.shaders?.[p.name] ?? m.shader ?? 'stone1';
-        const tmp = { shaderParams: m.shaderParams?.[p.name] };
-        const sync = () => {
-          if (tmp.shaderParams && Object.keys(tmp.shaderParams).length) (m.shaderParams ??= {})[p.name] = tmp.shaderParams;
-          else if (m.shaderParams) { delete m.shaderParams[p.name]; if (!Object.keys(m.shaderParams).length) delete m.shaderParams; }
-        };
-        const rows = blockShaderControls({ h, view, mat: tmp, shader, touch: (k, q, l) => { sync(); touch(k, q, l); }, draft: () => draft, rerender: render, kind: 'models' });
-        return h('div', {}, field(`${p.name} (${p.triangles} tri)`, s), ...rows);
+        return field(`${p.name} (${p.triangles} tri)`, shaderPicker({
+          view, table: () => draft.shaderCode ?? {}, value: m.shaders?.[p.name] ?? '', allowEmpty: true, emptyLabel: `(default: ${m.shader ?? 'stone1'})`,
+          onPick: (name) => {
+            if (name) (m.shaders ??= {})[p.name] = name;
+            else if (m.shaders) { delete m.shaders[p.name]; if (!Object.keys(m.shaders).length) delete m.shaders; }
+            touch('models');
+            render();
+          },
+        }));
       }));
       if (!parts.length) list.replaceChildren(err('The file has no faces.'));
     }).catch((e) => { if (token === infoToken) list.replaceChildren(err(`Cannot load ${m.file}: ${e.message}`)); });
@@ -745,7 +718,7 @@ export function createDebugMenu(view) {
       section('Preview', prevBox),
       section(null,
         text('file in ./models', m, 'file', 'models'),
-        select('default shader', [['', '(stone1)'], ...shaderNames()], m, 'shader', 'models', () => { delete m.shaderParams; render(); }),
+        shader('default shader', m, 'shader', 'models', { allowEmpty: true, emptyLabel: '(stone1)' }),
         check('smooth (use normals of the file)', m, 'smooth', 'models'),
         h('div', { class: 'bb-dbg-row' }, btn('Reload the file', () => view.debugReloadModels()), btn('Show this part list again', () => render()))),
       section('Parts and their shaders', note('A part is a `usemtl` name (or the `o` / `g` name when there is none) in the .obj file.'), list),
@@ -803,10 +776,13 @@ export function createDebugMenu(view) {
         num('table width (x)', bg.box, 'w', 'backgrounds', { min: 10, max: 1000 }),
         num('table depth (z)', bg.box, 'd', 'backgrounds', { min: 10, max: 1000 }),
         num('table centre z', bg.box, 'z', 'backgrounds'),
-        select('table shader', shaderNames(), bg.box, 'shader', 'backgrounds', () => { delete bg.box.shaderParams; render(); }),
-        ...blockShaderControls({ h, view, mat: bg.box, touch, draft: () => draft, rerender: render, kind: 'backgrounds' }),
-        ),
-      section('Water of the bowl', ...waterControls({ h, view, bg, touch, draft: () => draft, rerender: render })),
+        shader('table shader', bg.box, 'shader', 'backgrounds')),
+      section('Water of the bowl',
+        field('water shader', shaderPicker({
+          view, table: () => draft.shaderCode ?? {}, value: bg.water?.shader ?? '', water: true, allowEmpty: true, emptyLabel: '(classic water)',
+          onPick: (name) => { if (name === '') delete bg.water; else (bg.water ??= {}).shader = name; touch('backgrounds'); render(); },
+        })),
+        note('The water of the bowl. Pick a shader of type water: a base water shader like ocean, or a parameterised one made in the Shaders menu.')),
       section('Light and time of day',
         slider('time of day (hour, 12 = noon, 0 = midnight)', bg.light, 'time', 'backgrounds', 0, 24, 0.25),
         note('A level can set its own time in the Levels tab; that overrides this one.'),
@@ -888,7 +864,7 @@ export function createDebugMenu(view) {
         ta, btn('Import (replaces the tables it contains)', () => {
           try {
             const next = { ...clone(draft), ...JSON.parse(ta.value) };
-            const probs = S.validateDefinitions(next, { shaderNames: shaderNames(), waterShaderNames: view.waterShaderNames });
+            const probs = S.validateDefinitions(next, { shaderNames: shaderNames(), waterShaderNames: waterShaderNames() });
             if (probs.length) return msg.replaceChildren(err(probs.slice(0, 8).join('\n')));
             draft = next;
             PHYSICS.forEach((k) => touch(k));
@@ -965,7 +941,7 @@ export function createDebugMenu(view) {
     btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
     btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
     btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
-    btn('Shader studio', () => openStudio('shaders'), 'bb-dbg-go'),
+    btn('Shaders', () => openStudio('shaders'), 'bb-dbg-go'),
     btn('Reset completed levels', () => {
       if (!window.confirm('Forget which levels you have completed (kept in this browser) and reload?')) return;
       try { localStorage.removeItem('balance.done'); } catch { /* ignore */ }
@@ -1011,7 +987,7 @@ export function createDebugMenu(view) {
       el.title = state.problems.join('\n');
       el.classList.toggle('bb-on', n > 0);
     },
-    w: { field, section, num, text, check, select, color, slider, btn, note },
+    w: { field, section, num, text, check, select, shader, color, slider, btn, note },
     open: (name) => openStudio(name),
     close: () => closeStudio(),
     /** Playtest: leave the studio and the menu, and play the level as an ordinary game in the local game (it stays on until you go back to the room). */
@@ -1060,7 +1036,7 @@ export function createDebugMenu(view) {
   function setOpen(on) {
     state.open = on;
     panel.classList.toggle('bb-show', on);
-    if (!on) { modelPrev?.dispose(); modelPrev = null; matPrev?.dispose(); matPrev = null; }
+    if (!on) { modelPrev?.dispose(); modelPrev = null; }
     toggle.classList.toggle('bb-hide', on);
     if (on) render();
   }
@@ -1084,7 +1060,6 @@ export function createDebugMenu(view) {
     renderStatus();
     const top = bodyEl.scrollTop;
     if (state.tab !== 'models') { modelPrev?.dispose(); modelPrev = null; }
-    if (state.tab !== 'materials') { matPrev?.dispose(); matPrev = null; }
     bodyEl.replaceChildren(...[TABS[state.tab].render()].flat().filter(Boolean));
     bodyEl.scrollTop = top;
   }
@@ -1131,7 +1106,6 @@ export function createDebugMenu(view) {
       window.removeEventListener('keydown', onKey);
       studio.dispose();
       modelPrev?.dispose();
-      matPrev?.dispose();
       view.debugStats(null);
       clearTimeout(localTimer);
       view.onRun = null;

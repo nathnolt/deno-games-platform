@@ -874,10 +874,6 @@ export function validateDefinitions(defs, extra = {}) {
     if (m.stackLimit !== undefined && !(Number.isInteger(m.stackLimit) && m.stackLimit >= 0 && m.stackLimit <= 20)) err(`material ${k}: stackLimit must be a whole number from 0 to 20`);
     if (m.explodesWith && !mats[m.explodesWith]) err(`material ${k}: explodesWith "${m.explodesWith}" is not a material`);
     shaderOk(m.shader, `material ${k}`);
-    if (m.shaderParams !== undefined) { // the settings of the shader (uniforms with a default in a comment)
-      if (!m.shaderParams || typeof m.shaderParams !== 'object' || Array.isArray(m.shaderParams)) err(`material ${k}: shaderParams must be an object`);
-      else for (const [pk, pv] of Object.entries(m.shaderParams)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`material ${k}: shaderParams.${pk} must be a number, a colour or a list of numbers`);
-    }
   }
 
   // shapes
@@ -919,13 +915,8 @@ export function validateDefinitions(defs, extra = {}) {
     for (const [pk, pv] of Object.entries(o)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`${where}: shaderParams.${pk} must be a number, a colour or a list of numbers`);
     return undefined;
   };
-  for (const [k, b] of Object.entries(d.bowls ?? {})) if (b.shaderParams !== undefined) paramsOk(b.shaderParams, `bowl ${k}`);
   // models
   for (const [k, m] of Object.entries(d.models ?? {})) {
-    if (m.shaderParams !== undefined) {
-      if (!m.shaderParams || typeof m.shaderParams !== 'object' || Array.isArray(m.shaderParams)) err(`model ${k}: shaderParams must be an object (one entry per part)`);
-      else for (const [part, o] of Object.entries(m.shaderParams)) paramsOk(o, `model ${k}, part ${part}`);
-    }
     if (typeof m.file !== 'string' || !/^[\w\- .]+\.obj$/i.test(m.file)) err(`model ${k}: file must be the name of an .obj file`);
     if (m.shader !== undefined) shaderOk(m.shader, `model ${k}`);
     for (const [part, sh] of Object.entries(m.shaders ?? {})) shaderOk(sh, `model ${k}, part ${part}`);
@@ -945,13 +936,9 @@ export function validateDefinitions(defs, extra = {}) {
       if (b.light.shadow !== undefined && !(isNum(b.light.shadow) && b.light.shadow >= 0 && b.light.shadow <= 1)) err(`background ${k}: light.shadow must be from 0 to 1`);
     }
     if (b.water !== undefined) { // the water shader of the bowl, picked in the background
-      if (!b.water || typeof b.water !== 'object' || Array.isArray(b.water)) err(`background ${k}: water must be { shader, params }`);
+      if (!b.water || typeof b.water !== 'object' || Array.isArray(b.water)) err(`background ${k}: water must be { shader }`);
       else {
         if (b.water.shader !== undefined && b.water.shader !== '' && extra.waterShaderNames && !extra.waterShaderNames.includes(b.water.shader)) err(`background ${k}: water.shader "${b.water.shader}" is not a water shader (type 'water' in _shaders.js)`);
-        if (b.water.params !== undefined) {
-          if (!b.water.params || typeof b.water.params !== 'object' || Array.isArray(b.water.params)) err(`background ${k}: water.params must be an object`);
-          else for (const [pk, pv] of Object.entries(b.water.params)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`background ${k}: water.params.${pk} must be a number, a colour or a list of numbers`);
-        }
       }
     }
     if (b.ground?.style !== undefined && !['sand', 'wood', 'none'].includes(b.ground.style)) err(`background ${k}: ground.style must be sand, wood or none`);
@@ -972,10 +959,6 @@ export function validateDefinitions(defs, extra = {}) {
       for (const f of ['w', 'd']) if (b.box[f] !== undefined && !(isNum(b.box[f]) && b.box[f] >= 10 && b.box[f] <= 1000)) err(`background ${k}: box.${f} must be a number from 10 to 1000`);
       if (b.box.z !== undefined && !isNum(b.box.z)) err(`background ${k}: box.z must be a number`);
       if (b.box.shader !== undefined) shaderOk(b.box.shader, `background ${k}, table box`);
-      if (b.box.shaderParams !== undefined) {
-        if (!b.box.shaderParams || typeof b.box.shaderParams !== 'object' || Array.isArray(b.box.shaderParams)) err(`background ${k}: box.shaderParams must be an object`);
-        else for (const [pk, pv] of Object.entries(b.box.shaderParams)) if (!(isNum(pv) || (typeof pv === 'string' && /^#[0-9a-f]{6}$/i.test(pv)) || (Array.isArray(pv) && pv.every(isNum)))) err(`background ${k}: box.shaderParams.${pk} must be a number, a colour or a list of numbers`);
-      }
     }
     if (b.bowlHeight !== undefined && !(isNum(b.bowlHeight) && b.bowlHeight >= 0 && b.bowlHeight <= 100)) err(`background ${k}: bowlHeight must be a number from 0 to 100`);
     if (b.table) {
@@ -997,6 +980,12 @@ export function validateDefinitions(defs, extra = {}) {
   // shaders of the shader studio
   for (const [k, e] of Object.entries(d.shaderCode ?? {})) {
     if (!/^[A-Za-z][\w-]{0,39}$/.test(k)) err(`shader "${k}": the name starts with a letter and has at most 40 letters, digits, - or _`);
+    else if (e && typeof e.base === 'string' && e.code === undefined) { // a parameterised shader: a base shader with settings
+      const b = d.shaderCode[e.base];
+      if (!b || typeof b.code !== 'string') err(`shader ${k}: its base shader "${e.base}" does not exist (it has to be a shader with code)`);
+      if (e.category !== undefined && (typeof e.category !== 'string' || !e.category.trim() || e.category.length > 40)) err(`shader ${k}: the category must be a name of 1 to 40 characters`);
+      if (e.params !== undefined) paramsOk(e.params, `shader ${k}`);
+    }
     else if (!e || typeof e.code !== 'string' || !e.code.trim()) err(`shader ${k}: it has no code`);
     else if (e.code.length > 40000) err(`shader ${k}: the code is too long (40000 characters at most)`);
     else if (e.type !== undefined && !['opaque', 'transparent', 'refract', 'water'].includes(e.type)) err(`shader ${k}: type must be opaque, transparent, refract or water`);
@@ -1112,19 +1101,22 @@ const SHAPES_HEAD = [
 
 /** The header comment of _shaders.js. */
 const SHADERS_HEAD = [
-  '// Runs on BOTH server and browser. Pure data: ALL the SHADERS of the game (edit them in the shader studio of the debug menu). _definitions.js re-exports them.',
+  '// Runs on BOTH server and browser. Pure data: ALL the SHADERS of the game. _definitions.js re-exports them.',
   '//',
-  "//   export const shaderCode = { name: { type?: 'opaque' | 'transparent' | 'refract' | 'water', code: `...GLSL...` }, ... }",
+  "// Two kinds of entries. BASE shaders hold GLSL (you write them by hand in this file):",
+  "//   name: { type?: 'opaque' | 'transparent' | 'refract' | 'water', code: `...GLSL...` }",
+  "// PARAMETERISED shaders are made in the Shaders menu of the debug menu: a base shader with its settings, in a category:",
+  "//   name: { base: 'woodBaked', category: 'Wood', params: { uRings: 4.5, uWoodLight: '#d2aa79' } }",
+  '// Materials, bowls, models, backgrounds and the water pick either kind by name (the shader chooser shows them all, in their categories).',
   '//',
-  '// EVERY shader of the game is here (shaders.js only has the common part that all of them start with). The name is what materials, bowls, models and backgrounds',
-  '// pick; a new name is a new shader.',
   '// `code` is what comes after the common part of every shader (the varyings, uniforms, noise functions, lighting and finish(): see shaders.js);',
   '// it has to define main() and end by setting gl_FragColor, usually with finish(colour, 1.0).',
   '// type: opaque (default) = a normal solid surface, transparent = drawn after the solid things without depth writes,',
-  '//       refract = transparent AND it bends the picture behind it (needs the REFRACT_GLSL part: copy a glass shader to start).',
-  "//       water = the water of a bowl (picked in the bowl editor): a different common part (WATER_PRELUDE in shaders.js). A uniform it declares with a default in a comment, like  uniform float uGlitter; // 1.0 [0, 3]  or  uniform vec3 uC; // color 1 0.9 0.8,  becomes a parameter in the bowl editor.",
+  '//       refract = transparent AND it bends the picture behind it (needs the REFRACT_GLSL part: copy a glass shader to start),',
+  '//       water = the water of a bowl (picked in the background editor): a different common part (WATER_PRELUDE in shaders.js).',
+  '// A uniform with a default in a comment, like  uniform float uGlitter; // 1.0 [0, 3]  or  uniform vec3 uC; // color 1 0.9 0.8,  becomes a setting in the Shaders menu.',
   '//',
-  '// With `DEBUG = true` the shader studio writes this file for you when you press "Save shader" and confirm it (comments are not kept).',
+  '// With `DEBUG = true` the Shaders menu writes this file for you when you press "Save shader" and confirm it (comments are not kept).',
   '// That needs write permission:',
   '//   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js,games/balance/_shaders.js     (on the "start" and "dev" tasks)',
   '',
@@ -1133,7 +1125,15 @@ const SHADERS_HEAD = [
 /** The whole _shaders.js file for the table of shaders (the code goes in template literals so it stays readable). */
 export function serializeShaders(table) {
   const esc = (t) => String(t).replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
-  const items = Object.entries(table ?? {}).map(([k, e]) => `  ${IDENT.test(k) ? k : quote(k)}: {\n${e.type ? `    type: '${e.type}',\n` : ''}    code: \`${esc(e.code)}\`,\n  },`);
+  const lit = (v) => (Array.isArray(v) ? `[${v.map(lit).join(', ')}]` : typeof v === 'string' ? quote(v) : String(v));
+  const items = Object.entries(table ?? {}).map(([k, e]) => {
+    const key = IDENT.test(k) ? k : quote(k);
+    if (typeof e.code !== 'string') { // a parameterised shader
+      const params = Object.entries(e.params ?? {}).map(([pk, pv]) => `      ${IDENT.test(pk) ? pk : quote(pk)}: ${lit(pv)},`);
+      return `  ${key}: {\n    base: ${quote(e.base)},\n${e.category ? `    category: ${quote(e.category)},\n` : ''}${params.length ? `    params: {\n${params.join('\n')}\n    },\n` : ''}  },`;
+    }
+    return `  ${key}: {\n${e.type ? `    type: '${e.type}',\n` : ''}${e.category ? `    category: ${quote(e.category)},\n` : ''}    code: \`${esc(e.code)}\`,\n  },`;
+  });
   return `${SHADERS_HEAD}\nexport const shaderCode = {${items.length ? `\n${items.join('\n')}\n` : ''}};\n`;
 }
 
@@ -1170,6 +1170,20 @@ export function nestLevels(list, worldTable) {
 /** The whole _levels.js file for a flat list of levels (each knows its world) and the table of worlds. */
 export function serializeLevels(list, worldTable) {
   return `${LEVELS_HEAD}\n${serializeTable('levels', nestLevels(list, worldTable))}`;
+}
+
+/**
+ * A shader NAME as the game uses it. _shaders.js has two kinds of entries: BASE shaders ({ type?, code }) and PARAMETERISED shaders made in the shader menu
+ * ({ base: 'woodBaked', params: { uRings: 4 }, category: 'Wood' }: a base shader with its settings). Both can be picked wherever a shader is chosen.
+ * @returns {{ name: string, base: string, code: string, type: string, params: object, category: string|null, final: boolean }|null}  null for an unknown name
+ */
+export function resolveShader(name, table = shaderCode) {
+  const e = table?.[name];
+  if (!e) return null;
+  if (typeof e.code === 'string') return { name, base: name, code: e.code, type: e.type ?? 'opaque', params: {}, category: e.category ?? null, final: false };
+  const b = typeof e.base === 'string' ? table[e.base] : null;
+  if (!b || typeof b.code !== 'string') return null;
+  return { name, base: e.base, code: b.code, type: b.type ?? 'opaque', params: e.params ?? {}, category: e.category ?? null, final: true };
 }
 
 /** The whole _definitions.js file for the given definitions (the levels are written to _levels.js, see serializeLevels). */

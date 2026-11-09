@@ -1,15 +1,19 @@
-// Runs on BOTH server and browser. Pure data: ALL the SHADERS of the game (edit them in the shader studio of the debug menu). _definitions.js re-exports them.
+// Runs on BOTH server and browser. Pure data: ALL the SHADERS of the game. _definitions.js re-exports them.
 //
-//   export const shaderCode = { name: { type?: 'opaque' | 'transparent' | 'refract', code: `...GLSL...` }, ... }
+// Two kinds of entries. BASE shaders hold GLSL (you write them by hand in this file):
+//   name: { type?: 'opaque' | 'transparent' | 'refract' | 'water', code: `...GLSL...` }
+// PARAMETERISED shaders are made in the Shaders menu of the debug menu: a base shader with its settings, in a category:
+//   name: { base: 'woodBaked', category: 'Wood', params: { uRings: 4.5, uWoodLight: '#d2aa79' } }
+// Materials, bowls, models, backgrounds and the water pick either kind by name (the shader chooser shows them all, in their categories).
 //
-// EVERY shader of the game is here (shaders.js only has the common part that all of them start with). The name is what materials, bowls, models and backgrounds
-// pick; a new name is a new shader.
 // `code` is what comes after the common part of every shader (the varyings, uniforms, noise functions, lighting and finish(): see shaders.js);
 // it has to define main() and end by setting gl_FragColor, usually with finish(colour, 1.0).
 // type: opaque (default) = a normal solid surface, transparent = drawn after the solid things without depth writes,
-//       refract = transparent AND it bends the picture behind it (needs the REFRACT_GLSL part: copy a glass shader to start).
+//       refract = transparent AND it bends the picture behind it (needs the REFRACT_GLSL part: copy a glass shader to start),
+//       water = the water of a bowl (picked in the background editor): a different common part (WATER_PRELUDE in shaders.js).
+// A uniform with a default in a comment, like  uniform float uGlitter; // 1.0 [0, 3]  or  uniform vec3 uC; // color 1 0.9 0.8,  becomes a setting in the Shaders menu.
 //
-// With `DEBUG = true` the shader studio writes this file for you when you press "Save shader" and confirm it (comments are not kept).
+// With `DEBUG = true` the Shaders menu writes this file for you when you press "Save shader" and confirm it (comments are not kept).
 // That needs write permission:
 //   deno.json:  --allow-write=games/balance/_levels.js,games/balance/_shapes.js,games/balance/_shaders.js     (on the "start" and "dev" tasks)
 
@@ -720,5 +724,110 @@ void main() {
   gl_FragColor = vec4(mix(water, env(r) * tint, fres), 1.0);
 }
 `,
+  },
+  oakWood: {
+    base: 'woodBaked',
+    category: 'Wood',
+    params: {
+      uRings: 4.47,
+      uCurl: 0.465,
+      uArch: 0.15,
+      uShine: 1.26,
+      uCurls: 1,
+      uSize: 1.041,
+      uBump: 0.1395,
+      uWoodLight: '#d2aa79',
+      uWoodDark: '#754a29',
+    },
+  },
+  plankFloor: {
+    base: 'floorwood',
+    category: 'Wood',
+    params: {
+      uSize: 1.664,
+      uPlank: 1.1545,
+      uVariant: 4.05,
+      uGrain: 0.5625,
+      uWobble: 4.88,
+      uSeam: 0.1,
+      uBump: 0.104,
+      uShine: 0.84,
+      uLight: '#d6a371',
+      uDark: '#714219',
+    },
+  },
+  slateStone: {
+    base: 'stone1',
+    category: 'Stone',
+    params: {
+      uBump: 0.255,
+      uScale: 3.945,
+      uColor: '#6e6e6e',
+    },
+  },
+  yellowGlaze: {
+    base: 'ceramicGlaze',
+    category: 'Ceramic',
+    params: {
+      uScale: 1.299,
+      uTeal: '#e8d454',
+      uDeep: '#ac8b16',
+      uPale: '#db9f1f',
+      uRust: '#6d6e21',
+      uVariant: 7.1,
+      uGrain: 0.5,
+      uWindow: 1.155,
+      uTop: '#03a1c9',
+      uHorizon: '#dfc690',
+      uBottom: '#372b10',
+      uStreak: 0.15,
+      uRustAmt: 0.57,
+      uReflect: 0.46,
+      uGloss: 0.48,
+    },
+  },
+  seaBlock: {
+    base: 'waterBlock',
+    category: 'Water',
+    params: {
+      uBlockOpacity: 0.9,
+      uGlitter: 2.52,
+      uWaves: 0.378,
+      uFlow: 2.02,
+      uSunOwn: 0.615,
+      uSunTurn: -3.5,
+      uSunHeight: -10,
+    },
+  },
+  calmOcean: {
+    base: 'ocean',
+    category: 'Water',
+    params: {
+      uSunHeight: -0.1,
+      uHighlight: '#ffffff',
+      uGlitter: 0.165,
+      uWaves: 0.19,
+      uSunOwn: 0.87,
+      uSunTurn: 176.1,
+    },
+  },
+  terracotta: {
+    base: 'ceramicGlaze',
+    category: 'Wood',
+    params: {
+      uTeal: '#da3b07',
+      uDeep: '#d57d58',
+      uPale: '#9e2f00',
+      uRust: '#e67133',
+      uScale: 1.7615,
+      uStreak: 0.51,
+      uRustAmt: 0.245,
+      uReflect: 0.19,
+      uGloss: 0.2175,
+      uVariant: 5.2,
+      uWindow: 1.365,
+      uGrain: 0.32,
+      uTop: '#11bde8',
+    },
   },
 };

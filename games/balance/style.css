@@ -327,3 +327,14 @@ button.bb-card:disabled { opacity: .6; cursor: default; }
 .bb-dbg-perf { position: relative; }
 .bb-dbg-perf > summary { cursor: pointer; font-size: .85em; }
 .bb-dbg-perf > div { position: absolute; left: 0; top: 1.6em; z-index: 5; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; background: #1b2438; border: 1px solid #2b3550; border-radius: 8px; white-space: nowrap; }
+
+/* the shader chooser (shader-ui.js): a button with a little ball, and the dialog with every shader on a ball */
+.bb-sp-btn { display: inline-flex; align-items: center; gap: .4rem; max-width: 100%; }
+.bb-sp-btn small { color: #94a3b8; font-size: 11px; }
+.bb-sp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-sp-thumb { display: block; width: 4.6rem; height: 4.6rem; border-radius: 8px; background: linear-gradient(#cfd6e4, #8c97ad); overflow: hidden; flex: none; }
+.bb-sp-thumb.bb-sp-small { width: 1.7rem; height: 1.7rem; border-radius: 5px; }
+.bb-sp-ball { display: block; width: 100%; height: 100%; object-fit: contain; }
+.bb-st-pick-item small { color: #94a3b8; font-size: 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-st-pick .bb-st-seg { margin: 0 0 .6rem; align-self: flex-start; }
+.bb-st-pick-grid { grid-template-columns: repeat(auto-fill, minmax(6.4rem, 1fr)); }

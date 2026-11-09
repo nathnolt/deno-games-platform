@@ -1,4 +1,4 @@
-// CLIENT ONLY: the studios of the debug menu (the shader studio is in shader-studio.js) (loaded by debug.js, so only with DEBUG on).
+// CLIENT ONLY: the studios of the debug menu (the Shaders menu is in shader-library.js) (loaded by debug.js, so only with DEBUG on).
 //
 //   SHAPE STUDIO  A 2D board that shows EVERY shape at the same scale, side by side, next to the cross-section of a bowl, so you can judge
 //                 how they fit together. Drag corners to reshape, click an edge to add a corner, right-click a corner to remove it.
@@ -19,8 +19,8 @@
 // After a confirmation they send that ONE level / shape to the server, which writes _levels.js / _shapes.js; every room then uses it.
 
 import * as S from './shared.js';
-import { blockShaderControls, waterControls } from './water-ui.js';
-import { shaderStudio } from './shader-studio.js';
+import { shaderPicker } from './shader-ui.js';
+import { shaderStudio } from './shader-library.js';
 import { clone, h, svg } from './ui.js';
 
 const KEY = /^[A-Za-z][\w-]*$/;
@@ -2336,15 +2336,20 @@ function backgroundStudio(view, api) {
       h('details', { class: 'bb-st-inst bb-st-fold' }, h('summary', {}, 'Shadows'),
         h('div', { class: 'bb-st-instbody' }, ...shadowUi(bg))),
       h('div', { class: 'bb-st-sub' }, 'Water of the bowl'),
-      ...waterControls({ h, view, bg, touch: api.touch, draft: api.draft, rerender: renderBody }),
+      h('label', { class: 'bb-dbg-field' }, h('span', {}, 'water shader'), shaderPicker({
+        view, table: () => api.draft().shaderCode ?? {}, value: bg.water?.shader ?? '', water: true, allowEmpty: true, emptyLabel: '(classic water)',
+        onPick: (name) => { if (name === '') delete bg.water; else (bg.water ??= {}).shader = name; api.touch('backgrounds'); renderBody(); },
+      })),
       h('div', { class: 'bb-st-sub' }, 'Table and bowl'),
       h('label', { class: 'bb-dbg-field' }, h('span', {}, 'bowl height above the floor'), numIn(() => bg.bowlHeight ?? 4, (v) => { if (v >= 0) { bg.bowlHeight = v; api.touch('backgrounds'); } }, 0.5)),
       bg.table ? null : h('div', { class: 'bb-st-instbody' },
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table width (x)'), numIn(() => bg.box.w, (v) => { if (v >= 10) { bg.box.w = v; api.touch('backgrounds'); } }, 1)),
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table depth (z)'), numIn(() => bg.box.d, (v) => { if (v >= 10) { bg.box.d = v; api.touch('backgrounds'); } }, 1)),
         h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table centre z'), numIn(() => bg.box.z, (v) => { bg.box.z = v; api.touch('backgrounds'); }, 1)),
-        w.select('table shader', view.shaderNames, bg.box, 'shader', 'backgrounds'),
-        ...blockShaderControls({ h, view, mat: bg.box, touch: api.touch, draft: api.draft, rerender: renderBody, kind: 'backgrounds' })),
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table shader'), shaderPicker({
+          view, table: () => api.draft().shaderCode ?? {}, value: bg.box.shader ?? '',
+          onPick: (name) => { bg.box.shader = name; api.touch('backgrounds'); renderBody(); },
+        }))),
       tableBox,
       h('div', { class: 'bb-st-sub' }, `Models (${ms.length})`, h('span', { class: 'bb-dbg-grow' }),
         btn('Collapse all', () => { openRows.clear(); renderBody(); }, '')),
