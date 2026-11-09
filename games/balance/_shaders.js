@@ -663,6 +663,8 @@ uniform float uFlow;          // 1.0 [0, 4]
 uniform float uSunOwn;        // 1.0 [0, 1]
 uniform float uSunTurn;       // 180.0 [-180, 180]
 uniform float uSunHeight;     // 30.0 [-10, 90]
+uniform float uReflect;       // 1.0 [0, 2]   how much of the sky and the sun the water mirrors (0 = only its own colour)
+uniform float uMirror;        // 1.0 [0, 1]   how much of the SCENERY (rocks, trees, the sky) it mirrors, like the classic water. 1 = the "reflect" of the bowl's water, 0 = none
 
 // The sun of this water: 1 = your own sun (turn 180 = behind the water as seen from the front, height = degrees above the horizon), 0 = the sun / moon of the level
 vec3 sunDir() {
@@ -720,8 +722,12 @@ void main() {
   // (1 - n.v)^4 as two squarings
   float k = 1.0 - clamp(dot(n, v), 0.0, 1.0);
   float k2 = k * k;
-  float fres = 0.15 + 0.85 * k2 * k2;
-  gl_FragColor = vec4(mix(water, env(r) * tint, fres), 1.0);
+  float fr = 0.15 + 0.85 * k2 * k2;
+  float fres = clamp(fr * uReflect, 0.0, 1.0);
+  vec3 col = mix(water, env(r) * tint, fres);
+  vec4 sc = surroundings(n);                           // the classic mirror image of the surroundings, on top of the sky
+  col = mix(col, sc.rgb, clamp(sc.a * uMirror * (0.3 + 0.7 * fr), 0.0, 1.0));
+  gl_FragColor = vec4(col, 1.0);
 }
 `,
   },
@@ -809,6 +815,8 @@ void main() {
       uWaves: 0.19,
       uSunOwn: 0.87,
       uSunTurn: 176.1,
+      uMirror: 0.305,
+      uReflect: 0.71,
     },
   },
   terracotta: {

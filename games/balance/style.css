@@ -297,7 +297,13 @@ button.bb-card:disabled { opacity: .6; cursor: default; }
 /* ── shader studio (shader-studio.js) ── */
 .bb-sh-body { display: flex; flex-direction: column; gap: .5rem; padding: .6rem .7rem; overflow-y: auto; min-height: 0; flex: 1; }
 .bb-sh-pick { flex: 1; min-width: 0; }
-.bb-sh-preview { flex: none; }
+.bb-sh-slot { flex: none; }
+.bb-sh-preview { position: sticky; top: 0; z-index: 3; display: flex; flex-direction: column; gap: .35rem; padding: .35rem 0; background: #0d111e; }
+.bb-sh-host { flex: none; width: 100%; min-height: 120px; }
+.bb-sh-tools { display: flex; flex-direction: column; gap: .3rem; }
+.bb-sh-check { display: inline-flex; align-items: center; gap: .25rem; font-size: 12px; color: #cbd5e1; cursor: pointer; }
+.bb-sh-preview.bb-sh-wide { position: fixed; top: 0; right: 0; bottom: 0; z-index: 60; padding: .6rem; border-left: 1px solid #3b4668; }
+.bb-sh-preview.bb-sh-wide .bb-sh-host { flex: 1; min-height: 0; }
 .bb-sh-code { flex: 1; min-height: 240px; width: 100%; box-sizing: border-box; resize: vertical; white-space: pre; overflow: auto; tab-size: 2; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #dbe4ff; background: #070a14; border: 1px solid #2b3550; border-radius: 6px; padding: .5rem .6rem; outline: none; }
 .bb-sh-code:focus { border-color: #4a5a94; }
 .bb-sh-errors { display: flex; flex-direction: column; gap: .25rem; }

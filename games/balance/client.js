@@ -573,60 +573,297 @@ varying vec3 vRY;
 varying vec3 vRZ;
 void main() { vP = uv * 4.0; vP3 = vec3(0.0); vN = vec3(0.0, 0.0, 1.0); vW = vec3(0.0); vWN = vN; vDist = 1.0; vRX = vec3(1.0, 0.0, 0.0); vRY = vec3(0.0, 1.0, 0.0); vRZ = vN; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
+/** Multiply the texture coordinates of a stock three.js shape (they run 0..1): block shaders read them as sizes in world units, so 0..1 would look blurry. */
+function scaleUv(geo, k = 4) {
+  const uv = geo.getAttribute('uv');
+  if (uv) for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * k, uv.getY(i) * k);
+  return geo;
+}
+
+/** The things a shader can be tried on in the Shaders menu: key, label, group, and a function that makes the geometries (one holder Group, resting on y = 0). */
+const PREVIEW_SHAPES = [
+  { key: 'pair', label: 'Ball and block' },
+  { key: 'ball', label: 'Ball' },
+  { key: 'block', label: 'Block' },
+  { key: 'torus', label: 'Torus' },
+  { key: 'knot', label: 'Torus knot' },
+  { key: 'cylinder', label: 'Cylinder' },
+  { key: 'cone', label: 'Cone' },
+  { key: 'capsule', label: 'Capsule' },
+  { key: 'bowl', label: 'Bowl' },
+  { key: 'wall', label: 'Wall (flat)' },
+];
+function previewGeometry(key) {
+  switch (key) {
+    case 'ball': return new THREE.SphereGeometry(1.6, 64, 48);
+    case 'block': return new THREE.BoxGeometry(2.8, 2.8, 2.8);
+    case 'torus': return new THREE.TorusGeometry(1.3, 0.62, 40, 80);
+    case 'knot': return new THREE.TorusKnotGeometry(1.1, 0.4, 220, 36);
+    case 'cylinder': return new THREE.CylinderGeometry(1.3, 1.3, 3, 64, 1);
+    case 'cone': return new THREE.ConeGeometry(1.6, 3.2, 64, 1);
+    case 'capsule': return THREE.CapsuleGeometry ? new THREE.CapsuleGeometry(1.0, 1.8, 12, 36) : new THREE.CylinderGeometry(1, 1, 3, 48);
+    case 'bowl': {
+      const pts = [[0, 0], [1.1, 0], [1.9, 0.5], [2.4, 1.4], [2.45, 1.6], [2.28, 1.6], [2.2, 1.45], [1.75, 0.65], [1.05, 0.14], [0, 0.14]].map(([x, y]) => new THREE.Vector2(x, y));
+      return new THREE.LatheGeometry(pts, 96);
+    }
+    case 'wall': return new THREE.PlaneGeometry(5, 3.4, 1, 1);
+    default: return null;
+  }
+}
+
+/** A checkered floor texture and a soft round shadow, for the scenes of the shader preview. */
+function previewTextures() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const x = c.getContext('2d');
+  x.fillStyle = '#c9ccd3';
+  x.fillRect(0, 0, 128, 128);
+  x.fillStyle = '#bcc0c8';
+  x.fillRect(0, 0, 64, 64);
+  x.fillRect(64, 64, 64, 64);
+  const checker = new THREE.CanvasTexture(c);
+  checker.wrapS = checker.wrapT = THREE.RepeatWrapping;
+  checker.repeat.set(24, 24);
+  checker.anisotropy = 8;
+  const s = document.createElement('canvas');
+  s.width = s.height = 128;
+  const g = s.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 4, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(0,0,0,0.55)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  return { checker, shadow: new THREE.CanvasTexture(s) };
+}
+
 /**
- * A small stand-alone view of a shader, for the shader studio: a sphere and a block, with the shader on them, lit by a fixed daylight. Like the shape preview
- * it only draws when something changes or when you drag it round, and dispose() gives the WebGL context back.
- * `makeMaterial({ code, type })` makes the material (the view knows how). `update(entry)` shows a new version of the shader.
+ * A stand-alone 3D view of a shader (the Shaders menu): the shader on a shape of your choice (a ball, a block, a torus knot, a bowl, ... or one of the game's
+ * models), alone in a gradient (studio) or standing in a scene (a table, a room). It draws only when something changes, or every frame while Animate / Spin is on.
+ * Drag = turn the camera round it, right-drag or shift-drag = pan, wheel = zoom, double-click = back to the start. dispose() gives the WebGL context back.
+ *   makeMaterial(entry)  makes the material of a shader (the view knows how)      extra.models() / extra.loadModel(name)  the game's models (name -> geometries)
+ *   update(entry) shows a new version (returns an error text, '' when it compiled)   setObject(key)  setScene('studio' | 'table' | 'room')  setAnimate(on)  setSpin(on)
+ *   resetView()   objects: [{ key, label, group }]   The size follows the host element (a ResizeObserver).
  */
-function shaderPreview3d(host, makeMaterial) {
-  const H = 200;
+function shaderPreview3d(host, makeMaterial, extra = {}) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(Math.max(260, host.clientWidth || 360), H, false);
   const el = renderer.domElement;
-  el.style.cssText = `display:block;width:100%;height:${H}px;border-radius:6px;background:linear-gradient(#cfd6e4,#8c97ad);touch-action:none;cursor:grab`;
+  el.style.cssText = 'display:block;width:100%;height:100%;border-radius:6px;touch-action:none;cursor:grab;background:linear-gradient(#cfd6e4,#8c97ad)';
   host.append(el);
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(30, el.width / el.height, 0.1, 100);
-  camera.position.set(0, 0, 9.5);
-  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1.45, 64, 48));
-  const block = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.9, 1.9));
-  sphere.position.x = -1.7;
-  block.position.x = 1.8;
-  scene.add(sphere, block);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f9a, 1.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+  sun.position.set(-3.5, 8, 5); // (the same side as the light of the shaders: uLightDir in #plainLight)
+  scene.add(sun);
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 400);
+  const tex = previewTextures();
+
+  const rig = new THREE.Group(); // the objects (spun by Spin)
+  const stage = new THREE.Group(); // floor, walls, shadow
+  scene.add(stage, rig);
+  const modelNames = extra.models?.() ?? [];
+  const objects = [...PREVIEW_SHAPES.map((o) => ({ ...o, group: 'Shapes' })), ...modelNames.map((n) => ({ key: `model:${n}`, label: n, group: 'Game models' }))];
+
   let material = null;
-  let yaw = 0.5;
-  let pitch = -0.25;
+  let objectKey = 'pair';
+  let sceneKey = 'studio';
+  let animate = false;
+  let spin = false;
   let error = '';
+  let box = new THREE.Box3(new THREE.Vector3(-3, 0, -1.5), new THREE.Vector3(3, 3, 1.5));
+  let own = []; // geometries made here (disposed when the object changes)
+  let token = 0;
+  let disposed = false;
+  const view = { yaw: 0.55, pitch: 0.3, dist: 14, target: new THREE.Vector3(0, 1.5, 0) };
   renderer.debug.onShaderError = (gl, program, vs, fs) => { error = gl.getShaderInfoLog(fs) || gl.getProgramInfoLog(program) || 'the shader does not compile'; };
+
+  const placeCamera = () => {
+    const cp = Math.cos(view.pitch);
+    camera.position.set(view.target.x + view.dist * Math.sin(view.yaw) * cp, view.target.y + view.dist * Math.sin(view.pitch), view.target.z + view.dist * Math.cos(view.yaw) * cp);
+    camera.lookAt(view.target);
+  };
+  const resetView = () => {
+    const size = box.getSize(new THREE.Vector3());
+    const c = box.getCenter(new THREE.Vector3());
+    const t = Math.tan((camera.fov * Math.PI) / 360);
+    view.target.copy(c);
+    view.yaw = 0.55;
+    view.pitch = 0.3;
+    const half = Math.max(size.y / 2, size.x / 2 / Math.max(0.5, camera.aspect), size.z / 2);
+    view.dist = Math.max(4, (half / t) * 1.25 + size.z / 2);
+    render();
+  };
   const render = () => {
-    block.rotation.set(pitch, yaw, 0);
-    sphere.rotation.set(pitch * 0.5, yaw * 0.5, 0);
+    if (disposed || !material) return;
+    placeCamera();
     renderer.render(scene, camera);
   };
+  let raf = 0;
+  const loop = () => {
+    raf = 0;
+    if (disposed || !(animate || spin)) return;
+    if (spin) rig.rotation.y += 0.012;
+    render();
+    raf = requestAnimationFrame(loop);
+  };
+  const kick = () => { if ((animate || spin) && !raf && !disposed) raf = requestAnimationFrame(loop); };
+
+  const applyMaterial = () => {
+    rig.traverse((o) => { if (o.isMesh) { o.material = material; } });
+  };
+  const clearRig = () => {
+    rig.clear();
+    for (const g of own) g.dispose();
+    own = [];
+  };
+  /** Rest the group on y = 0, centred sideways, and remember its box. */
+  const settle = (group, fit) => {
+    let b = new THREE.Box3().setFromObject(group);
+    if (fit) {
+      const s = b.getSize(new THREE.Vector3());
+      group.scale.multiplyScalar(fit / Math.max(s.x, s.y, s.z, 1e-6));
+      b = new THREE.Box3().setFromObject(group);
+    }
+    const c = b.getCenter(new THREE.Vector3());
+    group.position.set(-c.x, -b.min.y, -c.z);
+  };
+  const clearStage = () => {
+    for (const o of [...stage.children]) { stage.remove(o); o.geometry?.dispose(); o.material?.dispose(); }
+  };
+  const buildStage = () => {
+    clearStage();
+    scene.fog = null;
+    scene.background = null;
+    el.style.background = 'linear-gradient(#cfd6e4,#8c97ad)';
+    if (sceneKey === 'studio') return;
+    const size = box.getSize(new THREE.Vector3());
+    const sky = sceneKey === 'room' ? '#e8dfd0' : '#d6dbe6';
+    el.style.background = sky;
+    scene.background = new THREE.Color(sky);
+    scene.fog = new THREE.Fog(sky, 30, 90);
+    const floor = new THREE.Mesh(new THREE.CircleGeometry(120, 64), new THREE.MeshLambertMaterial(sceneKey === 'room' ? { color: 0xa87c52 } : { map: tex.checker }));
+    floor.rotation.x = -Math.PI / 2;
+    stage.add(floor);
+    if (sceneKey === 'room') {
+      const wallMat = new THREE.MeshLambertMaterial({ color: 0xeee6d6 });
+      const back = new THREE.Mesh(new THREE.PlaneGeometry(40, 16), wallMat);
+      back.position.set(0, 8, -9);
+      const left = new THREE.Mesh(new THREE.PlaneGeometry(40, 16), wallMat);
+      left.rotation.y = Math.PI / 2;
+      left.position.set(-12, 8, 0);
+      stage.add(back, left);
+    }
+    const blob = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: tex.shadow, transparent: true, depthWrite: false }));
+    blob.rotation.x = -Math.PI / 2;
+    blob.position.y = 0.01;
+    blob.scale.set(size.x * 1.5 + 1, size.z * 1.5 + 1, 1);
+    stage.add(blob);
+  };
+
+  const build = async () => {
+    const mine = ++token;
+    clearRig();
+    rig.rotation.set(0, 0, 0);
+    const key = objectKey;
+    const holder = new THREE.Group();
+    let double = false;
+    const mesh = (geo, shared = false) => { if (!shared) own.push(geo); return new THREE.Mesh(geo, material); };
+    if (key === 'pair') {
+      const a = new THREE.Mesh(scaleUv(previewGeometry('ball')), material);
+      const b = new THREE.Mesh(scaleUv(previewGeometry('block')), material);
+      own.push(a.geometry, b.geometry);
+      a.position.set(-2.0, 0, 0);
+      b.position.set(1.9, 0, 0);
+      holder.add(a, b);
+      settle(holder);
+    } else if (key.startsWith('model:')) {
+      let geos = [];
+      try { geos = (await extra.loadModel?.(key.slice(6))) ?? []; } catch (e) { error = `the model could not be loaded: ${e?.message ?? e}`; }
+      if (mine !== token || disposed) return;
+      for (const g of geos) holder.add(mesh(g, true));
+      double = true;
+      settle(holder, 3.6);
+    } else {
+      const geo = scaleUv(previewGeometry(key));
+      if (!geo) return;
+      holder.add(mesh(geo));
+      double = key === 'wall' || key === 'bowl';
+      settle(holder);
+    }
+    rig.add(holder);
+    holder.userData.double = double;
+    box = new THREE.Box3().setFromObject(rig);
+    applyMaterial();
+    if (material) material.side = double ? THREE.DoubleSide : THREE.FrontSide;
+    buildStage();
+    resetView();
+  };
+
+  // ── the size follows the host ──
+  let fitted = false;
+  const fit = () => {
+    const w = Math.max(160, host.clientWidth || 360);
+    const h = Math.max(120, host.clientHeight || 300);
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    if (!fitted) { fitted = true; resetView(); } // (the first time the real shape of the window is known)
+    else render();
+  };
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null;
+  ro?.observe(host);
+
+  // ── pointer: turn, pan, zoom ──
   let drag = null;
-  const down = (e) => { drag = { x: e.clientX, y: e.clientY }; el.setPointerCapture?.(e.pointerId); el.style.cursor = 'grabbing'; };
+  const down = (e) => {
+    drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+    el.setPointerCapture?.(e.pointerId);
+    el.style.cursor = drag.pan ? 'move' : 'grabbing';
+  };
   const move = (e) => {
     if (!drag) return;
-    yaw += (e.clientX - drag.x) * 0.012;
-    pitch = Math.max(-1.5, Math.min(1.5, pitch + (e.clientY - drag.y) * 0.012));
-    drag = { x: e.clientX, y: e.clientY };
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    if (drag.pan) {
+      const k = (view.dist * 2 * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, el.clientHeight);
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+      view.target.addScaledVector(right, -dx * k).addScaledVector(up, dy * k);
+    } else {
+      view.yaw -= dx * 0.009;
+      view.pitch = Math.max(-1.45, Math.min(1.45, view.pitch + dy * 0.009));
+    }
     render();
   };
   const up = () => { drag = null; el.style.cursor = 'grab'; };
+  const wheel = (e) => {
+    e.preventDefault();
+    view.dist = Math.max(1.5, Math.min(120, view.dist * Math.exp(e.deltaY * 0.0012)));
+    render();
+  };
+  const menu = (e) => e.preventDefault();
   el.addEventListener('pointerdown', down);
   el.addEventListener('pointermove', move);
   el.addEventListener('pointerup', up);
   el.addEventListener('pointercancel', up);
+  el.addEventListener('wheel', wheel, { passive: false });
+  el.addEventListener('contextmenu', menu);
+  el.addEventListener('dblclick', resetView);
+
+  build();
+  fit();
   return {
+    objects,
     /** Show this version. Returns an error text, or '' when it compiled. */
     update(entry) {
       error = '';
       const old = material;
       try {
         material = makeMaterial(entry);
-        sphere.material = material;
-        block.material = material;
+        material.side = rig.children[0]?.userData.double ? THREE.DoubleSide : THREE.FrontSide;
+        applyMaterial();
         render();
       } catch (e) {
         error = `${e?.message ?? e}`;
@@ -634,14 +871,27 @@ function shaderPreview3d(host, makeMaterial) {
       old?.dispose();
       return error;
     },
+    setObject(key) { objectKey = objects.some((o) => o.key === key) ? key : 'pair'; return build(); },
+    setScene(key) { sceneKey = key; buildStage(); render(); },
+    setAnimate(on) { animate = !!on; kick(); },
+    setSpin(on) { spin = !!on; kick(); },
+    resetView,
     dispose() {
+      disposed = true;
+      cancelAnimationFrame(raf);
+      ro?.disconnect();
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', up);
+      el.removeEventListener('wheel', wheel);
+      el.removeEventListener('contextmenu', menu);
+      el.removeEventListener('dblclick', resetView);
       material?.dispose();
-      sphere.geometry.dispose();
-      block.geometry.dispose();
+      clearRig();
+      clearStage();
+      tex.checker.dispose();
+      tex.shadow.dispose();
       renderer.dispose();
       renderer.forceContextLoss?.();
       el.remove();
@@ -1425,7 +1675,10 @@ class BalanceView {
 
   /** A small stand-alone window with a sphere and a block in a shader (the Shaders menu). update(entry) shows another version; see shaderPreview3d. */
   debugShaderPreview(host) {
-    return shaderPreview3d(host, (entry) => this.#previewMaterial(entry));
+    return shaderPreview3d(host, (entry) => this.#previewMaterial(entry), {
+      models: () => Object.keys(models),
+      loadModel: async (name) => (models[name] ? (await this.#modelParts(models[name])).map((p) => p.geo) : []),
+    });
   }
 
   /**
@@ -1441,7 +1694,7 @@ class BalanceView {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
     camera.position.set(0, 0, 8);
-    const ball = new THREE.Mesh(new THREE.SphereGeometry(1.8, 48, 32));
+    const ball = new THREE.Mesh(scaleUv(new THREE.SphereGeometry(1.8, 48, 32)));
     ball.rotation.set(-0.35, 0.6, 0);
     scene.add(ball);
     const out = document.createElement('canvas');

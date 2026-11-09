@@ -10,6 +10,8 @@ import { resolveShader } from './shared.js';
 import { openShaderDialog, paramRows, shaderGroups } from './shader-ui.js';
 import { h } from './ui.js';
 
+// what the preview shows (kept while the menu is closed and opened again)
+const prefs = { object: 'pair', scene: 'studio', animate: false, spin: false, height: 340, wide: false };
 const KEY = /^[A-Za-z][\w-]{0,39}$/;
 const WIDTH = 520;
 const DEFAULT_CATEGORY = 'My shaders';
@@ -42,16 +44,63 @@ export function shaderStudio(view, api) {
   const actions = h('div', { class: 'bb-dbg-row' });
   const infoEl = h('div', { class: 'bb-dbg-note' });
   const editor = h('div', { class: 'bb-st-body-in' });
-  const previewHost = h('div', { class: 'bb-sh-preview' });
+  const previewHost = h('div', { class: 'bb-sh-host' });
+  const toolbar = h('div', { class: 'bb-sh-tools' });
+  const previewBox = h('div', { class: 'bb-sh-preview' }, toolbar, previewHost);
+  const previewSlot = h('div', { class: 'bb-sh-slot' }, previewBox); // (keeps its place in the panel while the preview is shown wide)
   const rowsEl = h('div', { class: 'bb-dbg-sec' });
   const saveRow = h('div', { class: 'bb-dbg-row' });
   const body = h('div', { class: 'bb-st-body bb-sh-body' },
-    h('div', { class: 'bb-dbg-row' }, pick), actions, infoEl, editor, previewHost, rowsEl, saveRow,
+    h('div', { class: 'bb-dbg-row' }, pick), actions, infoEl, editor, previewSlot, rowsEl, saveRow,
     h('details', { class: 'bb-sh-help' }, h('summary', {}, 'How does this work?'), h('pre', {}, HELP)));
   const root = h('div', { class: 'bb-st bb-st-dock' }, head, body);
 
   /** What the preview shows for the selected shader: the base shader's code with the settings. */
   const entryOf = (n) => { const r = resolveShader(n, table()); return r ? { ...r, name: n } : null; };
+
+  // ── the preview: which object, which scene, size ──
+  function sizePreview() {
+    if (prefs.wide) {
+      previewSlot.style.minHeight = `${prefs.height + 60}px`;
+      previewBox.classList.add('bb-sh-wide');
+      previewBox.style.left = `${WIDTH}px`;
+      previewHost.style.height = '';
+    } else {
+      previewSlot.style.minHeight = '';
+      previewBox.classList.remove('bb-sh-wide');
+      previewBox.style.left = '';
+      previewHost.style.height = `${prefs.height}px`;
+    }
+  }
+  const onKey = (e) => { if (e.key === 'Escape' && prefs.wide) { prefs.wide = false; sizePreview(); buildToolbar(); e.stopPropagation(); } };
+  function buildToolbar() {
+    if (!preview) { toolbar.replaceChildren(); return; }
+    const sel = (options, value, fn) => {
+      const s = h('select', { class: 'bb-dbg-sel' }, options);
+      s.value = String(value);
+      s.addEventListener('change', () => fn(s.value));
+      return s;
+    };
+    const groups = [...new Set(preview.objects.map((o) => o.group))];
+    const objectSel = sel(groups.map((g) => h('optgroup', { label: g }, preview.objects.filter((o) => o.group === g).map((o) => h('option', { value: o.key }, o.label)))), prefs.object, (v) => { prefs.object = v; preview.setObject(v); });
+    const sceneSel = sel([['studio', 'Studio (nothing around it)'], ['table', 'Table: on a checkered floor'], ['room', 'Room: floor and two walls']].map(([v, t]) => h('option', { value: v }, t)), prefs.scene, (v) => { prefs.scene = v; preview.setScene(v); });
+    const sizeSel = sel([[220, 'Small'], [340, 'Medium'], [480, 'Large'], [640, 'Very large']].map(([v, t]) => h('option', { value: v }, t)), prefs.height, (v) => { prefs.height = Number(v); sizePreview(); });
+    const check = (text, key, fn, tip) => {
+      const c = h('input', { type: 'checkbox' });
+      c.checked = prefs[key];
+      c.addEventListener('change', () => { prefs[key] = c.checked; fn(c.checked); });
+      return h('label', { class: 'bb-sh-check', title: tip }, c, text);
+    };
+    toolbar.replaceChildren(
+      h('div', { class: 'bb-dbg-row' }, field('object', objectSel), field('scene', sceneSel)),
+      h('div', { class: 'bb-dbg-row' },
+        check('Animate', 'animate', (on) => preview.setAnimate(on), 'draw every frame: shaders that move (water, fire) move'),
+        check('Spin', 'spin', (on) => preview.setSpin(on), 'turn the object slowly'),
+        btn('Reset view', () => preview.resetView()),
+        field('size', sizeSel),
+        btn(prefs.wide ? 'Back ⤡' : 'Wide ⤢', () => { prefs.wide = !prefs.wide; sizePreview(); buildToolbar(); }, 'show the preview big, over the game, next to this panel (Esc = back)')),
+      h('div', { class: 'bb-dbg-note' }, 'Drag: turn · right-drag or shift-drag: pan · wheel: zoom · double-click: reset'));
+  }
 
   // ── what is shown ──
   function fillPick() {
@@ -213,14 +262,23 @@ export function shaderStudio(view, api) {
       root.classList.add('bb-show');
       root.style.width = `${WIDTH}px`;
       view.debugDock(WIDTH);
+      sizePreview();
       preview = view.debugShaderPreview(previewHost);
+      preview.setScene(prefs.scene);
+      preview.setAnimate(prefs.animate);
+      preview.setSpin(prefs.spin);
+      preview.setObject(prefs.object);
+      buildToolbar();
+      window.addEventListener('keydown', onKey, true);
       load();
     },
     hide() {
       if (!st.open) return;
       st.open = false;
+      window.removeEventListener('keydown', onKey, true);
       preview?.dispose();
       preview = null;
+      toolbar.replaceChildren();
       root.classList.remove('bb-show');
       view.debugDock(0);
     },

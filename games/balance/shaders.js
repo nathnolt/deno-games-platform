@@ -525,6 +525,18 @@ uniform vec3 uSky;       // the colour of the mist / sky
 uniform float uSeed;
 uniform vec2 uResolution; // the size of the baked picture (see bake below)
 uniform sampler2D uBake;  // the picture drawn ONCE by  vec4 bake(vec2 uv)  (when the shader has one; the first line  // bake 1024  sets its size)
+uniform sampler2D uRefl;  // the scenery as seen from below the surface (the mirror image the classic water uses): read it with surroundings() below
+uniform mat4 uReflMat;
+uniform float uReflStr;   // the "reflect" of the water of the bowl (0 = the bowl does not mirror its surroundings)
+// The surroundings, as the classic water mirrors them: rgb = the picture of the scenery at this pixel, bent by the waves (n = the surface normal), a = how strongly
+// the bowl wants them mirrored (its "reflect"; 0 when it has none, and always 0 away from the surface: on a block or the side of the water). Mix it in yourself:
+//   vec4 s = surroundings(n);   col = mix(col, s.rgb, clamp(s.a * (0.3 + 0.7 * fresnelTerm), 0.0, 1.0));
+vec4 surroundings(vec3 n) {
+  if (uReflStr <= 0.0 || uGrid < 0.5) return vec4(0.0);
+  vec4 pr = uReflMat * vec4(vW, 1.0);
+  vec2 uv = pr.xy / pr.w + n.xz * 0.12;
+  return vec4(texture2D(uRefl, clamp(uv, 0.001, 0.999)).rgb, uReflStr);
+}
 float whash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 ${HASH_GLSL}
 float noise(vec2 p) {

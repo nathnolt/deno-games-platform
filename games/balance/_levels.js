@@ -83,12 +83,11 @@ export const levels = {
       {
         name: 'level4',
         difficulty: 'easy',
-        world: 'world1',
         bowl: 'bowl3',
         background: 'room1',
         initialBlocks: [{ shape: 'I', material: 'static', rot: 105, x: -0.25, y: -0.25 }],
         chooseShapes: 3,
-        shapes: [{ shape: 'J', material: 'wood' }, { shape: 'J', material: 'wood' }, { shape: 'circle', material: 'wood' }],
+        shapes: [{ shape: 'J', material: 'wood' }, { shape: 'circle', material: 'wood' }, { shape: 'L', material: 'wood' }],
       },
     ],
   },
@@ -198,6 +197,27 @@ export const levels = {
     ],
   },
   coop: { name: 'Co-op', levels: [] },
-  hard: { name: 'Hard', levels: [] },
+  hard: {
+    name: 'Hard',
+    levels: [
+      {
+        name: 'Level 1',
+        difficulty: 'hard',
+        bowl: 'bowl1',
+        background: 'zen1',
+        initialBlocks: [
+          { shape: 'I', material: 'glass', rot: 0, x: 1.75, y: 2 },
+          { shape: 'triangle', material: 'static', rot: 0, x: -5, y: -1.75 },
+          { shape: 'triangle', material: 'static', rot: -90, x: 8.5, y: -1.75 },
+        ],
+        chooseShapes: 3,
+        shapes: [
+          { shape: 'circle', material: 'wood' },
+          { shape: 'B', material: 'wood' },
+          { shape: 'triangle', material: 'wood' },
+        ],
+      },
+    ],
+  },
   dumb: { name: 'Dumb', levels: [] },
 };
