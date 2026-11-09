@@ -1042,7 +1042,7 @@ class BalanceView {
       v.static = st === BODY.STATIC;
       const held = st === BODY.HELD || st === BODY.HELD_BAD;
       if (held && owner === this.ctx.me.slot) mine = id;
-      v.mats.forEach((m) => { m.uniforms.uBad.value = st === BODY.HELD_BAD ? 1 : 0; m.uniforms.uCausOn.value = held ? 0 : 1; }); // (a block in your hand is not in the water) // the only tint a block ever gets: red = outside the drop area
+      v.mats.forEach((m) => { m.uniforms.uBad.value = st === BODY.HELD_BAD ? 1 : 0; m.uniforms.uCausOn.value = held ? 0 : 1; if (m.uniforms.uShadowOff) m.uniforms.uShadowOff.value = held ? 1 : 0; }); // (a block in your hand is not in the water) // the only tint a block ever gets: red = outside the drop area
     }
 
     // reconcile our pointer state with what the server says we are holding
@@ -2485,6 +2485,7 @@ void main() {
         uQuality: this.qualityU,
         uAA: this.aaU,
         uNoiseTex: { value: noiseTexture() },
+        uShadowOff: { value: 0 },
         uCausOn: { value: 1 },
         uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
         uReveal: { value: 1 }, //     below 1 the block dissolves in (see finish() in shaders.js)

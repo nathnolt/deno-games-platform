@@ -20,6 +20,7 @@ export const SHADOW_GLSL = /* glsl */ `
 uniform sampler2D uShadowMap;
 uniform mat4 uShadowMat;
 uniform float uShadowStr;
+uniform float uShadowOff; // 1 = this block gets no shadows at all (a block in your hand: it passes through the bowl, and the inside of the bowl must not darken it)
 uniform vec2 uShadowTexel;
 uniform float uShadowRange;
 uniform float uShadowDepth;
@@ -38,7 +39,7 @@ uniform float uLRange[8];
 uniform int uLN;
 float unpackShadowDepth(vec4 v) { return dot(v, vec4(255.0 / 256.0 / 16777216.0, 255.0 / 256.0 / 65536.0, 255.0 / 256.0 / 256.0, 255.0 / 256.0)); }
 float shadowAt(vec3 wp, vec3 n) {
-  if (uShadowStr <= 0.0) return 1.0;
+  if (uShadowStr <= 0.0 || uShadowOff > 0.5) return 1.0;
   float ndl = clamp(dot(n, uLightDir), 0.0, 1.0);
   float texW = uShadowTexel.x * uShadowRange; // world size of one shadow texel
   vec4 sp = uShadowMat * vec4(wp + n * (texW * uShadowNormal * (0.5 + (1.0 - ndl))), 1.0); // normal offset: the surface is moved off itself before the lookup
