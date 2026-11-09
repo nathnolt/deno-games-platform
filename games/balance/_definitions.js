@@ -74,7 +74,21 @@ export const materials = {
   glass:           { friction: 4, weight: 5, shader: 'glass', stackLimit: 2 },
   crackedGlass:    { friction: 4, weight: 5, shader: 'crackedGlass', stackLimit: 0, noLamp: true }, // breaks as soon as one block rests on it
   static: { static: true, friction: 12, shader: 'stone1', shaderParams: { uBump: 0.255, uScale: 3.945, uColor: '#6e6e6e' } },
-  waterBlock:      { static: true, friction: 0, hazard: true, shader: 'waterBlock' }, // a block of water that stays where it is: touch it and you lose
+  waterBlock: {
+    static: true,
+    friction: 0,
+    hazard: true,
+    shader: 'waterBlock',
+    shaderParams: {
+      uBlockOpacity: 0.9,
+      uGlitter: 2.52,
+      uWaves: 0.378,
+      uFlow: 2.02,
+      uSunOwn: 0.615,
+      uSunTurn: -3.5,
+      uSunHeight: -10,
+    },
+  },
   floatBlock:      { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.5 },
   floatierBlock:   { float: true, friction: 8, weight: 3, shader: 'float', floatLevel: 0.9 },
   floatBlockHeavy: { float: true, friction: 8, weight: 30, shader: 'float', floatLevel: 0.5 },

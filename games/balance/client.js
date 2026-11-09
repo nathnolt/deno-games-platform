@@ -393,6 +393,8 @@ function circleOutline(part, sides = 48) {
 /** The radius of the rounding of the front and back edges (the sides are rounded in 2D by buildShape with the same radius). */
 const edgeRadius = () => Math.min(roundOf(), DEPTH / 2 - 0.02);
 
+const WATER_BLOCK_OPACITY = 0.85; // how see-through the water of a water block is (its own setting: uBlockOpacity of the material; the bowl has its own opacity)
+
 /**
  * uNoiseTex of the shader helpers (noiseT, noise3T, fbmT, voronoiT ...): 256 x 256 random numbers that repeat. Green is red shifted by (37, 17) texels, which
  * noise3T needs (one texture read then gives two layers of 3D noise). One object for the whole page: every renderer (also the preview windows) uploads it itself.
@@ -766,6 +768,7 @@ class BalanceView {
   sceneSig = null;
   groundY = -9; //           top of the table (set from the bowl of the level)
   bowlDef = null;
+  waterBlockMats = new Set(); // the 'waterBlock' blocks that are drawn with the water shader of the bowl
   blockMats = new Set(); //    the materials of blocks whose shader has settings (debugLiveBlocks changes them while a slider is dragged)
   waterSel = null; //   { shader, params } of the water of the background that is shown
   currentLevel = null;
@@ -1326,16 +1329,35 @@ class BalanceView {
   debugLiveWater(defs) {
     const params = defs?.backgrounds?.[backgroundKeyOf(this.currentLevel)]?.water?.params ?? {};
     if (this.waterSel) this.waterSel.params = params;
-    this.mainGroup?.traverse((o) => {
-      const m = o.material;
-      if (!m?.userData?.waterParams) return;
-      for (const p of m.userData.waterParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
+    const apply = (m, bgParams = params) => {
+      const own = defs?.materials?.[m.userData.materialKey]?.shaderParams ?? {}; // (a water block: the settings of its material win over those of the background)
+      const all = { ...bgParams, ...(m.userData.materialKey ? own : {}) };
+      if (m.userData.materialKey !== undefined && m.userData.materialKey !== null) m.uniforms.uOpacity.value = all.uBlockOpacity ?? WATER_BLOCK_OPACITY;
+      for (const p of m.userData.waterParams) this.#setParam(m.uniforms[p.name], p, all[p.name]);
       m.userData.rebake?.(); // (a baked picture may depend on the parameters)
+    };
+    this.mainGroup?.traverse((o) => { if (o.material?.userData?.waterParams) apply(o.material); });
+    this.waterBlockMats.forEach((m) => apply(m, params));
+  }
+
+  /** The name of the water shader the bowl of the level uses now ('' = the classic water): the water block uses it too. */
+  get debugWaterShaderName() {
+    return this.waterSel?.shader && shaderCode[this.waterSel.shader]?.type === 'water' ? this.waterSel.shader : '';
+  }
+
+  /** A small window with a sphere and a block in the material `{ shader, params }` (the Materials tab). update(entry) shows another version. */
+  debugMaterialPreview(host) {
+    return shaderPreview3d(host, (e) => {
+      const ws = e.shader === 'waterBlock' && this.debugWaterShaderName ? shaderCode[this.debugWaterShaderName] : null;
+      return ws
+        ? this.#waterBlockMaterial(ws, { ...this.waterSel.params, ...e.params }, null, true)
+        : this.#blockMaterial(e.shader, 0.3, THREE.FrontSide, null, true, null, e.params, null);
     });
   }
 
   /** While a setting of a block shader is dragged: change the uniforms of the blocks that are drawn, without rebuilding anything. */
   debugLiveBlocks(defs) {
+    this.debugLiveWater(defs); // (water blocks)
     for (const m of this.blockMats) {
       const params = defs?.materials?.[m.userData.materialKey]?.shaderParams ?? {};
       for (const p of m.userData.blockParams) this.#setParam(m.uniforms[p.name], p, params[p.name]);
@@ -1952,15 +1974,46 @@ void main() {
   }
 
   /** The water of a bowl drawn by a water shader of _shaders.js (see WATER_PRELUDE in shaders.js); its parameters come from the bowl's water.params. */
-  #customWaterMaterial(code, params, uniforms, vertexShader) {
+  /** The water of the bowl, drawn on a block (the 'waterBlock' material): the same shader and settings as the water of the bowl, seen from the front. */
+  #waterBlockMaterial(ws, params, materialKey = null, plain = false) {
+    const bowl = this.bowlDef ?? { water: { color: '#004585', opacity: 0.55 } };
+    const uniforms = {
+      ...(plain ? { uRefl: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflStr: { value: 0 }, ...this.#plainLight() } : { ...this.waterU, ...this.shadowU }), // (the preview windows are other WebGL contexts)
+      uColor: { value: rawColor(bowl.water.color) }, uOpacity: { value: params?.uBlockOpacity ?? WATER_BLOCK_OPACITY }, uTime: this.uTime, uSky: { value: plain ? new THREE.Color('#cfd6e4') : this.mistNow },
+      uGrid: { value: 0 }, uFoot: { value: new THREE.Vector3(1, 1, 2) },
+      uGlow: { value: new THREE.Vector3() }, uBad: { value: 0 }, uReveal: { value: 1 }, uCausOn: { value: 1 }, uCausInward: { value: 0 },
+    };
+    const vertexShader = /* glsl */ `
+varying vec3 vW;
+varying vec3 vWN;
+varying vec2 vUv;
+varying vec3 vPos;
+void main() {
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vW = w.xyz;
+  vUv = w.xy / 40.0 + 0.5; //  seen from the front (the water of the bowl is seen from above: x, z)
+  vPos = w.xyz * 0.05;
+  vWN = normalize(mat3(modelMatrix) * normal);
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`;
+    const mat = this.#customWaterMaterial(ws.code, params, uniforms, vertexShader, true);
+    mat.userData.materialKey = materialKey;
+    return mat;
+  }
+
+  #customWaterMaterial(code, params, uniforms, vertexShader, block = false) {
     const list = parseShaderParams(code);
     const mat = new THREE.ShaderMaterial({
       uniforms: { ...uniforms },
       vertexShader,
-      fragmentShader: waterFrag(code),
+      fragmentShader: block // (the water drawn on a BLOCK: it also dissolves in (uReveal), glows when held (uGlow) and turns red where it cannot be dropped (uBad), like every block)
+        ? waterFrag(code)
+          .replace('precision highp float;', 'precision highp float;\nuniform float uReveal;\nuniform float uBad;\nuniform vec3 uGlow;')
+          .replace('gl_FragColor.a *= uOpacity;', 'gl_FragColor.a *= uOpacity * uReveal;\n  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0, 0.2, 0.2), uBad * 0.55) + uGlow * 0.28;')
+        : waterFrag(code),
       transparent: true,
       depthWrite: false,
-      side: THREE.DoubleSide,
+      side: block ? THREE.FrontSide : THREE.DoubleSide,
       extensions: { derivatives: true },
     });
     mat.uniforms.uNoiseTex = { value: noiseTexture() };
@@ -1973,6 +2026,10 @@ void main() {
     }
     if (hasBake(code)) attachBake(mat, { code, fragment: waterFrag(code, true), vertex: BAKE_VERTEX_WATER }, list);
     mat.userData.waterParams = list; // (debugLiveWater changes their values while a slider is dragged)
+    if (block) {
+      this.waterBlockMats.add(mat);
+      mat.addEventListener('dispose', () => this.waterBlockMats.delete(mat));
+    }
     return mat;
   }
 
@@ -2197,6 +2254,8 @@ void main() {
   }
 
   #blockMaterial(shaderName, seed, side = THREE.FrontSide, fog = null, plain = false, draft = null, params = null, materialKey = null) {
+    const ws = !draft && shaderName === 'waterBlock' && this.waterSel?.shader && shaderCode[this.waterSel.shader]?.type === 'water' ? shaderCode[this.waterSel.shader] : null;
+    if (ws) return this.#waterBlockMaterial(ws, { ...this.waterSel.params, ...params }, materialKey, plain); // (the water block looks like the water of the bowl; the settings of the material win)
     const type = draft ? draft.type ?? 'opaque' : this.#shaderType(shaderName); // (`draft` = { code, type } of a shader that is being edited: the preview of the shader studio)
     const transparent = type !== 'opaque';
     const mat = new THREE.ShaderMaterial({

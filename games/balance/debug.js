@@ -67,6 +67,7 @@ export function createDebugMenu(view) {
   };
   let infoToken = 0;
   let modelPrev = null; // the preview window of the Models tab
+  let matPrev = null; //   the preview window of the Materials tab
   const shaderNames = () => view.shaderNames;
   const keys = (table) => Object.keys(draft[table]);
   const pick = (name, list) => {
@@ -98,6 +99,7 @@ export function createDebugMenu(view) {
       renderStatus();
     }
     if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
+    if (kind === 'materials' && matPrev) updateMatPrev();
     if (live) localKinds.add(kind); // (the studio gives it to the local game itself, once the drag pauses: see syncNow)
     else if (!quiet) touchLocal(kind);
     studio.changed(kind, live); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
@@ -576,9 +578,38 @@ export function createDebugMenu(view) {
     return h('div', { class: 'bb-dbg-preview' }, root, h('div', { class: 'bb-dbg-hint' }, `${sh.w.toFixed(2)} × ${sh.h.toFixed(2)} units`));
   }
 
+  /** The settings of the water block: its own opacity, and the settings of the water shader of the bowl (a setting you leave alone follows the background). */
+  function waterBlockControls(m) {
+    const water = view.debugWaterShaderName;
+    const params = (m.shaderParams ??= {});
+    const op = h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: params.uBlockOpacity ?? 0.85 });
+    const num = h('code', { class: 'bb-wp-num' }, (params.uBlockOpacity ?? 0.85).toFixed(2));
+    op.addEventListener('input', () => { params.uBlockOpacity = parseFloat(op.value); num.textContent = params.uBlockOpacity.toFixed(2); touch('materials', true, true); view.debugLiveBlocks(draft); });
+    op.addEventListener('change', () => touch('materials'));
+    return [
+      field('block opacity (see-through-ness)', h('span', { class: 'bb-wp-row' }, op, num)),
+      water
+        ? note(`The water block shows the water shader of the background ("${water}"). The settings below replace the ones of the background for this block only; a setting marked (default) is not replaced.`)
+        : note('The background uses the classic water, so the block keeps its own look. Pick a water shader in the Backgrounds tab to use it here.'),
+      ...(water ? blockShaderControls({ h, view, mat: m, touch, draft: () => draft, rerender: render, shader: water }) : []),
+    ];
+  }
+  function updateMatPrev() {
+    const m = draft.materials[state.sel.material];
+    if (m && matPrev) matPrev.update({ shader: m.shader, params: m.shaderParams ?? {} });
+  }
+
   function tabMaterials() {
     const out = [tableBar('materials', 'material', 'material', () => ({ friction: 10, weight: 10, shader: 'wood' }))];
     const m = draft.materials[state.sel.material];
+    matPrev?.dispose(); // a little window with a block and a sphere in this material (drag to turn)
+    matPrev = null;
+    const prevHost = h('div', { style: 'border-radius:8px;overflow:hidden' });
+    try {
+      matPrev = view.debugMaterialPreview(prevHost);
+      matPrev.update({ shader: m.shader, params: m.shaderParams ?? {} });
+    } catch (e) { prevHost.append(h('div', { class: 'bb-dbg-err' }, String(e.message ?? e))); }
+    out.push(section('Preview', prevHost));
     if (m.float) m.floatLevel ??= 0.5;
     out.push(
       section(null,
@@ -593,7 +624,7 @@ export function createDebugMenu(view) {
         select('explodes when it touches', [['', '(nothing)'], ...Object.keys(draft.materials)], m, 'explodesWith', 'materials'),
         m.stackLimit !== undefined ? check('no lamp (looks cracked already)', m, 'noLamp', 'materials') : null,
         select('shader', shaderNames(), m, 'shader', 'materials', () => { delete m.shaderParams; render(); }),
-        ...blockShaderControls({ h, view, mat: m, touch, draft: () => draft, rerender: render }),
+        ...(m.shader === 'waterBlock' ? waterBlockControls(m) : blockShaderControls({ h, view, mat: m, touch, draft: () => draft, rerender: render })),
         note(`friction coefficient ${((m.friction ?? 10) / 20).toFixed(2)} · density ${((m.weight ?? 10) / 10).toFixed(2)} (water = 1)`)),
       note('Block shaders (wood, glass, crackedGlass, stone1, stone2, float) use the face of the block; 3D shaders (wood2, ceramic, bark ...) work everywhere.'),
     );
@@ -1003,7 +1034,7 @@ export function createDebugMenu(view) {
   function setOpen(on) {
     state.open = on;
     panel.classList.toggle('bb-show', on);
-    if (!on) { modelPrev?.dispose(); modelPrev = null; }
+    if (!on) { modelPrev?.dispose(); modelPrev = null; matPrev?.dispose(); matPrev = null; }
     toggle.classList.toggle('bb-hide', on);
     if (on) render();
   }
@@ -1027,6 +1058,7 @@ export function createDebugMenu(view) {
     renderStatus();
     const top = bodyEl.scrollTop;
     if (state.tab !== 'models') { modelPrev?.dispose(); modelPrev = null; }
+    if (state.tab !== 'materials') { matPrev?.dispose(); matPrev = null; }
     bodyEl.replaceChildren(...[TABS[state.tab].render()].flat().filter(Boolean));
     bodyEl.scrollTop = top;
   }
@@ -1073,6 +1105,7 @@ export function createDebugMenu(view) {
       window.removeEventListener('keydown', onKey);
       studio.dispose();
       modelPrev?.dispose();
+      matPrev?.dispose();
       clearTimeout(localTimer);
       view.onRun = null;
       view.onSandbox = null;
