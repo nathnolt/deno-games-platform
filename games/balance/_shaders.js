@@ -167,19 +167,34 @@ void main() {
   },
   mahogany: {
     code: `
+// Mahogany: dark red-brown wood, 3D (the grain is carved through the whole object). The defaults are the old look.
+uniform vec3 uBase;        // color 0.36 0.12 0.07   the main wood colour
+uniform vec3 uDark;        // color 0.20 0.06 0.04   the dark lines of the grain
+uniform vec3 uStreakColor; // color 0.50 0.19 0.10   the lighter streaks
+uniform float uSize;       // 1.0 [0.2, 5]     overall scale (bigger = larger grain)
+uniform float uGrainScale; // 2.6 [0.5, 8]     how many grain lines (up the object)
+uniform float uGrainAmount; // 0.35 [0, 0.5]   how dark the grain lines are
+uniform float uWarp;       // 7.0 [0, 15]      how much the grain wanders
+uniform float uStreaks;    // 0.6 [0, 1]       the lighter streaks
+uniform float uFibre;      // 0.18 [0, 0.6]    fine fibres
+uniform float uBump;       // 0.041 [0, 0.2]   how deep the grain feels
+uniform float uShine;      // 0.55 [0, 2]
+uniform float uRough;      // 0.35 [0, 1]      reflections: low = glossy, high = dull
+
 void main() {
-  vec3 q = vP3;
+  vec3 q = vP3 / uSize;
   float warp = fbm(vec2(q.x * 0.15 + q.z * 0.1, q.y * 0.9));
-  float grain = sin((q.y * 2.6 + q.z * 1.3 + warp * 7.0) * 3.14159) * aaFade(fwidth(q.y * 2.6 + q.z * 1.3 + warp * 7.0) * 0.5);
+  float lines = q.y * uGrainScale + q.z * 1.3 + warp * uWarp;
+  float grain = sin(lines * 3.14159) * aaFade(fwidth(lines) * 0.5);
   float streak = fbm(vec2(q.x * 0.5 + q.z * 0.5, q.y * 6.0));
   float fib = fbm(vec2(q.x + q.z, q.y * 14.0));
-  vec3 c = mix(vec3(0.36, 0.12, 0.07), vec3(0.20, 0.06, 0.04), 0.5 + 0.35 * grain);
-  c = mix(c, vec3(0.50, 0.19, 0.10), smoothstep(0.55, 0.9, streak) * 0.6);
-  c *= 0.9 + 0.18 * fib;
-  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.5 * grain + 0.5 * fib, 0.041); gHasN = 1.0; }
+  vec3 c = mix(uBase, uDark, 0.5 + uGrainAmount * grain);
+  c = mix(c, uStreakColor, smoothstep(0.55, 0.9, streak) * uStreaks);
+  c *= 0.9 + uFibre * fib;
+  if (uQuality > 1.5) { gNormal = bumpFromHeight(0.5 * grain + 0.5 * fib, uBump); gHasN = 1.0; }
   gBlow = 0.3;
-  gShine = 0.55;
-  gRough = roughMap(q * 0.6, 0.35, 0.3);
+  gShine = uShine;
+  gRough = roughMap(q * 0.6, uRough, 0.3);
   gl_FragColor = finish(c, 1.0);
 }`,
   },

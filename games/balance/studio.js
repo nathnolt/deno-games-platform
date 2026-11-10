@@ -1807,9 +1807,13 @@ function levelStudio(view, api) {
     return i;
   };
 
+  /** The own side limits / own drop zone of this level as rectangles in the game (see the Overwrites section). */
+  function rects() { view.debugRects?.(st.open && L() ? { zone: L().zone, drop: L().drop } : null); }
+
   function renderBody() {
     const d = D();
     const l = L();
+    rects();
     if (!l) return put(body, h('p', { class: 'bb-dbg-note' }, 'There are no levels yet. Press New.'));
     const w = api.w;
     const shapesList = Object.keys(d.shapes);
@@ -1817,33 +1821,14 @@ function levelStudio(view, api) {
     const out = [];
 
     // properties
-    const zoneOn = !!l.zone;
-    const dropOn = !!l.drop;
-    const timeOn = l.time !== undefined;
     out.push(w.section('Level',
       w.text('name', l, 'name', 'levels'),
       w.select('world', [['', `(first world: ${d.worlds[Object.keys(d.worlds)[0]]?.name ?? ''})`], ...Object.keys(d.worlds).map((k) => [k, `${d.worlds[k].name} (${k})`])], l, 'world', 'levels', renderHead),
       w.select('difficulty', ['easy', 'medium', 'hard'], l, 'difficulty', 'levels'),
       w.select('bowl', Object.keys(d.bowls), l, 'bowl', 'levels', renderAll),
       w.select('background', Object.keys(d.backgrounds), l, 'background', 'levels'),
-      w.num('blocks on the table', l, 'chooseShapes', 'levels', { min: 1, max: 8, int: true }),
-      w.field('overwrite time', (() => {
-        const c = h('input', { type: 'checkbox', checked: timeOn });
-        c.addEventListener('change', () => { if (c.checked) l.time = D().backgrounds[l.background ?? Object.keys(D().backgrounds)[0]]?.light?.time ?? 12; else delete l.time; api.touch('levels'); renderBody(); });
-        return c;
-      })()),
-      timeOn ? w.slider('time of day (hour)', l, 'time', 'levels', 0, 24, 0.25) : null,
-      w.field('own side limits', (() => {
-        const c = h('input', { type: 'checkbox', checked: zoneOn });
-        c.addEventListener('change', () => { if (c.checked) l.zone = { ...D().tuning.zone }; else delete l.zone; api.touch('levels'); renderBody(); });
-        return c;
-      })(), zoneOn ? numIn(l.zone, 'x0', 1, scheduleDraw) : null, zoneOn ? numIn(l.zone, 'x1', 1, scheduleDraw) : null),
-      w.field('own drop zone', (() => {
-        const c = h('input', { type: 'checkbox', checked: dropOn });
-        c.addEventListener('change', () => { if (c.checked) l.drop = { ...D().tuning.drop }; else delete l.drop; api.touch('levels'); renderBody(); });
-        return c;
-      })()),
-      dropOn ? h('div', { class: 'bb-st-row' }, ...['x0', 'x1', 'y0', 'y1'].map((k) => h('label', { class: 'bb-st-mini' }, k, numIn(l.drop, k, 1, scheduleDraw)))) : null));
+      w.num('blocks on the table', l, 'chooseShapes', 'levels', { min: 1, max: 8, int: true })));
+    out.push(w.overwrites(l, renderBody)); // shader of the wooden blocks, time, gravity, own side limits, own drop zone (their rectangles are drawn on the blueprint and in the game)
 
     // start layout
     const startRows = l.initialBlocks.map((b, i) => {
@@ -2057,6 +2042,7 @@ function levelStudio(view, api) {
       if (live) { view.debugSend({ cancel: true }); live = null; }
       root.classList.remove('bb-show');
       view.debugDock(0, 0);
+      view.debugRects?.(null);
       view.onSnap = null;
       lab({ on: false });
       lab({ reload: true }); // an ordinary level again (in the local game)
@@ -2068,6 +2054,7 @@ function levelStudio(view, api) {
         st.lvl = Math.min(st.lvl, Math.max(0, D().levels.length - 1));
         scheduleSync(); // every edit reaches the local game (and so the test) at once; nothing leaves this page
         scheduleDraw();
+        rects();
       } else if (kind === 'shapes' || kind === 'materials' || kind === 'bowls' || kind === 'tuning') {
         renderPalette();
         scheduleDraw();
@@ -2353,9 +2340,18 @@ function backgroundStudio(view, api) {
           return c;
         })()),
         bg.box.show === false ? h('div', { class: 'bb-st-hint' }, 'No table: the bowl stands on the floor. The size below is the free space round it where no grass grows.') : null,
-        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table width (x)'), numIn(() => bg.box.w, (v) => { if (v >= 10) { bg.box.w = v; api.touch('backgrounds'); } }, 1)),
-        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table depth (z)'), numIn(() => bg.box.d, (v) => { if (v >= 10) { bg.box.d = v; api.touch('backgrounds'); } }, 1)),
-        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table centre z'), numIn(() => bg.box.z, (v) => { bg.box.z = v; api.touch('backgrounds'); }, 1)),
+        h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table size from the bowl'), (() => {
+          const c = h('input', { type: 'checkbox', checked: !!bg.box.fit });
+          c.addEventListener('change', () => { if (c.checked) bg.box.fit = true; else delete bg.box.fit; api.touch('backgrounds'); renderBody(); });
+          return c;
+        })()),
+        ...(bg.box.fit
+          ? [h('div', { class: 'bb-st-hint' }, 'As wide as the bowl plus the margin on both sides; from the back margin behind the bowl to the front margin in front of it (where the waiting blocks lie).'),
+            ...[['margin left and right', 'marginX', 30], ['margin behind the bowl', 'marginBack', 10], ['margin in front of the bowl', 'marginFront', 15]].map(([t, k, dflt]) =>
+              h('label', { class: 'bb-dbg-field' }, h('span', {}, t), numIn(() => bg.box[k] ?? dflt, (v) => { if (v >= 0) { bg.box[k] = v; api.touch('backgrounds'); } }, 1)))]
+          : [h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table width (x)'), numIn(() => bg.box.w, (v) => { if (v >= 10) { bg.box.w = v; api.touch('backgrounds'); } }, 1)),
+            h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table depth (z)'), numIn(() => bg.box.d, (v) => { if (v >= 10) { bg.box.d = v; api.touch('backgrounds'); } }, 1)),
+            h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table centre z'), numIn(() => bg.box.z, (v) => { bg.box.z = v; api.touch('backgrounds'); }, 1))]),
         bg.box.show === false ? null : h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table corner radius'), numIn(() => bg.box.radius ?? 0, (v) => { if (v >= 0) { bg.box.radius = v; api.touch('backgrounds'); } }, 0.5)),
         bg.box.show === false ? null : h('label', { class: 'bb-dbg-field' }, h('span', {}, 'table shader'), shaderPicker({
           view, table: () => api.draft().shaderCode ?? {}, value: bg.box.shader ?? '',

@@ -203,7 +203,7 @@ export const backgrounds = {
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'plankFloor', radius: 4 },
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
     lights: [],
     water: { shader: 'calmOcean' },
   },
@@ -224,7 +224,7 @@ export const backgrounds = {
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'plankFloor', radius: 5 },
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
     lights: [],
   },
   zen3: {
@@ -274,8 +274,8 @@ export const backgrounds = {
       { model: 'mountain', scale: 4, rotation: [0, 0, 0], translate: [0, 0, -330] },
     ],
     blurFar: 10,
-    bowlHeight: 2,
-    box: { w: 52, d: 52, z: 2, shader: 'plankFloor', radius: 25 },
+    bowlHeight: 4,
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
     lights: [],
   },
 };

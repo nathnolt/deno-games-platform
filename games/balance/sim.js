@@ -8,7 +8,7 @@
 // planck itself is not imported here: the server hands in `npm:planck@1` and the browser the module it loaded (usePlanck below).
 // The gameplay is 2D (x, y); the 3D look is purely client-side.
 import {
-  applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, GRAVITY, groundYOf, inDrop, levels, LOSE,
+  applyDefinitions, BODY, bowlOf, bowlProfile, cloneDefinitions, DEBUG, densityOf, frictionOf, getShape, gravityOf, groundYOf, inDrop, levels, LOSE,
   materials, MATERIAL_KEYS, MAX_HOLD_X, MAX_HOLD_Y, MIN_HOLD_Y, orderLevels, PHASE, PREVIEW_COUNT, serializeLevels, serializeShapes, serializeShaders, isPlayerColor, SHAPE_KEYS, tuning, validateDefinitions, WATER_DENSITY, WATER_Y, zoneOf,
 } from './shared.js';
 
@@ -266,7 +266,7 @@ export class BalanceGame {
     active = this.defs;
     this.defsCache = null;
     this.defsRev++;
-    if (this.world) this.world.setGravity(new Vec2(0, -GRAVITY));
+    this.#refreshGravity();
     if (this.levelIdx >= levels.length) this.#toMenu();
     else if (this.levelIdx >= 0 && keys() !== before) this.#startLevel(this.levelIdx);
   }
@@ -283,6 +283,13 @@ export class BalanceGame {
     this.defsCache = null;
     this.defsRev++;
     if (this.levelIdx >= levels.length) this.#toMenu();
+    else this.#refreshGravity(); // (the level studio changed the gravity of the level: it acts at once)
+  }
+
+  /** The gravity of the running level (its own overwrite, or tuning.gravity). */
+  #refreshGravity() {
+    this.gravity = gravityOf(levels[this.levelIdx]);
+    if (this.world) this.world.setGravity(new Vec2(0, -this.gravity));
   }
 
   /**
@@ -605,7 +612,8 @@ export class BalanceGame {
     this.endedFor = 0;
     this.acc = 0;
     this.startedAt = performance.now();
-    this.world = new planck.World({ gravity: new Vec2(0, -GRAVITY) });
+    this.gravity = gravityOf(level);
+    this.world = new planck.World({ gravity: new Vec2(0, -this.gravity) });
 
     // the bowl: a ring of convex quads following the profile of the bowl this level uses
     const bowl = this.world.createBody({ type: 'static', position: new Vec2(0, 0) });
@@ -944,7 +952,7 @@ export class BalanceGame {
         const { area, cx, cy } = clipBelow(world, WATER_Y);
         if (area > 1e-6) {
           wet += area;
-          b.applyForce(new Vec2(0, WATER_DENSITY * rec.buoy * GRAVITY * area), new Vec2(cx, cy), true);
+          b.applyForce(new Vec2(0, WATER_DENSITY * rec.buoy * this.gravity * area), new Vec2(cx, cy), true);
         }
       }
       const f = rec.area > 0 ? Math.min(1, wet / rec.area) : 0;

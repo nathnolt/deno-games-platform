@@ -35,7 +35,7 @@ const BLUR_OPTIONS = [['none', 'sharp (none)'], ['light', 'light blur'], ['heavy
 const PHYSICS = new Set(['tuning', 'materials', 'shapes', 'bowls', 'levels', 'worlds']);
 
 const TUNING_HELP = {
-  gravity: 'units / s². Applies at restart.',
+  gravity: 'units / s². 0 = nothing falls, negative = blocks fall upwards. Applies at restart.',
   waterDensity: 'How hard the water pushes floating blocks up. Applies at restart.',
   countdown: 'Seconds from the last placed block until the level is cleared (no stability check). The three green dots appear at every third.',
   follow: 'How fast a held block chases the pointer.',
@@ -101,6 +101,7 @@ export function createDebugMenu(view) {
       renderStatus();
     }
     if (kind === 'models' && modelPrev) modelPrev.set(draft.models[state.sel.model] ?? {});
+    if (kind === 'levels' || kind === 'tuning') updateRects();
     if (live) localKinds.add(kind); // (the studio gives it to the local game itself, once the drag pauses: see syncNow)
     else if (!quiet) touchLocal(kind);
     studio.changed(kind, live); // an open studio redraws (the const is defined further down; touch() is only called after the menu exists)
@@ -484,11 +485,9 @@ export function createDebugMenu(view) {
         select('world', worldOptions(), lv, 'world', 'levels'),
         select('bowl', keys('bowls'), lv, 'bowl', 'levels'),
         select('background', keys('backgrounds'), lv, 'background', 'levels'),
-        num('time of day override (hour, empty = the background\'s)', lv, 'time', 'levels', { optional: true, min: 0, max: 24, step: 0.25 }),
         num('blocks on the table', lv, 'chooseShapes', 'levels', { int: true, min: 1 }),
-        customRect(lv, 'zone', ['x0', 'x1'], 'own sideways limits'),
-        customRect(lv, 'drop', ['x0', 'x1', 'y0', 'y1'], 'own drop zone'),
       ),
+      overwrites(lv, render),
       section(`Start blocks (${lv.initialBlocks.length})`, note("Present from the start. 'static' material = fixed. x, y = centre, y = 0 is the water."),
         ...lv.initialBlocks.map((b, i) => blockRow(b, lv.initialBlocks, i, true)),
         btn('+ Add start block', () => { lv.initialBlocks.push({ shape: shapeOpts[0], material: matOpts[0], rot: 0, x: 0, y: 0 }); touch('levels'); render(); })),
@@ -502,7 +501,46 @@ export function createDebugMenu(view) {
   /** The worlds for a level's world field ('' = the first world). */
   const worldOptions = () => [['', `(first world: ${draft.worlds[keys('worlds')[0]]?.name ?? ''})`], ...keys('worlds').map((k) => [k, `${draft.worlds[k].name} (${k})`])];
 
-  /** The checkbox + fields of an optional rectangle (zone / drop) of a level. */
+  /**
+   * The OVERWRITES of a level: what it does differently from the rest of the game. Each one is a checkbox; ticked, its controls appear (and the
+   * rectangles of the side limits and the drop zone are drawn in the game). `redo` redraws the menu that shows this section.
+   */
+  function overwrites(lv, redo) {
+    const bgKey = lv.background ?? keys('backgrounds')[0];
+    const one = (label, on, set, unset, controls) => {
+      const c = h('input', { type: 'checkbox', checked: on });
+      c.addEventListener('change', () => { if (c.checked) set(); else unset(); touch('levels'); redo(); });
+      return h('div', { class: 'bb-dbg-ow' }, field(label, c), on ? controls() : null);
+    };
+    const woodDefault = draft.materials.wood?.shader ?? '';
+    return section('Overwrites',
+      note('What this level does differently. Tick one to use your own value in this level only; the rest of the game is not touched.'),
+      one('shader of the wooden blocks', lv.shaders?.wood !== undefined,
+        () => { (lv.shaders ??= {}).wood = woodDefault; },
+        () => { delete lv.shaders.wood; if (!Object.keys(lv.shaders).length) delete lv.shaders; },
+        () => field('wood shader', shaderPicker({
+          view, table: () => draft.shaderCode ?? {}, value: lv.shaders.wood ?? '',
+          onPick: (name) => { lv.shaders.wood = name; touch('levels'); redo(); },
+        }))),
+      one('time of day', lv.time !== undefined,
+        () => { lv.time = draft.backgrounds[bgKey]?.light?.time ?? 12; },
+        () => { delete lv.time; },
+        () => slider('hour (12 = noon, 0 = midnight)', lv, 'time', 'levels', 0, 24, 0.25)),
+      one('gravity', lv.gravity !== undefined,
+        () => { lv.gravity = draft.tuning.gravity ?? 30; },
+        () => { delete lv.gravity; },
+        () => num(`units / s² (the game's: ${draft.tuning.gravity ?? 30}; 0 = nothing falls, negative = upwards)`, lv, 'gravity', 'levels', { min: -1000, max: 1000 })),
+      one('own side limits (a red rectangle shows them)', !!lv.zone,
+        () => { lv.zone = { ...draft.tuning.zone }; },
+        () => { delete lv.zone; },
+        () => h('div', {}, ...['x0', 'x1'].map((f) => num(`  ${f}`, lv.zone, f, 'levels')))),
+      one('own drop zone (a green rectangle shows it)', !!lv.drop,
+        () => { lv.drop = { ...draft.tuning.drop }; },
+        () => { delete lv.drop; },
+        () => h('div', {}, ...['x0', 'x1', 'y0', 'y1'].map((f) => num(`  ${f}`, lv.drop, f, 'levels')))));
+  }
+
+  /** The checkbox + fields of an optional rectangle (zone / drop) of a level. (Old: the Overwrites section does this now.) */
   function customRect(lv, key, fields, label) {
     const box = h('div', {});
     const on = h('input', { type: 'checkbox', checked: !!lv[key] });
@@ -762,6 +800,9 @@ export function createDebugMenu(view) {
     bg.ground.blur ??= 'light';
     bg.bowlHeight ??= 4;
     bg.box ??= { w: 110, d: 52, z: 2, shader: 'floorwood' };
+    bg.box.marginX ??= 30;
+    bg.box.marginBack ??= 10;
+    bg.box.marginFront ??= 15;
     out.push(
       btn('Use this background in the current level', () => {
         const lv = draft.levels[view.snap?.lv ?? -1];
@@ -793,9 +834,19 @@ export function createDebugMenu(view) {
           return c;
         })()),
         ...(bg.box.show === false ? [note('No table: the bowl stands on the floor (the bowl height above is not used). The size below is only the free space round it where no grass grows.')] : []),
-        num('table width (x)', bg.box, 'w', 'backgrounds', { min: 10, max: 1000 }),
-        num('table depth (z)', bg.box, 'd', 'backgrounds', { min: 10, max: 1000 }),
-        num('table centre z', bg.box, 'z', 'backgrounds'),
+        field('table size from the bowl', (() => {
+          const c = h('input', { type: 'checkbox', checked: !!bg.box.fit });
+          c.addEventListener('change', () => { if (c.checked) bg.box.fit = true; else delete bg.box.fit; touch('backgrounds'); render(); });
+          return c;
+        })()),
+        ...(bg.box.fit
+          ? [note('The table is as wide as the bowl plus the margin on both sides, and runs from the back margin behind the bowl to the front margin in front of it (where the waiting blocks lie). The bowl height above sets how thick it is.'),
+            num('margin left and right', bg.box, 'marginX', 'backgrounds', { min: 0, max: 500 }),
+            num('margin behind the bowl', bg.box, 'marginBack', 'backgrounds', { min: 0, max: 500 }),
+            num('margin in front of the bowl', bg.box, 'marginFront', 'backgrounds', { min: 0, max: 500 })]
+          : [num('table width (x)', bg.box, 'w', 'backgrounds', { min: 10, max: 1000 }),
+            num('table depth (z)', bg.box, 'd', 'backgrounds', { min: 10, max: 1000 }),
+            num('table centre z', bg.box, 'z', 'backgrounds')]),
         ...(bg.box.show === false ? [] : [num('table corner radius', bg.box, 'radius', 'backgrounds', { min: 0, max: 500 }), shader('table shader', bg.box, 'shader', 'backgrounds')])),
       section('Water of the bowl',
         field('water shader', shaderPicker({
@@ -945,32 +996,41 @@ export function createDebugMenu(view) {
   const localChk = h('input', { type: 'checkbox' });
   localChk.addEventListener('change', () => { state.autoLocalBlocked = !localChk.checked; localChk.checked ? enterLocal({ startRoomLevel: true }) : leaveLocal(); });
   const localLabel = h('label', { class: 'bb-dbg-chk', title: 'Show and play your draft in a private copy of the game that runs in this page. Nobody else sees it and nothing is sent to the room; the room goes on without you.' }, localChk, 'Local game');
+  // the bar: the buttons on the top row, the debug options below it in a panel of their own (it folds away)
   const header = h('div', { class: 'bb-dbg-head' },
-    h('strong', {}, 'Debug'),
-    helper('Free camera', 'freeCam', (on) => view.debugFreeCam(on)),
-    helper('Show drop zone', 'showDrop', (on) => view.debugShowDrop(on)),
-    helper('Auto-restart', 'autoRestart'),
-    localLabel,
-    helper('Shadows', 'fxShadows', (on) => view.debugFx('shadows', on)),
-    helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
-    helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
-    helper('Glass bending', 'fxRefraction', (on) => view.debugFx('refraction', on)),
-    perfMenu,
-    h('span', { class: 'bb-dbg-grow' }),
-    reloadBtn,
-    btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
-    btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
-    btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
-    btn('Shaders', () => openStudio('shaders'), 'bb-dbg-go'),
-    btn('Reset completed levels', () => {
-      if (!window.confirm('Forget which levels you have completed (kept in this browser) and reload?')) return;
-      try { localStorage.removeItem('balance.done'); } catch { /* ignore */ }
-      window.location.reload();
-    }, 'bb-dbg-danger'),
-    btn('Restart', () => { syncLocalNow(true); view.ctx.sendInput({ restart: true }); }),
-    btn('Menu', () => view.ctx.sendInput({ menu: true })),
-    btn('✕', () => setOpen(false)));
-  const panel = h('div', { class: 'bb-dbg-panel' }, header, statusEl, tabsEl, bodyEl);
+    h('div', { class: 'bb-dbg-toprow' },
+      reloadBtn,
+      btn('Shape studio', () => openStudio('shapes'), 'bb-dbg-go'),
+      btn('Level studio', () => openStudio('levels'), 'bb-dbg-go'),
+      btn('Background studio', () => openStudio('backgrounds'), 'bb-dbg-go'),
+      btn('Shaders', () => openStudio('shaders'), 'bb-dbg-go'),
+      btn('Reset completed levels', () => {
+        if (!window.confirm('Forget which levels you have completed (kept in this browser) and reload?')) return;
+        try { localStorage.removeItem('balance.done'); } catch { /* ignore */ }
+        window.location.reload();
+      }, 'bb-dbg-danger'),
+      btn('Restart', () => { syncLocalNow(true); view.ctx.sendInput({ restart: true }); }),
+      btn('Menu', () => view.ctx.sendInput({ menu: true })),
+      h('span', { class: 'bb-dbg-grow' }), // (pushes the close button to the right)
+      btn('✕', () => setOpen(false))),
+    h('details', { class: 'bb-dbg-opts', open: true },
+      h('summary', {}, 'Debug options'),
+      h('div', { class: 'bb-dbg-optsrow' },
+        helper('Free camera', 'freeCam', (on) => view.debugFreeCam(on)),
+        helper('Show drop zone', 'showDrop', (on) => view.debugShowDrop(on)),
+        helper('Auto-restart', 'autoRestart'),
+        localLabel,
+        helper('Shadows', 'fxShadows', (on) => view.debugFx('shadows', on)),
+        helper('Reflection', 'fxReflection', (on) => view.debugFx('reflection', on)),
+        helper('Blur', 'fxBlur', (on) => view.debugFx('blur', on)),
+        helper('Glass bending', 'fxRefraction', (on) => view.debugFx('refraction', on)),
+        perfMenu)));
+  // like the studios: the bar with the buttons runs across the whole window at the top, the panel (tabs and settings) sits at the left under it, and the game is drawn in the rest
+  const bar = h('div', { class: 'bb-dbg-topbar' }, header);
+  const panel = h('div', { class: 'bb-dbg-panel' }, statusEl, tabsEl, bodyEl);
+  const fitDock = () => { if (state.open) view.debugDock(Math.round(panel.getBoundingClientRect().width), bar.offsetHeight); }; // (the bar wraps onto more lines in a narrow window)
+  if (typeof ResizeObserver === 'function') new ResizeObserver(fitDock).observe(bar);
+  window.addEventListener('resize', fitDock);
   const toggle = h('button', { type: 'button', class: 'bb-dbg-toggle', title: 'Debug menu ( ` )', onclick: () => setOpen(!state.open) }, '🛠 Debug');
   // the studios (studio.js): a shape editor and a level editor with a live test lab. They edit the same draft as the tabs.
   // ── saving ONE level / shape to its file (_levels.js / _shapes.js): the only thing in this menu that reaches the server, and only when a studio asks for it after a confirmation ──
@@ -1007,7 +1067,7 @@ export function createDebugMenu(view) {
       el.title = state.problems.join('\n');
       el.classList.toggle('bb-on', n > 0);
     },
-    w: { field, section, num, text, check, select, shader, color, slider, btn, note, grassDefaults },
+    w: { field, section, num, text, check, select, shader, color, slider, btn, note, grassDefaults, overwrites },
     open: (name) => openStudio(name),
     close: () => closeStudio(),
     /** Playtest: leave the studio and the menu, and play the level as an ordinary game in the local game (it stays on until you go back to the room). */
@@ -1022,7 +1082,7 @@ export function createDebugMenu(view) {
     h('strong', {}, 'Local game'),
     h('span', {}, 'only you see this; nothing is sent to the room'),
     btn('Back to the room', () => { if (studio.current) closeStudio(); leaveLocal(); }, 'bb-dbg-go'));
-  const root = h('div', { class: 'bb-dbg' }, toggle, panel, studio.el, localPill);
+  const root = h('div', { class: 'bb-dbg' }, toggle, bar, panel, studio.el, localPill);
 
   /** Play a level of the draft in the local game (a private test with the real rules: nothing is sent to the room). */
   function playLocal(i) {
@@ -1056,9 +1116,10 @@ export function createDebugMenu(view) {
   function setOpen(on) {
     state.open = on;
     panel.classList.toggle('bb-show', on);
+    bar.classList.toggle('bb-show', on);
     if (!on) { modelPrev?.dispose(); modelPrev = null; }
     toggle.classList.toggle('bb-hide', on);
-    if (on) render();
+    if (on) { fitDock(); render(); } else { view.debugDock(0, 0); updateRects(); }
   }
 
   function renderStatus() {
@@ -1082,6 +1143,22 @@ export function createDebugMenu(view) {
     if (state.tab !== 'models') { modelPrev?.dispose(); modelPrev = null; }
     bodyEl.replaceChildren(...[TABS[state.tab].render()].flat().filter(Boolean));
     bodyEl.scrollTop = top;
+    updateRects();
+  }
+
+  /**
+   * The rectangles drawn in the game while you edit them: on the Levels tab the own side limits / own drop zone of the level (Overwrites section), on the
+   * Settings tab the global side limits (zone) and drop zone (drop) of `tuning`.
+   */
+  function updateRects() {
+    let spec = null;
+    if (state.open && state.tab === 'levels') {
+      const lv = draft.levels[state.sel.level];
+      if (lv) spec = { zone: lv.zone, drop: lv.drop };
+    } else if (state.open && state.tab === 'settings') {
+      spec = { zone: draft.tuning.zone, drop: draft.tuning.drop };
+    }
+    view.debugRects?.(spec);
   }
 
   const onKey = (e) => {

@@ -693,7 +693,7 @@ export const BACKGROUND_DEFAULTS = {
   blurFar: 10,
   light: { dir: [-0.45, 0.85, 0.55], shadow: 0.55, time: 12 }, // where the light comes from (towards the light) and how dark its shadows are (0 = no shadows)
   bowlHeight: 4, // how high the bowl stands above the floor (= the thickness of the table)
-  box: { w: 110, d: 52, z: 2, shader: 'floorwood', radius: 0 }, // the plain table: width (x), depth (z), centre z, shader, corner radius; `show: false` = no table at all, the bowl stands on the floor (unused when `table` is a model)
+  box: { w: 110, d: 52, z: 2, shader: 'floorwood', radius: 0, fit: false, marginX: 30, marginBack: 10, marginFront: 15 }, // the plain table: width (x), depth (z), centre z, shader, corner radius; `fit: true` = size and z come from the bowl plus margins (marginX each side, marginBack behind it, marginFront in front, where the waiting blocks lie); `show: false` = no table at all, the bowl stands on the floor (unused when `table` is a model)
   models: [],
 };
 
@@ -706,6 +706,20 @@ export const backgroundKeyOf = (level) => (level?.background && backgrounds[leve
 export function bowlOf(level) {
   const b = bowls[bowlKeyOf(level)] ?? {};
   return { ...BOWL_DEFAULTS, ...b, water: { ...BOWL_DEFAULTS.water, ...b.water } };
+}
+
+/**
+ * The table of a background with its size worked out: as written (w, d, z), or with `fit: true` from the bowl of the level: as wide as the bowl plus
+ * marginX on both sides, from marginBack behind the bowl to marginFront in front of it (the bowl is squeezed along z by zscale, and stands at z = 0).
+ */
+export function boxOf(box, bowl) {
+  const b = { ...BACKGROUND_DEFAULTS.box, ...box };
+  if (!b.fit || !bowl) return b;
+  const hx = bowl.a + bowl.t;
+  const hz = hx * bowl.zscale;
+  const z0 = -hz - b.marginBack;
+  const z1 = hz + b.marginFront;
+  return { ...b, w: 2 * (hx + b.marginX), d: z1 - z0, z: (z0 + z1) / 2 };
 }
 
 /** The background of a level, with every missing field filled in. */
@@ -749,6 +763,10 @@ export function bowlProfile(n = 36, bowl = bowlOf(null)) {
 // ── Levels ───────────────────────────────────────────────────────────────────────────────────────────────────
 /** Sideways limits and drop zone for a level. */
 export const zoneOf = (level) => level.zone ?? ZONE;
+/** Gravity for a level: its own (`gravity`, an overwrite) or the one of `tuning`. */
+export const gravityOf = (level) => (isNum(level?.gravity) ? level.gravity : GRAVITY); // (0 = nothing falls, negative = blocks fall upwards)
+/** The shader a block of this material is drawn with in this level: the level's own (`shaders: { wood: 'name' }`, an overwrite) or the one of the material. */
+export const blockShaderOf = (level, materialKey) => level?.shaders?.[materialKey] ?? materials[materialKey]?.shader;
 export const dropOf = (level) => level.drop ?? DROP;
 export const inDrop = (level, x, y) => {
   const d = dropOf(level);
@@ -852,7 +870,7 @@ export function validateDefinitions(defs, extra = {}) {
   }
   if (t.mergeParts !== undefined && typeof t.mergeParts !== 'boolean') err('tuning.mergeParts must be true or false');
   if (t.countdown !== undefined && !(isNum(t.countdown) && t.countdown >= 0.5 && t.countdown <= 60)) err('tuning.countdown must be from 0.5 to 60 seconds');
-  if (isNum(t.gravity) && t.gravity <= 0) err('tuning.gravity must be above 0');
+  if (isNum(t.gravity) && Math.abs(t.gravity) > 1000) err('tuning.gravity must be from -1000 to 1000 (negative = blocks fall upwards)');
   if (isNum(t.depth) && t.depth < 0.3) err('tuning.depth must be at least 0.3');
   for (const k of ['round', 'chamfer']) if (t[k] !== undefined && !isNum(t[k])) err(`tuning.${k} must be a number`); // (chamfer = the old name of round)
   if (isNum(t.round) && isNum(t.depth) && (t.round < 0 || t.round > t.depth / 2 - 0.02)) err('tuning.round must be between 0 and half the depth');
@@ -962,6 +980,8 @@ export function validateDefinitions(defs, extra = {}) {
       if (b.box.z !== undefined && !isNum(b.box.z)) err(`background ${k}: box.z must be a number`);
       if (b.box.radius !== undefined && !(isNum(b.box.radius) && b.box.radius >= 0 && b.box.radius <= 500)) err(`background ${k}: box.radius (corner radius) must be a number from 0 to 500`);
       if (b.box.show !== undefined && typeof b.box.show !== 'boolean') err(`background ${k}: box.show must be true or false`);
+      if (b.box.fit !== undefined && typeof b.box.fit !== 'boolean') err(`background ${k}: box.fit must be true or false`);
+      for (const f of ['marginX', 'marginBack', 'marginFront']) if (b.box[f] !== undefined && !(isNum(b.box[f]) && b.box[f] >= 0 && b.box[f] <= 500)) err(`background ${k}: box.${f} must be a number from 0 to 500`);
       if (b.box.shader !== undefined) shaderOk(b.box.shader, `background ${k}, table box`);
     }
     if (b.bowlHeight !== undefined && !(isNum(b.bowlHeight) && b.bowlHeight >= 0 && b.bowlHeight <= 100)) err(`background ${k}: bowlHeight must be a number from 0 to 100`);
@@ -1028,6 +1048,14 @@ export function validateDefinitions(defs, extra = {}) {
       if (!mats[b.material]) err(`${w}: unknown material "${b.material}" in the start blocks`);
       if (!isNum(b.x) || !isNum(b.y) || !isNum(b.rot ?? 0) || !isNum(b.z ?? 0)) err(`${w}: a start block has a position that is not a number`);
     }
+    if (l.gravity !== undefined && !(isNum(l.gravity) && Math.abs(l.gravity) <= 1000)) err(`${w}: gravity (an overwrite) must be a number from -1000 to 1000 (negative = blocks fall upwards)`);
+    if (l.shaders !== undefined) {
+      if (typeof l.shaders !== 'object' || l.shaders === null || Array.isArray(l.shaders)) err(`${w}: shaders must be an object { material: shader }`);
+      else for (const [mk, sn] of Object.entries(l.shaders)) {
+        if (!mats[mk]) err(`${w}: shaders: unknown material "${mk}"`);
+        shaderOk(sn, `${w}: shaders.${mk}`);
+      }
+    }
     if (l.zone) rect(l.zone, `${w} zone`, ['x0', 'x1']);
     if (l.drop) rect(l.drop, `${w} drop`, ['x0', 'x1', 'y0', 'y1']);
   });
@@ -1080,6 +1108,11 @@ const LEVELS_HEAD = [
   '// shapes               the ordered list of blocks you must place: { shape, material }. Rotate with Q / E while holding.',
   '// zone (optional)      { x0, x1 }: sideways limits (default tuning.zone). Leaving it, or touching the water/bowl, loses the level.',
   '// drop (optional)      { x0, x1, y0, y1 }: the drop zone rectangle (default tuning.drop)',
+  '//',
+  '// OVERWRITES (all optional: what this level does differently from the rest of the game; the Overwrites section of the level menu):',
+  '//   time                the hour of the day (see above)           zone / drop    own side limits / own drop zone (see above)',
+  '//   gravity             this level\'s own gravity (default tuning.gravity)',
+  "//   shaders             the shader blocks of a material are drawn with in this level: { wood: 'oakWood' } (default: the shader of the material)",
   '',
 ].join('\n');
 

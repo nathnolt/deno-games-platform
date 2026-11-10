@@ -1,7 +1,7 @@
 import * as THREE from 'three'; // resolved by the import map in client/index.html
 import { el } from '../../client/dom.js';
 import {
-  applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
+  applyDefinitions, backgroundKeyOf, cloneDefinitions, backgroundOf, BODY, bowlKeyOf, bowlOf, blockShaderOf, boxOf, bowlProfile, buildShape, DEBUG, DEPTH, dropOf, DROP, FRONT_Z, getShape, groundYOf,
   HOVER_Z, LAMP_RADIUS, levels, LOSE_TEXT, paramValue, parseShaderParams, resolveShader, shaderCode, MAX_LIGHTS, shadowSettings, materials, MATERIAL_KEYS, meta, models, PHASE, PLAY_Z, PLAYER_COLORS, PREVIEW_COUNT, roundOf, SHAPE_KEYS, slotPos, tuning, unionOutlines, VIEW, WATER_Y, worldKeyOf, worlds,
 } from './shared.js';
 
@@ -1185,6 +1185,7 @@ class BalanceView {
   freeCam = null; //         debug: orbit camera state, null = the normal fitted camera
   camDrag = null;
   dropHelper = null; //      debug: wireframe of the drop zone
+  rectHelper = null; //      debug: the rectangles of a level's OWN side limits (red) and OWN drop zone (green), see debugRects
   defsRev = 0; //            debug: which version of the definitions we have
   defsAsk = 0;
   firstDrev = undefined;
@@ -2239,6 +2240,42 @@ class BalanceView {
     this.#updateDropHelper();
   }
 
+  /**
+   * Debug: show the rectangles of the overwrites of a level, so you can see what you are dealing with: `{ zone, drop }` as in a level (each one optional;
+   * null = hide both). The side limits are a red rectangle in the play plane, the drop zone a green box; both are drawn over everything.
+   */
+  debugRects(spec) {
+    if (!this.rectHelper) {
+      const make = (color) => {
+        const line = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
+        const fill = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.07, depthTest: false, depthWrite: false, side: THREE.DoubleSide }));
+        line.renderOrder = fill.renderOrder = 50;
+        const g = new THREE.Group();
+        g.add(fill, line);
+        g.visible = false;
+        return g;
+      };
+      this.rectHelper = { zone: make('#ef4444'), drop: make('#34d399') };
+      this.scene.add(this.rectHelper.zone, this.rectHelper.drop);
+    }
+    const { zone, drop } = this.rectHelper;
+    const z = spec?.zone;
+    zone.visible = !!z;
+    if (z) {
+      const y0 = (this.groundY ?? 0) - 3;
+      const y1 = 45;
+      zone.position.set((z.x0 + z.x1) / 2, (y0 + y1) / 2, 0);
+      zone.scale.set(Math.max(0.01, z.x1 - z.x0), y1 - y0, 0.01);
+    }
+    const d = spec?.drop;
+    drop.visible = !!d;
+    if (d) {
+      const y1 = Math.min(d.y1, 45);
+      drop.position.set((d.x0 + d.x1) / 2, (d.y0 + y1) / 2, 0);
+      drop.scale.set(Math.max(0.01, d.x1 - d.x0), Math.max(0.01, y1 - d.y0), DEPTH + 0.4);
+    }
+  }
+
   #updateDropHelper() {
     if (!this.dropHelper) return;
     const d = this.currentLevel ? dropOf(this.currentLevel) : DROP;
@@ -2377,6 +2414,7 @@ class BalanceView {
 
   /** Floor, table, bowl, water and the models of the background. */
   #buildWorld(bowl, bg) {
+    bg = { ...bg, box: boxOf(bg.box, bowl) }; // (the table's size: as written, or fitted to this bowl)
     if (this.world) {
       this.world.removeFromParent();
       this.#disposeTree(this.world);
@@ -3170,7 +3208,7 @@ void main() {
   /** @param {Map} map  @param opts `{table, slot, n}` for a block on the table, `{x, y, a, st, owner}` for one in the play area */
   #makeView(map, id, si, mi, opts) {
     const shapeKey = SHAPE_KEYS[si];
-    const shaderName = materials[MATERIAL_KEYS[mi]].shader;
+    const shaderName = blockShaderOf(this.currentLevel, MATERIAL_KEYS[mi]); // (a level may draw a material with a shader of its own)
     const mat = this.#blockMaterial(shaderName, (id * 0.6180339) % 1, THREE.FrontSide, null, false);
 
     if (opts.table) mat.uniforms.uCausOn.value = 0; // (waiting on the table: no caustics)
