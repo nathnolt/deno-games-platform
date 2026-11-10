@@ -52,7 +52,7 @@ const TUNING_HELP = {
   zone: 'Default sideways limits: a block whose centre leaves it loses the level.',
   drop: 'Default drop zone: let go inside it and the block falls into the bowl.',
   view: 'What the camera must always show.',
-  camera: 'fov = vertical field of view, pitch = degrees looking down, targetY = height it looks at.',
+  camera: 'fov = vertical field of view, pitch = degrees looking down, targetY = height it looks at, measured from the bottom of the bowl (every bowl then has the bottom of the picture at the same place). follow = 1 lets the camera zoom out when the stack nears the top of the picture (0 = never), headroom = free space it wants above the highest block, slack = how much extra room it makes each time, so it does not move for every block.',
 };
 
 const KEY = /^[A-Za-z][\w-]*$/;

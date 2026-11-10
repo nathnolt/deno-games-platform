@@ -880,6 +880,9 @@ export function validateDefinitions(defs, extra = {}) {
   rect(t.view, 'tuning.view', ['w', 'h', 'cy']);
   if (t.shadows !== undefined) shadowErrors(t.shadows, 'tuning.shadows', err);
   rect(t.camera, 'tuning.camera', ['fov', 'pitch', 'targetY']);
+  for (const k of ['follow', 'headroom', 'slack']) if (t.camera?.[k] !== undefined && !isNum(t.camera[k])) err(`tuning.camera.${k} must be a number`);
+  if (isNum(t.camera?.headroom) && t.camera.headroom < 0) err('tuning.camera.headroom must be 0 or more');
+  if (isNum(t.camera?.slack) && t.camera.slack < 0) err('tuning.camera.slack must be 0 or more');
   if (isNum(t.camera?.fov) && (t.camera.fov < 5 || t.camera.fov > 100)) err('tuning.camera.fov must be between 5 and 100');
   if (isNum(t.camera?.pitch) && (t.camera.pitch < 0 || t.camera.pitch > 85)) err('tuning.camera.pitch must be between 0 and 85');
 

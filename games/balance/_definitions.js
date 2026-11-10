@@ -36,7 +36,7 @@ export const tuning = {
   zone: { x0: -30, x1: 30 }, //                       default sideways limit: a block whose centre leaves it loses the level
   drop: { x0: -30, x1: 30, y0: 1.5, y1: 100 }, //     default DROP ZONE (invisible): let go of a block inside it and it falls into the bowl
   view: { w: 40, h: 40, cy: 10 }, //                  what the camera must always show (width, height, centre height)
-  camera: { fov: 21, pitch: 8, targetY: 5 }, //      vertical field of view, degrees the camera looks down, height it looks at
+  camera: { fov: 21, pitch: 8, targetY: 12.4, follow: 1, headroom: 10, slack: 10 }, // the camera zooms out (the bottom stays put) when the stack gets within `headroom` of the top of the picture, to headroom + slack (follow: 0 = never)
   shadows: { on: true, size: 2048, range: 170, softness: 1, bias: 0.12, normalBias: 1.5 },
 };
 

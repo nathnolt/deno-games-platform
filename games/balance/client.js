@@ -1176,6 +1176,9 @@ class BalanceView {
   blockMats = new Set(); //    the materials of blocks whose shader has settings (debugLiveBlocks changes them while a slider is dragged)
   waterSel = null; //   { shader } of the water of the background that is shown
   currentLevel = null;
+  zoomD = 0; //               how much further back the camera has gone because the stack grew (animated)
+  zoomShown = 0;
+  coverGoal = null; //        the height (at the play plane) the top of the picture has to reach; null = the normal view
   userCam = { yaw: 0, pitch: 0, zoom: 1, pan: new THREE.Vector3() }; // the player's own view change on top of the fitted camera
   fit = null; //            { pos, target } of the fitted camera (what 'reset camera' goes back to)
   world = null; //          the three.js group of the table, bowl and water
@@ -1837,7 +1840,7 @@ class BalanceView {
       this.#fitCamera();
       return;
     }
-    const target = new THREE.Vector3(0, tuning.camera.targetY, 0);
+    const target = new THREE.Vector3(0, this.fit?.target.y ?? this.groundY + tuning.camera.targetY, 0);
     const off = this.camera.position.clone().sub(target);
     this.freeCam = { target, dist: off.length(), yaw: Math.atan2(off.x, off.z), pitch: Math.asin(off.y / off.length()) };
     this.mode = 'none';
@@ -2317,6 +2320,7 @@ class BalanceView {
 
   /** Show the world of a level (null = the menu). Only rebuilt when the bowl or the background changed, or when `force` is set. */
   #setScene(level, force = false) {
+    if (level !== this.currentLevel) { this.zoomD = 0; this.zoomShown = 0; this.coverGoal = null; } // (a new level starts with the normal view again)
     this.currentLevel = level;
     const sig = `${bowlKeyOf(level)}|${backgroundKeyOf(level)}`;
     if (force || sig !== this.sceneSig) {
@@ -3813,42 +3817,131 @@ void main() {
     this.camera.updateProjectionMatrix();
     if (this.freeCam) return;
     const pitch = THREE.MathUtils.degToRad(cam.pitch);
-    const target = new THREE.Vector3(0, cam.targetY, 0);
     const dir = new THREE.Vector3(0, Math.sin(pitch), Math.cos(pitch));
     const have = Math.max(1, this.currentLevel?.shapes?.length ?? 1);
     const slots = Math.min(have, Math.min(8, Math.max(1, this.currentLevel?.chooseShapes ?? 4))); //  blocks on the table
     const places = Math.min(have, slots + PREVIEW_COUNT); //                                             + the outlines of the next ones, at most as many as the level has
     const slotX = ((places - 1) / 2) * tuning.slotGap + 7; //                                           the row is centred on all of them
-    const key = [
-      [-VIEW.w / 2, 10, 0], [VIEW.w / 2, 10, 0], [0, 30, 0], [-23, 28, 0], [23, 28, 0],
-      [-slotX, this.groundY, FRONT_Z + DEPTH / 2], [slotX, this.groundY, FRONT_Z + DEPTH / 2],
-    ].map(([x, y, z]) => new THREE.Vector3(x, y, z));
-    const p = new THREE.Vector3();
-    let dist = 40;
-    for (; dist < 600; dist += 1) {
+    const bottom = this.groundY; //                                                                     the bottom of the bowl (= the top of the table): where targetY starts
+    const front = [[-slotX, bottom, FRONT_Z + DEPTH / 2], [slotX, bottom, FRONT_Z + DEPTH / 2]];
+    // The distance is worked out for a standard tower measured from the bottom of the bowl (so it is the same for every bowl); the numbers are the
+    // heights above the water of the first bowl (its bottom is 7.4 below the water: 10 + 7.4, 30 + 7.4, 28 + 7.4)
+    const std = [[-VIEW.w / 2, 17.4, 0], [VIEW.w / 2, 17.4, 0], [0, 37.4, 0], [-23, 35.4, 0], [23, 35.4, 0]].map(([x, y, z]) => [x, bottom + y, z]);
+    // what must really fit: the tower measured from the water (a taller bowl has its water higher above its bottom)
+    const real = [[-VIEW.w / 2, 10, 0], [VIEW.w / 2, 10, 0], [0, 30, 0], [-23, 28, 0], [23, 28, 0]];
+    const toVec = (list) => list.map(([x, y, z]) => new THREE.Vector3(x, y, z));
+    const fits = (keys, target, dist) => {
       this.camera.position.copy(target).addScaledVector(dir, dist);
       this.camera.lookAt(target);
       this.camera.updateMatrixWorld(true);
-      if (key.every((k) => { p.copy(k).project(this.camera); return Math.abs(p.x) <= 0.94 && Math.abs(p.y) <= 0.94 && p.z < 1; })) break;
+      const p = new THREE.Vector3();
+      return keys.every((k) => { p.copy(k).project(this.camera); return Math.abs(p.x) <= 0.94 && Math.abs(p.y) <= 0.94 && p.z < 1; });
+    };
+    // where the bottom edge of the picture hits the play plane (z = 0), as a function of the target height and the distance: y = ty + dist * K
+    // (the camera always looks along -dir, so the ray through the bottom edge of the picture has one direction, however far away or high the camera is)
+    this.camera.position.copy(dir);
+    this.camera.lookAt(0, 0, 0);
+    this.camera.updateMatrixWorld(true);
+    const ray = new THREE.Vector3(0, -1, 0.5).unproject(this.camera).sub(this.camera.position).normalize();
+    const K = dir.y - (dir.z * ray.y) / ray.z;
+    const rayTop = new THREE.Vector3(0, 0.94, 0.5).unproject(this.camera).sub(this.camera.position).normalize(); // (the top of the picture, as far up as the things that must fit may go)
+    const Kt = dir.y - (dir.z * rayTop.y) / rayTop.z;
+    // 1. the standard distance: the tower measured from the bottom, the camera looking at (bottom + targetY)
+    const stdKeys = toVec([...std, ...front]);
+    let dist0 = 40;
+    for (; dist0 < 600; dist0 += 1) if (fits(stdKeys, new THREE.Vector3(0, bottom + cam.targetY, 0), dist0)) break;
+    const yBottomEdge = bottom + cam.targetY + dist0 * K; // the bottom of the picture: the same height above the bottom of the bowl in every level
+    // 2. if the real tower does not fit (a bowl with its water high above its bottom), go further back, but keep the bottom edge where it is: only the top gives
+    const realKeys = toVec([...real, ...front]);
+    let dist = dist0;
+    let target = new THREE.Vector3(0, bottom + cam.targetY, 0);
+    for (; dist < 900; dist += 1) {
+      target = new THREE.Vector3(0, yBottomEdge - dist * K, 0);
+      if (fits(realKeys, target, dist)) break;
     }
-    this.fit = { pos: this.camera.position.clone(), target };
+    this.camera.position.copy(target).addScaledVector(dir, dist);
+    this.camera.lookAt(target);
+    this.camera.updateMatrixWorld(true);
+    this.fit = { pos: this.camera.position.clone(), target, dir, dist, K, Kt, yBottom: yBottomEdge, top: yBottomEdge + dist * (Kt - K) };
     this.#applyUserCam();
   }
 
-  /** The fitted camera, turned / moved / zoomed by what the player did with the mouse. */
+  /** The fitted camera, moved back with the stack (zoomD), then turned / moved / zoomed by what the player did with the mouse. */
   #applyUserCam() {
     const u = this.userCam;
     if (this.freeCam || !this.fit) return;
-    if (!u.yaw && !u.pitch && u.zoom === 1 && u.pan.lengthSq() === 0) return; // untouched: the fitted camera as it is
-    const off = this.fit.pos.clone().sub(this.fit.target);
+    // the fitted camera, further back when the stack grew: the bottom of the picture stays where it is, so only the top gives
+    const f = this.fit;
+    const dist = f.dist + this.zoomD;
+    const fitTarget = new THREE.Vector3(0, f.yBottom - dist * f.K, 0);
+    const fitPos = fitTarget.clone().addScaledVector(f.dir, dist);
+    if (!u.yaw && !u.pitch && u.zoom === 1 && u.pan.lengthSq() === 0) { // untouched: the fitted camera as it is
+      this.camera.position.copy(fitPos);
+      this.camera.lookAt(fitTarget);
+      this.camera.updateMatrixWorld(true);
+      return;
+    }
+    const off = fitPos.clone().sub(fitTarget);
     const len = off.length() * u.zoom;
     const yaw = Math.atan2(off.x, off.z) + u.yaw;
     const pitch = THREE.MathUtils.clamp(Math.asin(off.y / off.length()) + u.pitch, 0.05, 1.45);
-    const target = this.fit.target.clone().add(u.pan);
+    const target = fitTarget.clone().add(u.pan);
     const cp = Math.cos(pitch);
     this.camera.position.set(target.x + len * cp * Math.sin(yaw), target.y + len * Math.sin(pitch), target.z + len * cp * Math.cos(yaw));
     this.camera.lookAt(target);
     this.camera.updateMatrixWorld(true);
+  }
+
+  /**
+   * The height of the stack: the top of the highest block that lies still (a block that is falling or held does not count, and neither do the fixed
+   * blocks of the level), measured from the water. 0 when there is none.
+   */
+  #stackTop(dt) {
+    let top = -Infinity;
+    for (const v of this.bodyViews.values()) {
+      if (v.static || v.st === BODY.HELD || v.st === BODY.HELD_BAD) { v.still = 0; continue; }
+      if (v.sy === undefined || Math.abs(v.ty - v.sy) > 0.03 || Math.abs(v.ta - (v.sa ?? v.ta)) > 0.02) v.still = 0;
+      else v.still = (v.still ?? 0) + dt;
+      v.sy = v.ty;
+      v.sa = v.ta;
+      if (v.still < 0.5) continue; // still moving (falling, sliding)
+      const c = Math.cos(v.ta);
+      const sn = Math.sin(v.ta);
+      let t = -Infinity;
+      for (const p of v.size.parts) { // the highest point of the turned shape
+        if (p.type === 'circle') t = Math.max(t, p.cx * sn + p.cy * c + p.r);
+        else for (const [x, y] of p.pts) t = Math.max(t, x * sn + y * c);
+      }
+      top = Math.max(top, v.ty + t);
+    }
+    return top === -Infinity ? 0 : top;
+  }
+
+  /**
+   * Lazy zoom: the camera stays as it is until the stack gets too close to the top of the picture (less than `headroom` of free space above its highest
+   * block). Then it moves back, keeping the bottom of the picture where it was, far enough to leave `headroom + slack`, so the next blocks do not
+   * make it move again. It only comes back in when the stack has got much lower (e.g. after an explosion).
+   */
+  #followStack(dt) {
+    const cam = tuning.camera;
+    const f = this.fit;
+    if (!f || this.freeCam) return;
+    const on = (cam.follow ?? 1) > 0 && this.currentLevel;
+    const headroom = cam.headroom ?? 10;
+    const slack = cam.slack ?? 10;
+    if (this.coverGoal === null) this.coverGoal = f.top;
+    if (on) {
+      const need = this.#stackTop(dt) + headroom; //   the picture has to reach this high
+      if (need > this.coverGoal) this.coverGoal = need + slack;
+      else if (this.coverGoal > f.top && need < this.coverGoal - slack * 2.5) this.coverGoal = Math.max(f.top, need + slack);
+    } else this.coverGoal = f.top;
+    const goal = Math.max(0, (this.coverGoal - f.yBottom) / (f.Kt - f.K) - f.dist);
+    const k = 1 - Math.exp(-1.6 * dt); // a calm move: about 1.5 s
+    this.zoomD = Math.abs(goal - this.zoomD) < 0.01 ? goal : this.zoomD + (goal - this.zoomD) * k;
+    if (Math.abs(this.zoomD - this.zoomShown) > 0.001) {
+      this.zoomShown = this.zoomD;
+      this.#applyUserCam();
+    }
   }
 
   /** Back to the camera the game fits to the table. */
@@ -3869,6 +3962,7 @@ void main() {
     this.uTime.value += dt;
     if (this.stats) this.#statsBegin(now);
     if (this.freeCam) this.#applyFreeCam();
+    else this.#followStack(dt);
 
     // the block we hold keeps following the pointer with its grab offset, which melts away as the block comes back into the play area
     if (this.#carrying() && this.ptr) {
