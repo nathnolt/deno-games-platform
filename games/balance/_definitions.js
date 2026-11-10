@@ -34,11 +34,11 @@ export const tuning = {
   minHoldY: -25, //        and how low (the waiting blocks are closer to the camera, so their pick-up point is a bit low)
 
   zone: { x0: -30, x1: 30 }, //                       default sideways limit: a block whose centre leaves it loses the level
-  drop: { x0: -120, x1: 120, y0: 1.5, y1: 100 }, //     default DROP ZONE (invisible): let go of a block inside it and it falls into the bowl
-  view: { w: 72, h: 46, cy: 10 }, //                  what the camera must always show (width, height, centre height)
-  camera: { fov: 21, pitch: 12, targetY: 10 }, //      vertical field of view, degrees the camera looks down, height it looks at
+  drop: { x0: -30, x1: 30, y0: 1.5, y1: 100 }, //     default DROP ZONE (invisible): let go of a block inside it and it falls into the bowl
+  view: { w: 40, h: 40, cy: 10 }, //                  what the camera must always show (width, height, centre height)
+  camera: { fov: 21, pitch: 8, targetY: 5 }, //      vertical field of view, degrees the camera looks down, height it looks at
+  shadows: { on: true, size: 2048, range: 170, softness: 1, bias: 0.12, normalBias: 1.5 },
 };
-
 
 
 
@@ -126,6 +126,18 @@ export const bowls = {
     shader: 'yellowGlaze',
     water: { color: '#004585', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
   },
+  tiny: {
+    a: 13.5,
+    b: 5.5,
+    t: 0.7,
+    rimY: 1,
+    r: 3.1,
+    zscale: 0.6,
+    square: 8.6,
+    squareBottom: 9.1,
+    shader: 'bowlwood2',
+    water: { color: '#004585', opacity: 0.85, reflect: 1, caustics: 2, causticsInset: 2 },
+  },
   canoe: {
     a: 40,
     b: 7,
@@ -139,9 +151,6 @@ export const bowls = {
     water: { color: '#647b8e', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
   },
 };
-
-
-
 
 
 
@@ -204,7 +213,7 @@ export const backgrounds = {
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
+    box: { w: 60, d: 40, z: 2, shader: 'plankFloor', marginX: 30, marginBack: 10, marginFront: 15, radius: 4 },
     lights: [],
     water: { shader: 'calmOcean' },
   },
@@ -213,19 +222,19 @@ export const backgrounds = {
     fog: [130, 460],
     ground: { colorA: '#b4bfa9', colorB: '#d3dac8', ripple: 1.8, blur: 'light', style: 'sand' },
     models: [
-      { model: 'pine', scale: 4, rotation: [0, 0, 0], translate: [-72, 0, -34] },
-      { model: 'pine', scale: 5, rotation: [0, 80, 0], translate: [70, 0, -52] },
-      { model: 'sakura', scale: 6, rotation: [0, 30, 0], translate: [-40, 0, -90] },
-      { model: 'rock', scale: 6, rotation: [0, 200, 0], translate: [60, 0, 14] },
-      { model: 'lantern', scale: 2, rotation: [0, 200, 0], translate: [66, 0, 30] },
-      { model: 'mountain', scale: 6, rotation: [0, 30, 0], translate: [60, 0, -320] },
-      { model: 'mountain', scale: 4.5, rotation: [0, 0, 0], translate: [-140, 0, -280] },
+      { model: 'pine', scale: 4, rotation: [0, 0, 0], translate: [-72, 0, -34], blur: 'light' },
+      { model: 'pine', scale: 5, rotation: [0, 80, 0], translate: [70, 0, -52], blur: 'light' },
+      { model: 'sakura', scale: 6, rotation: [0, 30, 0], translate: [-40, 0, -90], blur: 'light' },
+      { model: 'rock', scale: 6, rotation: [0, 200, 0], translate: [60, 0, 14], blur: 'light' },
+      { model: 'lantern', scale: 2, rotation: [0, 200, 0], translate: [66, 0, 30], blur: 'light' },
+      { model: 'mountain', scale: 6, rotation: [0, 30, 0], translate: [60, 0, -320], blur: 'light' },
+      { model: 'mountain', scale: 4.5, rotation: [0, 0, 0], translate: [-140, 0, -280], blur: 'light' },
     ],
     blur: 3,
     blurFar: 10,
     light: { dir: [-0.45, 0.85, 0.55], shadow: 0.4, time: 12 },
     bowlHeight: 4,
-    box: { w: 110, d: 52, z: 2, shader: 'plankFloor' },
+    box: { w: 110, d: 52, z: 2, shader: 'plankFloor', marginX: 30, marginBack: 10, marginFront: 15, radius: 3 },
     lights: [],
   },
   zen3: {

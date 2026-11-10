@@ -18,6 +18,11 @@
 // shapes               the ordered list of blocks you must place: { shape, material }. Rotate with Q / E while holding.
 // zone (optional)      { x0, x1 }: sideways limits (default tuning.zone). Leaving it, or touching the water/bowl, loses the level.
 // drop (optional)      { x0, x1, y0, y1 }: the drop zone rectangle (default tuning.drop)
+//
+// OVERWRITES (all optional: what this level does differently from the rest of the game; the Overwrites section of the level menu):
+//   time                the hour of the day (see above)           zone / drop    own side limits / own drop zone (see above)
+//   gravity             this level's own gravity (default tuning.gravity)
+//   shaders             the shader blocks of a material are drawn with in this level: { wood: 'oakWood' } (default: the shader of the material)
 
 export const levels = {
   world1: {
@@ -26,7 +31,7 @@ export const levels = {
       {
         name: 'Level 2',
         difficulty: 'easy',
-        bowl: 'bowl1',
+        bowl: 'tiny',
         background: 'zen1',
         initialBlocks: [{ shape: 'triangle', material: 'static', rot: 135, x: -0.25, y: -0.75 }],
         chooseShapes: 3,

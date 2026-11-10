@@ -871,4 +871,22 @@ void main() {
       uDeepColor: '#01091e',
     },
   },
+  bowlwood2: {
+    base: 'mahogany',
+    category: 'Wood',
+    params: {
+      uBase: '#ec946f',
+      uDark: '#371810',
+      uStreakColor: '#ffffff',
+      uSize: 0.656,
+      uGrainScale: 2.9,
+      uGrainAmount: 0.09,
+      uWarp: 6.9,
+      uStreaks: 0.49,
+      uFibre: 0.153,
+      uBump: 0.036,
+      uShine: 0.87,
+      uRough: 0.975,
+    },
+  },
 };
