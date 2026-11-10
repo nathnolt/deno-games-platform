@@ -1,7 +1,7 @@
 import {
   CRATE, CURSE_SPEED, CURSE_TIME, C_DIARRHEA, C_FUSE, C_NOBOMB, C_REVERSE, C_WEAK, CURSES, DX, DY, FLAME_TIME, FLOOR,
-  MAX_BOMBS, MAX_FIRE, MAX_LIVES, MAX_SPEED, MONSTERS, M_BLOB, M_CHASER, M_DASHER, M_GHOST, M_SNEAK, OPP,
-  PU_BOMB, PU_FIRE, PU_KICK, PU_LIFE, PU_SKULL, PU_SPEED, SD_INTERVAL, SHORT_FUSE, SLIDE_SPEED, SOLID,
+  LEVELS, MAX_BOMBS, MAX_FIRE, MAX_LIVES, MAX_SPEED, MONSTERS, MONSTER_SPEED, M_BLOB, M_CHASER, M_DASHER, M_GHOST, M_SNEAK,
+  OPP, PU_BOMB, PU_FIRE, PU_KICK, PU_LIFE, PU_SKULL, PU_SPEED, SD_INTERVAL, SHORT_FUSE, SLIDE_SPEED, SOLID, THEME_KEYS,
   arenaOf, isPillar, meta, spawnsOf, speedOf, spiralOf,
 } from './shared.js';
 
@@ -9,7 +9,7 @@ const SLOTS = [0, 1, 2, 3];
 const READY_TIME = 2.6; //    countdown before each round / level
 const GRACE_TIME = 1.1; //    battle: after only one player is left, a simultaneous death still makes a draw
 const RESULT_TIME = 3.6; //   battle: round-over pause
-const CLEAR_TIME = 3.4; //    co-op: level-clear pause
+const CLEAR_TIME = 3.4; //    co-op: level-clear pause (after the last player walked into the exit)
 const RESPAWN_TIME = 2.2; //  co-op: seconds out before you come back
 const SHIELD_TIME = 3; //     co-op: invulnerable after coming back
 const BOMB_GAP = 0.12; //     s: anti-spam between two bomb drops by the same player
@@ -42,31 +42,20 @@ const SKILL = {
   hard: { react: [0.06, 0.18], notice: 0, margin: 0.22, hunt: 0.85, slip: 0, grab: 14 },
 };
 
-/** Co-op: which monsters a level has. More of them, and nastier kinds, as you go. */
-function levelPlan(level) {
-  const n = Math.min(14, 3 + Math.floor(level * 0.9));
-  const table = [[M_BLOB, Math.max(1, 6 - level * 0.5)]];
-  if (level >= 2) table.push([M_CHASER, 2 + level * 0.3]);
-  if (level >= 3) table.push([M_DASHER, 1.5 + level * 0.2]);
-  if (level >= 4) table.push([M_GHOST, 1 + level * 0.2]);
-  if (level >= 6) table.push([M_SNEAK, 0.6 + level * 0.15]);
-  const out = [];
-  for (let k = 0; k < n; k++) out.push(weighted(table));
-  if (level >= 2 && !out.includes(M_CHASER)) out[0] = M_CHASER; // each new level shows its newest kind
-  if (level >= 3 && level <= 5) out[1 % n] = [M_CHASER, M_DASHER, M_GHOST][Math.min(2, level - 3)];
-  if (level === 6) out[1 % n] = M_SNEAK;
-  return out;
-}
+// map characters (see levels.js)
+const MAP_MONSTER = { b: M_BLOB, c: M_CHASER, d: M_DASHER, g: M_GHOST, s: M_SNEAK };
+const MAP_ITEM = { B: PU_BOMB, F: PU_FIRE, S: PU_SPEED, K: PU_KICK, X: PU_SKULL, H: PU_LIFE };
 
 class BombersGame {
   constructor(ctx) {
     this.ctx = ctx;
     this.s = ctx.settings;
     this.coop = this.s.mode === 'coop';
+    this.timed = !this.coop && this.s.roundTime > 0; // battle with a round clock (0 = no clock, no sudden death)
+    this.theme = 'grass';
+    this.monsterSpeed = MONSTER_SPEED[this.s.monsterSpeed] ?? 1;
     const { w, h } = arenaOf(this.s.arena);
-    this.w = w;
-    this.h = h;
-    this.n = w * h;
+    this.#setSize(w, h);
     this.spawns = spawnsOf(w, h);
     this.spiral = spiralOf(w, h);
     this.skill = SKILL[this.s.botSkill] ?? SKILL.normal;
@@ -83,12 +72,10 @@ class BombersGame {
     this.out = [false, false, false, false]; // co-op: no lives left
     this.p = SLOTS.map((slot) => ({
       slot, alive: false, x: 0, y: 0, dir: 0, input: 0, face: 3, moving: false, bombs: 1, fire: 2, speed: 0, kick: false,
-      want: false, gap: 0, limit: null, curse: 0, curseT: 0, inv: 0, respawn: 0,
+      want: false, gap: 0, limit: null, curse: 0, curseT: 0, inv: 0, respawn: 0, exited: false,
     }));
     this.botState = [null, null, null, null];
 
-    this.grid = new Uint8Array(this.n);
-    this.hidden = new Uint8Array(this.n); // crate -> power-up inside (0 = none). Never sent to clients
     this.bombs = [];
     this.bombAt = new Map(); //  tile -> bomb
     this.flames = new Map(); //  tile -> { t, mask, reveal, owners, by }   mask: 1 horizontal, 2 vertical, 4 centre
@@ -104,7 +91,7 @@ class BombersGame {
     this.gridDirty = true;
     this.tick = 0;
     this.round = 0;
-    this.level = 0;
+    this.level = this.coop ? Math.min(LEVELS.length, Math.max(1, this.s.startLevel ?? 1)) - 1 : 0; // #newLevel adds 1
     this.roundsPlayed = 0;
     this.maxRounds = this.s.roundsToWin * 2 + 3; // battle: draws can't go on forever
     this.phase = 'ready';
@@ -177,13 +164,14 @@ class BombersGame {
         tick: this.tick,
         m: this.coop ? 'coop' : 'battle',
         ph: this.phase,
-        tm: r1(Math.max(0, timed ? this.clock : this.timer)),
+        tm: this.coop && timed ? -1 : timed ? (this.timed ? r1(Math.max(0, this.clock)) : -1) : r1(Math.max(0, this.timer)),
+        th: this.theme,
         rd: this.round,
         ac: [...this.active],
         bt: [...this.bot],
-        // per seat: x, y (×100), facing, moving, alive, bombs, fire, speed, kick, curse, shielded
+        // per seat: x, y (×100), facing, moving, alive, bombs, fire, speed, kick, curse, shielded, in the exit
         p: this.p.map((p) => (this.active[p.slot] || p.alive
-          ? [Math.round(p.x * 100), Math.round(p.y * 100), p.face, p.moving ? 1 : 0, p.alive ? 1 : 0, p.bombs, p.fire, p.speed, p.kick ? 1 : 0, p.curse, p.inv > 0 ? 1 : 0]
+          ? [Math.round(p.x * 100), Math.round(p.y * 100), p.face, p.moving ? 1 : 0, p.alive ? 1 : 0, p.bombs, p.fire, p.speed, p.kick ? 1 : 0, p.curse, p.inv > 0 ? 1 : 0, p.exited ? 1 : 0]
           : null)),
         b: this.bombs.map((b) => [b.id, Math.round(b.x * 100), Math.round(b.y * 100), r2(Math.max(0, b.fuse) / b.fuse0), b.owner]),
         f: [...this.flames].map(([i, f]) => [i, f.mask, r2(f.t / FLAME_TIME)]),
@@ -200,7 +188,7 @@ class BombersGame {
         snap.ex = this.exit && this.exit.shown ? [this.exit.cell, this.exit.open ? 1 : 0] : null;
       } else {
         snap.w = [...this.wins];
-        snap.sd = this.clock <= 0 && this.s.suddenDeath && this.phase === 'play' ? this.#nextSd() : -1;
+        snap.sd = this.timed && this.clock <= 0 && this.s.suddenDeath && this.phase === 'play' ? this.#nextSd() : -1;
         snap.rw = this.roundWinner;
         snap.ff = this.ff ? 1 : 0;
       }
@@ -208,6 +196,7 @@ class BombersGame {
       this.events = []; // each event goes out exactly once
       if (this.gridDirty || this.tick % 30 === 0) { // the map only when it changed (and once a second for late joiners)
         snap.g = this.grid.join('');
+        snap.gw = this.w;
         this.gridDirty = false;
       }
       return snap;
@@ -218,6 +207,14 @@ class BombersGame {
   }
 
   // ── setup ──
+  #setSize(w, h) {
+    this.w = w;
+    this.h = h;
+    this.n = w * h;
+    this.grid = new Uint8Array(this.n);
+    this.hidden = new Uint8Array(this.n); // crate -> power-up inside (0 = none). Never sent to clients
+  }
+
   #resetPowers(p) {
     p.bombs = this.s.startBombs;
     p.fire = this.s.startFire;
@@ -258,12 +255,13 @@ class BombersGame {
   #placePlayer(slot) {
     const p = this.p[slot];
     [p.x, p.y] = this.spawns[slot];
-    Object.assign(p, { dir: 0, moving: false, face: 3, want: false, gap: 0, limit: null, curse: 0, curseT: 0 });
+    Object.assign(p, { dir: 0, moving: false, face: 3, want: false, gap: 0, limit: null, curse: 0, curseT: 0, exited: false });
     if (this.bot[slot]) this.botState[slot] = { t: rnd(0.2, 0.6), goal: -1, mode: 'idle', noticed: 0 };
   }
 
   #newRound() { // battle
     this.round++;
+    this.theme = this.s.theme === 'random' || !THEME_KEYS.includes(this.s.theme) ? THEME_KEYS[(this.round - 1 + Math.floor(Math.random() * 2)) % THEME_KEYS.length] : this.s.theme;
     const crates = this.#buildArena();
     const puChance = this.s.powerups / 100;
     const table = [[PU_BOMB, 4], [PU_FIRE, 4], [PU_SPEED, 3]];
@@ -286,56 +284,46 @@ class BombersGame {
     this.events.push(['round', this.round]);
   }
 
-  #newLevel() { // co-op
+  #newLevel() { // co-op: build the next hand-made level from levels.js
     this.level++;
-    const { w } = this;
-    let crates = this.#buildArena();
-    const far = (i, d) => this.spawns.every(([sx, sy]) => Math.abs((i % w) - sx) + Math.abs(Math.floor(i / w) - sy) >= d);
-
-    // the exit: under a crate, away from the spawns
-    const exitPool = crates.filter((i) => far(i, 6));
-    const exitCell = exitPool.length ? pick(exitPool) : crates.length ? pick(crates) : -1;
-    if (exitCell >= 0) this.exit = { cell: exitCell, shown: false, open: false };
-    else { // no crates at all: the exit just lies there
-      const floor = [];
-      for (let i = 0; i < this.n; i++) if (this.grid[i] === FLOOR && far(i, 6)) floor.push(i);
-      this.exit = { cell: pick(floor), shown: true, open: false };
-    }
+    const L = LEVELS[this.level - 1];
+    const h = L.map.length;
+    const w = Math.max(...L.map.map((r) => r.length));
+    this.#setSize(w, h);
+    this.theme = L.theme;
+    this.bombs = [];
+    this.bombAt.clear();
+    this.flames.clear();
+    this.powerups.clear();
+    this.monsters = [];
+    this.pending = [];
+    this.exit = null;
     this.exitSpawned = 0;
     this.exitCool = 0;
-
-    // only a few power-ups per level
-    crates = crates.filter((i) => i !== this.exit.cell);
-    const table = [[PU_BOMB, 3], [PU_FIRE, 3], [PU_SPEED, 2]];
-    if (this.s.kick) table.push([PU_KICK, 1]);
-    if (this.s.curses) table.push([PU_SKULL, 1]);
-    const items = [];
-    for (let k = 0; k < this.s.coopPowerups; k++) items.push(weighted(table));
-    if (this.level % 3 === 0 || Math.random() < 0.15) items.push(PU_LIFE); // a heart now and then
-    for (const type of items) {
-      if (!crates.length) break;
-      const at = Math.floor(Math.random() * crates.length);
-      this.hidden[crates[at]] = type;
-      crates.splice(at, 1);
-    }
-
-    // monsters, away from the players
-    const plan = levelPlan(this.level);
-    let spots = [];
-    for (let i = 0; i < this.n; i++) if (this.grid[i] === FLOOR && far(i, 6) && i !== this.exit.cell) spots.push(i);
-    if (spots.length < plan.length) { // packed level: clear some crates to make room
-      const extra = crates.filter((i) => far(i, 6) && !this.hidden[i]);
-      while (spots.length < plan.length && extra.length) {
-        const i = extra.splice(Math.floor(Math.random() * extra.length), 1)[0];
-        this.grid[i] = FLOOR;
-        spots.push(i);
+    this.kinds = new Set(); // monster kinds in this level (the exit releases more of these)
+    const starts = [];
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const ch = L.map[y][x] ?? '#';
+        const i = y * w + x;
+        if (ch === '#') this.grid[i] = SOLID;
+        else if (ch === '+') this.grid[i] = CRATE;
+        else if (MAP_ITEM[ch]) { this.grid[i] = CRATE; this.hidden[i] = MAP_ITEM[ch]; }
+        else if (ch === 'E') { this.grid[i] = CRATE; this.exit = { cell: i, shown: false, open: false }; }
+        else if (ch === 'e') this.exit = { cell: i, shown: true, open: false };
+        else if (ch >= '1' && ch <= '4') starts[ch - '1'] = [x, y];
+        else if (MAP_MONSTER[ch] !== undefined) { this.#spawnMonster(MAP_MONSTER[ch], i); this.kinds.add(MAP_MONSTER[ch]); }
       }
     }
-    for (const type of plan) {
-      if (!spots.length) break;
-      const i = spots.splice(Math.floor(Math.random() * spots.length), 1)[0];
-      this.#spawnMonster(type, i);
+    // a map without its own exit or spawns still works
+    if (!this.exit) {
+      const far = [];
+      for (let i = 0; i < this.n; i++) if (this.grid[i] === FLOOR) far.push(i);
+      this.exit = { cell: far[far.length - 1], shown: true, open: false };
     }
+    for (let k = 0; k < 4; k++) if (!starts[k]) starts[k] = starts.find(Boolean) ?? [1, 1];
+    this.spawns = starts;
+    this.gridDirty = true;
 
     for (const slot of SLOTS) {
       const p = this.p[slot];
@@ -388,7 +376,7 @@ class BombersGame {
       case 'clear': // co-op
         this.timer -= dt;
         if (this.timer <= 0) {
-          if (this.level >= this.s.levels) this.#finish(this.#result('victory', -1));
+          if (this.level >= LEVELS.length) this.#finish(this.#result('victory', -1));
           else this.#newLevel();
         }
         break;
@@ -396,7 +384,7 @@ class BombersGame {
   }
 
   #result(reason, winner) {
-    if (this.coop) return { mode: 'coop', reason, level: this.level, levels: this.s.levels, scores: [...this.score], total: this.score.reduce((a, b) => a + b, 0) };
+    if (this.coop) return { mode: 'coop', reason, level: this.level, levels: LEVELS.length, scores: [...this.score], total: this.score.reduce((a, b) => a + b, 0) };
     return { mode: 'battle', reason, winner, wins: [...this.wins], rounds: this.roundsPlayed };
   }
 
@@ -429,7 +417,7 @@ class BombersGame {
 
   // ── the simulation ──
   #play(dt) {
-    if (!this.coop) {
+    if (this.timed) {
       // round clock and sudden death
       if (this.phase === 'play') {
         if (this.clock > 0) {
@@ -444,8 +432,7 @@ class BombersGame {
           while (this.sdAcc >= SD_INTERVAL) { this.sdAcc -= SD_INTERVAL; this.#dropWall(); }
         }
       }
-    } else {
-      this.clock += dt; // co-op: just counts up (level time)
+    } else if (this.coop) {
       this.exitCool = Math.max(0, this.exitCool - dt);
       for (const sp of this.pending) sp.t -= dt;
       const due = this.pending.filter((sp) => sp.t <= 0 && !this.flames.has(this.exit.cell));
@@ -455,7 +442,7 @@ class BombersGame {
       }
       for (const slot of SLOTS) {
         const p = this.p[slot];
-        if (p.alive || p.respawn <= 0) continue;
+        if (p.alive || p.exited || p.respawn <= 0) continue;
         p.respawn -= dt;
         if (p.respawn <= 0) this.#respawn(slot);
       }
@@ -543,19 +530,31 @@ class BombersGame {
     const open = ex.shown && this.monsters.length === 0 && this.pending.length === 0;
     if (open && !ex.open) this.events.push(['open', ex.cell]);
     ex.open = open;
-    if (open && SLOTS.some((s) => this.p[s].alive && this.#tileOf(this.p[s]) === ex.cell)) {
+    // walking into the open exit: you are safe inside and wait for the others
+    if (open) {
+      for (const slot of SLOTS) {
+        const p = this.p[slot];
+        if (!p.alive || this.#tileOf(p) !== ex.cell) continue;
+        p.alive = false;
+        p.exited = true;
+        p.moving = false;
+        p.curse = 0;
+        this.events.push(['enter', slot]);
+      }
+    }
+    const canPlay = (s) => this.active[s] && !this.out[s];
+    // the level is clear when every player still in the game is inside the exit
+    if (open && SLOTS.some(canPlay) && SLOTS.filter(canPlay).every((s) => this.p[s].exited)) {
       const bonus = 500 + this.level * 100;
-      for (const slot of SLOTS) if (this.p[slot].alive) this.#addScore(slot, bonus);
+      for (const slot of SLOTS) if (canPlay(slot)) this.#addScore(slot, bonus);
       this.events.push(['clear', this.level, bonus]);
       this.phase = 'clear';
       this.timer = CLEAR_TIME;
       this.bombs = [];
       this.bombAt.clear();
-      for (const p of this.p) { p.moving = false; p.curse = 0; }
       return;
     }
     // game over: nobody can play any more (or only bots could)
-    const canPlay = (s) => this.active[s] && !this.out[s];
     if (!SLOTS.some(canPlay) || !SLOTS.some((s) => this.human[s] && canPlay(s))) this.#finish(this.#result('gameover', -1));
   }
 
@@ -570,10 +569,24 @@ class BombersGame {
 
   #respawn(slot) {
     const p = this.p[slot];
-    const [sx, sy] = this.spawns[slot];
-    const i = sy * this.w + sx;
-    if (this.flames.has(i) || this.grid[i] !== FLOOR) { p.respawn = 0.2; return; }
+    // Come back on a safe floor tile: out of every blast zone and away from the monsters (no spawn camping),
+    // as close to your start as that allows.
+    const danger = this.#danger(null, true);
+    const [hx, hy] = this.spawns[slot];
+    let best = -1;
+    let bestScore = -Infinity;
+    for (let i = 0; i < this.n; i++) {
+      if (this.grid[i] !== FLOOR || danger.start[i] !== Infinity || danger.bombs.has(i) || (this.exit && i === this.exit.cell)) continue;
+      const x = i % this.w;
+      const y = (i - x) / this.w;
+      const room = Math.min(8, ...this.monsters.map((m) => Math.abs(m.x - x) + Math.abs(m.y - y)));
+      const score = room - 0.15 * (Math.abs(x - hx) + Math.abs(y - hy));
+      if (score > bestScore) { bestScore = score; best = i; }
+    }
+    if (best < 0) { p.respawn = 0.2; return; }
     this.#placePlayer(slot);
+    p.x = best % this.w;
+    p.y = (best - p.x) / this.w;
     p.alive = true;
     p.respawn = 0;
     p.inv = SHIELD_TIME;
@@ -760,9 +773,9 @@ class BombersGame {
   #exitHit() {
     if (this.exitCool > 0 || this.exitSpawned >= EXIT_SPAWN_MAX) return;
     this.exitCool = 4;
-    const kinds = levelPlan(this.level + 1);
+    const kinds = [...this.kinds];
     for (let k = 0; k < 2 && this.exitSpawned < EXIT_SPAWN_MAX; k++, this.exitSpawned++) {
-      this.pending.push({ t: 0.9 + k * 0.4, type: kinds[kinds.length - 1 - k] ?? M_CHASER });
+      this.pending.push({ t: 0.9 + k * 0.4, type: kinds.length ? kinds[Math.floor(Math.random() * kinds.length)] : M_CHASER });
     }
     this.events.push(['exitHit', this.exit.cell]);
   }
@@ -860,7 +873,7 @@ class BombersGame {
   }
 
   #monsterStep(m, dt, danger) {
-    let move = MONSTERS[m.type].speed * dt;
+    let move = MONSTERS[m.type].speed * this.monsterSpeed * dt;
     const ti = m.ty * this.w + m.tx;
     const between = m.x !== m.tx || m.y !== m.ty;
     if (between && this.bombAt.has(ti) && Math.abs(m.x - m.tx) + Math.abs(m.y - m.ty) > 0.5) { // a bomb landed in front: turn back
@@ -987,7 +1000,7 @@ class BombersGame {
     const start = new Float32Array(this.n).fill(Infinity);
     const end = new Float32Array(this.n).fill(-Infinity);
     for (const [i, f] of this.flames) { start[i] = 0; end[i] = f.t; }
-    if (!bombsOnly && !this.coop && this.clock <= 0 && this.s.suddenDeath) { // walls about to fall: fire that never goes out
+    if (!bombsOnly && this.timed && this.clock <= 0 && this.s.suddenDeath) { // walls about to fall: fire that never goes out
       let t = SD_INTERVAL - this.sdAcc;
       for (let j = this.sdIndex; j < this.spiral.length && t < 2.6; j++) {
         const i = this.spiral[j];
@@ -1142,7 +1155,7 @@ class BombersGame {
     const st = this.botState[slot];
     const k = this.skill;
     const targets = this.#targetTiles(slot);
-    const hunt = this.coop ? Math.max(0.5, k.hunt) : this.clock <= 0 ? 1 : k.hunt; // sudden death: go for the kill
+    const hunt = this.coop ? Math.max(0.5, k.hunt) : this.timed && this.clock <= 0 ? 1 : k.hunt; // sudden death: go for the kill
     const canBomb = this.#canBomb(p);
     const fire = p.curse === C_WEAK ? 1 : p.fire;
 

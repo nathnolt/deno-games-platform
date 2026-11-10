@@ -1,11 +1,12 @@
 // Runs on BOTH server and browser. No DOM, no Deno APIs, no imports from client/ or server/.
+import { LEVELS, THEME_KEYS, THEME_NAMES } from './levels.js';
 //
 // BOMBERS: a Bomberman-style game with two modes.
 //   Battle  last one standing wins the round; first to N round wins takes the match. Sudden death walls close in
 //           when the round clock runs out.
-//   Co-op   everybody against the monsters, level after level. Kill every monster, find the exit under a crate and
-//           step on it. Only a few power-ups hide in each level, and you keep them into the next one. Each player has
-//           lives; monsters give points, and points give extra lives.
+//   Co-op   everybody against the monsters, through hand-made levels (levels.js). Kill every monster, find the exit
+//           under a crate, and EVERYONE walks into it. No timer. Power-ups are placed in each level and you keep
+//           them into the next one. Each player has lives; monsters give points, and points give extra lives.
 // The Skull (both modes) gives you a random curse for a while, and the curse spreads to anyone you touch.
 //
 // Coordinates: tile (x, y) has its centre at (x, y), so it spans [x - 0.5, x + 0.5]. Players, monsters and sliding
@@ -24,9 +25,9 @@ export const meta = {
   tickRate: 30,
   soloSettings: {}, // Play solo = you + bots in the other seats (opponents in battle, team-mates in co-op)
   settingGroups: [
-    { id: 'battle', label: 'Battle mode', description: 'Last one standing wins a round. Sudden death: when the clock runs out, walls spiral in (off: the round is a draw).' },
-    { id: 'coop', label: 'Co-op mode', description: 'Kill every monster, then step on the exit (hidden under a crate) to clear the level. Bombing the open exit releases more monsters. Power-ups are kept between levels.' },
-    { id: 'arena', label: 'Arena' },
+    { id: 'battle', label: 'Battle mode', description: 'Last one standing wins a round. Round time 0 = no clock. Sudden death: when the clock runs out, walls spiral in (off: the round is a draw).' },
+    { id: 'coop', label: 'Co-op mode', description: `${LEVELS.length} hand-made levels, no timer. Kill every monster, then everybody walks into the exit (hidden under a crate). Bombing the open exit releases more monsters. Power-ups are kept between levels.` },
+    { id: 'arena', label: 'Battle arena', description: 'Co-op levels have their own maps and themes.' },
     { id: 'power', label: 'Bombs & power-ups', description: 'Skull: a random curse for 15 s (slow, too fast, reversed controls, bomb diarrhea, no bombs, weak bombs, short fuse). Touching someone passes it on.', collapsed: true },
   ],
   settings: [
@@ -40,13 +41,16 @@ export const meta = {
     },
     // battle
     { type: 'number', key: 'roundsToWin', label: 'Round wins needed', min: 1, max: 7, step: 1, default: 3, group: 'battle' },
-    { type: 'number', key: 'roundTime', label: 'Round time (s)', min: 45, max: 300, step: 15, default: 120, group: 'battle' },
+    { type: 'number', key: 'roundTime', label: 'Round time (s, 0 = none)', min: 0, max: 300, step: 15, default: 120, group: 'battle' },
     { type: 'boolean', key: 'suddenDeath', label: 'Sudden death', default: true, group: 'battle' },
     { type: 'number', key: 'powerups', label: 'Crates with a power-up (%)', min: 0, max: 70, step: 5, default: 35, group: 'battle' },
     // co-op
     { type: 'number', key: 'lives', label: 'Lives', min: 1, max: 9, step: 1, default: 3, group: 'coop' },
-    { type: 'number', key: 'levels', label: 'Levels to win', min: 3, max: 30, step: 1, default: 10, group: 'coop' },
-    { type: 'number', key: 'coopPowerups', label: 'Power-ups per level', min: 0, max: 6, step: 1, default: 2, group: 'coop' },
+    { type: 'number', key: 'startLevel', label: 'Start at level', min: 1, max: LEVELS.length, step: 1, default: 1, group: 'coop' },
+    {
+      type: 'select', key: 'monsterSpeed', label: 'Monster speed', default: 'slow', group: 'coop',
+      options: [{ value: 'slow', label: 'Slow' }, { value: 'normal', label: 'Normal' }, { value: 'fast', label: 'Fast' }],
+    },
     {
       type: 'select', key: 'lifeEvery', label: 'Extra life every', default: '5000', group: 'coop',
       options: [{ value: '0', label: 'Never' }, { value: '3000', label: '3,000 points' }, { value: '5000', label: '5,000 points' }, { value: '10000', label: '10,000 points' }, { value: '20000', label: '20,000 points' }],
@@ -62,6 +66,10 @@ export const meta = {
       options: [{ value: 'small', label: 'Small (13×11)' }, { value: 'classic', label: 'Classic (15×13)' }, { value: 'large', label: 'Large (19×15)' }],
     },
     { type: 'number', key: 'crates', label: 'Crates (%)', min: 20, max: 95, step: 5, default: 70, group: 'arena' },
+    {
+      type: 'select', key: 'theme', label: 'Theme', default: 'random', group: 'arena',
+      options: [{ value: 'random', label: 'Different every round' }, ...THEME_KEYS.map((k) => ({ value: k, label: THEME_NAMES[k] }))],
+    },
     // power-ups
     { type: 'boolean', key: 'curses', label: 'Skull power-up', default: true, group: 'power' },
     { type: 'boolean', key: 'kick', label: 'Kick power-up', default: true, group: 'power' },
@@ -140,18 +148,22 @@ export const SHORT_FUSE = 1;
 // ── monsters (co-op) ── index = the type id sent in snapshots
 // behaviour: wander = random walk · dash = straight until blocked · chase = walks to the nearest player
 //            phase = drifts through crates toward players · smart = dodges blasts and hunts
-export const MONSTERS = [
-  { key: 'blob', name: 'Blob', speed: 1.5, points: 100, behaviour: 'wander' },
-  { key: 'chaser', name: 'Chaser', speed: 2.3, points: 200, behaviour: 'chase' },
-  { key: 'dasher', name: 'Dasher', speed: 3.4, points: 300, behaviour: 'dash' },
-  { key: 'ghost', name: 'Ghost', speed: 1.3, points: 400, behaviour: 'phase' },
-  { key: 'sneak', name: 'Sneak', speed: 2.7, points: 800, behaviour: 'smart' },
+export const MONSTERS = [ // speeds in tiles per second at "slow" (players walk 3.6)
+  { key: 'blob', name: 'Blob', speed: 0.8, points: 100, behaviour: 'wander' },
+  { key: 'chaser', name: 'Chaser', speed: 1.15, points: 200, behaviour: 'chase' },
+  { key: 'dasher', name: 'Dasher', speed: 1.9, points: 300, behaviour: 'dash' },
+  { key: 'ghost', name: 'Ghost', speed: 0.7, points: 400, behaviour: 'phase' },
+  { key: 'sneak', name: 'Sneak', speed: 1.4, points: 800, behaviour: 'smart' },
 ];
+/** Monster speed setting -> multiplier. */
+export const MONSTER_SPEED = { slow: 1, normal: 1.45, fast: 1.9 };
 export const M_BLOB = 0;
 export const M_CHASER = 1;
 export const M_DASHER = 2;
 export const M_GHOST = 3;
 export const M_SNEAK = 4;
+
+export { LEVELS, THEME_KEYS, THEME_NAMES };
 
 /** How long flames stay on a tile, in seconds. */
 export const FLAME_TIME = 0.55;

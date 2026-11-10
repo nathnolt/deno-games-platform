@@ -100,3 +100,7 @@
   .bm-chip { min-width: 0; }
   .bm-chip-stats { display: none; }
 }
+
+/* co-op: a player who already walked into the exit */
+.bm-chip.bm-in { opacity: .8; }
+.bm-in-tag { margin-right: .5em; padding: 0 .3em; background: #22d3ee; color: #0b1020; }

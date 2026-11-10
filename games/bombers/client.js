@@ -1,8 +1,9 @@
 import { el } from '../../client/dom.js'; // the shell's tiny DOM helper
 import {
-  COLORS, CRATE, CURSES, DX, DY, FLAME_TIME, M_DASHER, M_GHOST, PU_BOMB, PU_FIRE, PU_KICK, PU_LIFE, PU_SKULL,
+  COLORS, CRATE, CURSES, DX, DY, FLAME_TIME, LEVELS, M_DASHER, M_GHOST, PU_BOMB, PU_FIRE, PU_KICK, PU_LIFE, PU_SKULL,
   PU_SPEED, SOLID, arenaOf, isPillar, meta,
 } from './shared.js';
+import { THEMES } from './themes.js';
 import { DIGITS, GHOST_PLAYER, MONSTER, PLAYER, PX, iconURL, itemTile, mirrored, seatPalette, silhouette, sprite } from './sprites.js';
 import { Sfx } from './audio.js';
 
@@ -76,11 +77,13 @@ class BombersView {
     this.spectating = this.me < 0;
     const set = ctx.room.settings;
     this.coop = set.mode === 'coop';
-    const { w, h } = arenaOf(set.arena);
+    const start = LEVELS[Math.max(0, Math.min(LEVELS.length, set.startLevel ?? 1) - 1)];
+    const { w, h } = this.coop ? { w: start.map[0].length, h: start.map.length } : arenaOf(set.arena);
     this.w = w;
     this.h = h;
+    this.theme = THEMES[this.coop ? start.theme : 'grass'] ?? THEMES.grass;
     this.roundsToWin = set.roundsToWin ?? 3;
-    this.levels = set.levels ?? 10;
+    this.levels = LEVELS.length;
     this.names = new Map(ctx.room.players.filter((p) => p.slot >= 0).map((p) => [p.slot, p.name]));
     this.sfx = new Sfx();
     this.reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
@@ -180,6 +183,8 @@ class BombersView {
     if (this.snaps.length > 12) this.snaps.shift();
     this.snap = s;
     this.snapAt = now;
+    if (s.gw && s.g && (s.gw !== this.w || s.g.length !== this.w * this.h)) this.#setSize(s.gw, s.g.length / s.gw);
+    if (s.th && THEMES[s.th] && THEMES[s.th] !== this.theme) { this.theme = THEMES[s.th]; this.layerDirty = true; }
     if (s.g && s.g !== this.gridStr) this.#parseGrid(s.g);
     for (const ev of s.ev ?? []) this.#event(ev, s);
     if (s.ph !== this.phase) {
@@ -280,6 +285,19 @@ class BombersView {
 
   #canPlay() { return !this.spectating && !this.ended; }
 
+  /** A level of another size: new canvases, then fit them to the screen again. */
+  #setSize(w, h) {
+    this.w = w;
+    this.h = h;
+    this.grid = new Uint8Array(w * h);
+    this.gridStr = '';
+    this.canvas.width = this.layer.width = w * PX;
+    this.canvas.height = this.layer.height = h * PX;
+    this.g.imageSmoothingEnabled = false;
+    this.layerDirty = true;
+    this.#resize();
+  }
+
   #parseGrid(str) {
     const fresh = this.gridStr === '' || this.gridStr.length !== str.length;
     for (let i = 0; i < str.length && i < this.grid.length; i++) {
@@ -322,7 +340,7 @@ class BombersView {
         break;
       case 'level':
         this.#clearEffects(s);
-        this.#showBanner({ kicker: `Level ${ev[1]} of ${this.levels}`, title: `Level ${ev[1]}`, sub: 'Defeat every monster, then find the exit', color: '#a78bfa', ms: 2500 });
+        this.#showBanner({ kicker: `Level ${ev[1]} of ${this.levels}`, title: LEVELS[ev[1] - 1]?.name ?? `Level ${ev[1]}`, sub: 'Defeat every monster, then everybody into the exit', color: this.theme.accent, ms: 2600 });
         break;
       case 'go':
         this.sfx.play('go');
@@ -408,8 +426,17 @@ class BombersView {
         break;
       case 'open':
         this.sfx.play('open');
-        this.#showBanner({ title: 'Exit open!', sub: 'Every monster is gone: step on the exit', color: '#22d3ee', ms: 1800 });
+        this.#showBanner({ title: 'Exit open!', sub: 'Every monster is gone: everybody into the exit', color: '#22d3ee', ms: 1800 });
         break;
+      case 'enter': {
+        const slot = ev[1];
+        if (s.ex) this.#burst(s.ex[0] % this.w, Math.floor(s.ex[0] / this.w), 14, ['#22d3ee', '#a78bfa', '#ffffff'], 2.4, 0.6);
+        this.sfx.play('open', { power: 0.4 });
+        const waiting = [0, 1, 2, 3].filter((k) => s.p[k] && s.ac[k] && !s.p[k][11] && (s.lv?.[k] ?? 1) > 0).length;
+        if (slot === this.me) this.#showBanner({ title: 'You\'re in!', sub: waiting ? `Waiting for ${waiting} more` : 'Level clear!', color: '#22d3ee', ms: 1800 });
+        else this.#toast(`${this.#name(slot)} is in the exit${waiting ? ` (${waiting} to go)` : ''}`, COLORS[slot]);
+        break;
+      }
       case 'exitHit':
         this.#toast('You bombed the exit: more monsters are coming out!', '#ef4444');
         break;
@@ -420,7 +447,7 @@ class BombersView {
       }
       case 'clear':
         this.sfx.play('win');
-        this.#showBanner({ kicker: `Level ${ev[1]}`, title: 'Level clear!', sub: `+${ev[2]} points for everyone still standing`, color: '#fde047', ms: 3200 });
+        this.#showBanner({ kicker: LEVELS[ev[1] - 1]?.name ?? `Level ${ev[1]}`, title: 'Level clear!', sub: `+${ev[2]} points each`, color: '#fde047', ms: 3200 });
         break;
       case 'wall':
         this.falls.push({ i: ev[1], t0: performance.now() });
@@ -467,13 +494,14 @@ class BombersView {
     let urgent = false;
     if (this.coop) {
       label = s.ph === 'clear' ? 'Clear!' : `Level ${s.lvl ?? 1}`;
+      this.phaseEl.title = LEVELS[(s.lvl ?? 1) - 1]?.name ?? '';
       time = s.ph === 'ready' ? String(Math.max(1, Math.ceil(s.tm))) : '';
       this.roundEl.replaceChildren(this.#img('monster'), ` ${s.ml ?? 0}`);
       this.roundEl.title = 'Monsters left';
     } else {
       label = { ready: 'Get ready', play: 'Fight', grace: 'Fight', result: 'Round over' }[s.ph] ?? '';
       if (s.ph === 'ready') time = String(Math.max(1, Math.ceil(s.tm)));
-      else if (s.ph === 'play' || s.ph === 'grace') {
+      else if ((s.ph === 'play' || s.ph === 'grace') && s.tm >= 0) { // tm -1: no round clock
         if (s.sd >= 0 || (s.tm <= 0 && s.ph === 'play')) { label = 'Sudden death'; urgent = true; } else {
           const t = Math.ceil(s.tm);
           time = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
@@ -490,7 +518,7 @@ class BombersView {
     this.phaseEl.classList.toggle('bm-urgent', urgent && !time);
 
     // chips: only rebuilt when something on them changed
-    const key = JSON.stringify([s.w, s.lv, s.sc, s.ac, s.bt, s.rs?.map((r) => r > 0), s.p.map((p) => (p ? [p[4], p[5], p[6], p[7], p[8], p[9]] : 0))]);
+    const key = JSON.stringify([s.w, s.lv, s.sc, s.ac, s.bt, s.rs?.map((r) => r > 0), s.p.map((p) => (p ? [p[4], p[5], p[6], p[7], p[8], p[9], p[11]] : 0))]);
     if (key === this.hudKey) return;
     this.hudKey = key;
     const chips = [];
@@ -499,9 +527,10 @@ class BombersView {
       const known = s.ac[slot] || p || (this.coop ? s.sc?.[slot] : s.w?.[slot]);
       if (!known) continue;
       const out = this.coop ? !s.ac[slot] || (s.lv[slot] === 0 && !(p && p[4])) : !p || !p[4];
-      const cls = `bm-chip${slot === this.me ? ' bm-me' : ''}${out || (p && !p[4]) ? ' bm-dead' : ''}`;
+      const inExit = p && p[11];
+      const cls = `bm-chip${slot === this.me ? ' bm-me' : ''}${inExit ? ' bm-in' : out || (p && !p[4]) ? ' bm-dead' : ''}`;
       const top = this.coop
-        ? el('span', { class: 'bm-lives' }, this.#img(PU_LIFE), `×${s.lv[slot]}`)
+        ? el('span', { class: 'bm-lives' }, ...(inExit ? [el('span', { class: 'bm-in-tag' }, 'IN')] : []), this.#img(PU_LIFE), `×${s.lv[slot]}`)
         : this.#stars(s.w[slot]);
       const stats = p ? el('div', { class: 'bm-chip-stats' },
         el('span', { title: 'Bombs' }, this.#img(PU_BOMB), String(p[5])),
@@ -680,74 +709,42 @@ class BombersView {
     this.stage.style.fontSize = `${clamp(scale / 2.4, 0.5, 1.2)}em`;
   }
 
-  // ── static layer: floor, pillars, crates, sudden-death walls (drawn once per change) ──
+  // ── static layer: floor, blocks, crates, walls in the level's theme (redrawn only when the map changes) ──
   #drawLayer() {
     const g = this.layer.getContext('2d');
     const { w, h } = this;
+    const th = this.theme;
     g.clearRect(0, 0, w * PX, h * PX);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const v = this.grid[y * w + x];
         const px = x * PX;
         const py = y * PX;
+        const r = (k) => hash(x * 31 + k, y * 17 + k * 7); // stable "random" per tile
         if (v === SOLID) {
-          if (x === 0 || y === 0 || x === w - 1 || y === h - 1) this.#tileBorder(g, px, py, x, y);
-          else if (isPillar(w, h, x, y)) this.#tilePillar(g, px, py);
-          else this.#tileMetal(g, px, py);
+          const edge = x === 0 || y === 0 || x === w - 1 || y === h - 1;
+          if (edge) th.wall(g, px, py, x, y, r);
+          else if (!this.coop && !isPillar(w, h, x, y)) this.#tileMetal(g, px, py); // sudden-death wall
+          else th.block(g, px, py, r);
           continue;
         }
-        this.#tileFloor(g, px, py, x, y);
-        if (v === CRATE) this.#tileCrate(g, px, py, x, y);
+        th.floor(g, px, py, x, y, r);
+        const above = y > 0 ? this.grid[(y - 1) * w + x] : SOLID;
+        if (above === SOLID || above === CRATE) { // shadow cast by the block above
+          g.fillStyle = 'rgba(0,0,0,0.3)';
+          g.fillRect(px, py, PX, 3);
+          g.fillStyle = 'rgba(0,0,0,0.12)';
+          g.fillRect(px, py + 3, PX, 1);
+        }
+        const left = x > 0 ? this.grid[y * w + x - 1] : SOLID;
+        if (left === SOLID || left === CRATE) {
+          g.fillStyle = 'rgba(0,0,0,0.16)';
+          g.fillRect(px, py, 2, PX);
+        }
+        if (v === CRATE) th.crate(g, px, py, r);
       }
     }
     this.layerDirty = false;
-  }
-
-  #tileFloor(g, px, py, x, y) {
-    g.fillStyle = (x + y) % 2 ? '#3d8a48' : '#398143';
-    g.fillRect(px, py, PX, PX);
-    for (let k = 0; k < 5; k++) { // grass tufts
-      const gx = Math.floor(hash(x * 13 + k, y * 7) * 14) + 1;
-      const gy = Math.floor(hash(x * 5, y * 11 + k) * 13) + 2;
-      g.fillStyle = k < 3 ? '#4fa25b' : '#2f6e39';
-      g.fillRect(px + gx, py + gy, 1, 1);
-      if (k === 0) g.fillRect(px + gx + 1, py + gy - 1, 1, 1);
-    }
-    const above = y > 0 ? this.grid[(y - 1) * this.w + x] : SOLID;
-    if (above === SOLID || above === CRATE) { // shadow cast by the block above
-      g.fillStyle = 'rgba(0,0,0,0.32)';
-      g.fillRect(px, py, PX, 3);
-      g.fillStyle = 'rgba(0,0,0,0.14)';
-      g.fillRect(px, py + 3, PX, 1);
-    }
-    const left = x > 0 ? this.grid[y * this.w + x - 1] : SOLID;
-    if (left === SOLID || left === CRATE) {
-      g.fillStyle = 'rgba(0,0,0,0.18)';
-      g.fillRect(px, py, 2, PX);
-    }
-  }
-
-  #tilePillar(g, px, py) {
-    g.fillStyle = '#8b94a5'; g.fillRect(px, py, 16, 16);
-    g.fillStyle = '#c3cad5'; g.fillRect(px, py, 16, 2); g.fillRect(px, py, 1, 13);
-    g.fillStyle = '#5c6677'; g.fillRect(px, py + 12, 16, 4); g.fillRect(px + 15, py, 1, 13);
-    g.fillStyle = '#4a5364'; g.fillRect(px, py + 12, 16, 1);
-    g.fillStyle = '#9da6b5'; g.fillRect(px + 4, py + 4, 8, 5);
-    g.fillStyle = '#b5bdc9'; g.fillRect(px + 4, py + 4, 8, 1);
-    g.fillStyle = '#7a8394'; g.fillRect(px + 4, py + 9, 8, 1);
-    g.fillStyle = '#434b5a'; g.fillRect(px + 2, py + 14, 1, 1); g.fillRect(px + 9, py + 13, 1, 1);
-  }
-
-  #tileBorder(g, px, py, x, y) {
-    g.fillStyle = '#626a7b'; g.fillRect(px, py, 16, 16);
-    g.fillStyle = '#3f4552';
-    for (let r = 0; r < 4; r++) {
-      g.fillRect(px, py + r * 4 + 3, 16, 1);
-      const off = (r + x + y) % 2 ? 3 : 11;
-      g.fillRect(px + off, py + r * 4, 1, 3);
-    }
-    g.fillStyle = '#7b8495';
-    for (let r = 0; r < 4; r++) g.fillRect(px, py + r * 4, 16, 1);
   }
 
   #tileMetal(g, px, py) {
@@ -762,20 +759,6 @@ class BombersView {
     }
     g.fillStyle = '#a3b1c6';
     for (const [rx, ry] of [[2, 3], [13, 3], [2, 11], [13, 11]]) g.fillRect(px + rx, py + ry, 1, 1);
-  }
-
-  #tileCrate(g, px, py, x, y) {
-    const dark = hash(x, y) < 0.5;
-    g.fillStyle = '#4a2a0c'; g.fillRect(px, py, 16, 16);
-    g.fillStyle = dark ? '#b8702f' : '#c47b37'; g.fillRect(px + 1, py + 1, 14, 11);
-    g.fillStyle = '#8a4f1e'; g.fillRect(px + 1, py + 12, 14, 3); // front face
-    g.fillStyle = '#e1a463'; g.fillRect(px + 1, py + 1, 14, 1);
-    g.fillStyle = '#975a26'; g.fillRect(px + 1, py + 5, 14, 1); g.fillRect(px + 1, py + 9, 14, 1);
-    g.fillStyle = '#d18a45';
-    for (let k = 0; k < 9; k++) g.fillRect(px + 3 + k, py + 10 - k, 2, 1); // brace
-    g.fillStyle = '#4a2a0c';
-    for (const [nx, ny] of [[2, 2], [13, 2], [2, 10], [13, 10]]) g.fillRect(px + nx, py + ny, 1, 1);
-    g.fillStyle = '#6b3d14'; g.fillRect(px + 1, py + 12, 14, 1);
   }
 
   // ── interpolation ──
@@ -804,7 +787,7 @@ class BombersView {
     const s = this.snap;
     const smp = this.#sample(now);
     g.setTransform(1, 0, 0, 1, 0, 0);
-    g.fillStyle = '#0b1020';
+    g.fillStyle = this.theme.bg;
     g.fillRect(0, 0, this.canvas.width, this.canvas.height);
     if (this.shake > 0.05 && !this.reduced) {
       const m = Math.round(this.shake * 2.4);
@@ -895,9 +878,9 @@ class BombersView {
       const py = Math.round((lerp(a[2], b[2], smp.k) / 100) * PX);
       const fuse = b[3]; // 1 -> 0
       const owner = b[4];
-      const period = 90 + fuse * 260;
+      const period = 260 + fuse * 340; // a slow throb that quickens a little as the fuse burns down (600 ms -> 260 ms)
       const big = !this.reduced && Math.floor(now / period) % 2 === 1;
-      const flash = fuse < 0.3 && Math.floor(now / 70) % 2 === 0;
+      const flash = fuse < 0.22 && Math.floor(now / 140) % 2 === 0;
       const spr = sprite(`bomb${big ? 1 : 0}`, BOMB_ROWS[big ? 1 : 0]);
       g.fillStyle = 'rgba(0,0,0,0.3)';
       g.fillRect(px + 3, py + 14, 10, 2);
@@ -916,9 +899,9 @@ class BombersView {
       for (let k = 0; k < len; k++) g.fillRect(px + 9 + k, py + 2 - k, 1, 1);
       const sx = px + 9 + len;
       const sy = py + 2 - len;
-      g.fillStyle = ['#fde047', '#fb923c', '#ffffff'][Math.floor(now / 60) % 3];
+      g.fillStyle = ['#fde047', '#fb923c', '#ffffff'][Math.floor(now / 150) % 3];
       g.fillRect(sx, sy, 1, 1);
-      if (Math.floor(now / 60) % 2) { g.fillRect(sx + 1, sy, 1, 1); g.fillRect(sx, sy - 1, 1, 1); }
+      if (Math.floor(now / 150) % 2) { g.fillRect(sx + 1, sy, 1, 1); g.fillRect(sx, sy - 1, 1, 1); }
     }
   }
 
@@ -930,7 +913,7 @@ class BombersView {
     const w = this.w;
     const byCell = new Map(flames.map((f) => [f[0], f]));
     const eff = (m) => (m & 4 ? 3 : m);
-    const flick = Math.floor(now / 50);
+    const flick = Math.floor(now / 90);
     for (let tier = 0; tier < 4; tier++) {
       g.fillStyle = FLAME_COLS[tier];
       for (const [cell, mask, life] of flames) {
@@ -1106,7 +1089,7 @@ class BombersView {
     for (let k = 0; k < n; k++) {
       const a = Math.random() * Math.PI * 2;
       const v = 1 + Math.random() * 2.2;
-      this.#push({ x: x + 0.5, y: y + 0.5, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.6, max: 0.6, size: 2, color: k % 2 ? '#c47b37' : '#4a2a0c', drag: 3.5 });
+      this.#push({ x: x + 0.5, y: y + 0.5, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.6, max: 0.6, size: 2, color: this.theme.debris[k % 2], drag: 3.5 });
     }
   }
 
