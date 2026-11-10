@@ -889,4 +889,8 @@ void main() {
       uRough: 0.975,
     },
   },
+  crackedGlass_1: {
+    base: 'crackedGlass',
+    category: 'My shaders',
+  },
 };

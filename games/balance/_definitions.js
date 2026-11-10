@@ -129,6 +129,18 @@ export const bowls = {
     shader: 'yellowGlaze',
     water: { color: '#004585', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
   },
+  glass: {
+    a: 6,
+    b: 15,
+    t: 0.9,
+    rimY: 7.5,
+    r: 1,
+    zscale: 1,
+    square: 2,
+    squareBottom: 2,
+    shader: 'glass',
+    water: { color: '#004585', opacity: 0.55, reflect: 1, caustics: 2, causticsInset: 2 },
+  },
   tiny: {
     a: 13.5,
     b: 5.5,

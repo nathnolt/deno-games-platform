@@ -47,5 +47,10 @@ export const shapes = {
       { type: 'circle', diameter: 6, x: 3, y: 3, lamp: '3,4.5' },
       { type: 'poly', points: '0,3 6,3 6,0 0,0', cut: true },
     ],
+    dumbell: [
+      { type: 'circle', diameter: 4, x: 2, y: 2 },
+      { type: 'poly', points: '2,3 2,1 11,1 11,2 11,3' },
+      { type: 'circle', diameter: 4, x: 11, y: 2 },
+    ],
   },
 };
