@@ -2,12 +2,14 @@ import { warlords } from '../games/warlords/server.js';
 import { ramparts } from '../games/rampart/server.js';
 import { dotfield } from '../games/dotfield/server.js';
 import { balance } from '../games/balance/server.js';
+import { bombers } from '../games/bombers/server.js';
 
 const availableGames = [
 	warlords,
 	ramparts,
 	balance,
 	dotfield,
+	bombers,
 ]
 
 // To add a game: create games/<id>/{shared,server,client}.js and list its ServerGame here

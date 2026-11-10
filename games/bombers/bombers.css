@@ -1,0 +1,93 @@
+/* Bombers. Lives at games/bombers/bombers.css and is loaded by client.js itself (a <link> added on first mount),
+   so do NOT also paste it into client/style.css. Every class is prefixed bm- so it cannot collide with other games. */
+
+.bm-root { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; user-select: none; -webkit-user-select: none; color: var(--text); font-size: 14px; container-type: inline-size; }
+
+/* header: phase + clock (left), players (centre), round + mute (right) */
+.bm-head { width: 100%; box-sizing: border-box; display: grid; grid-template-columns: minmax(8em, 1fr) auto minmax(8em, 1fr); grid-template-areas: "clock chips side"; align-items: center; gap: .3rem .8rem; padding: .3rem .5rem; flex: none; }
+.bm-clock { grid-area: clock; display: flex; align-items: baseline; gap: .5em; min-width: 0; }
+.bm-chips { grid-area: chips; display: flex; flex-wrap: wrap; justify-content: center; gap: .35rem; min-width: 0; }
+.bm-side { grid-area: side; display: flex; align-items: center; justify-content: flex-end; gap: .5rem; color: var(--muted); font-size: .9em; }
+@container (max-width: 760px) {
+  .bm-head { grid-template-columns: 1fr auto; grid-template-areas: "clock side" "chips chips"; }
+}
+.bm-phase { min-width: 0; font: 700 1.1em Palatino, Georgia, serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bm-time { font: 700 1.7em Palatino, Georgia, serif; font-variant-numeric: tabular-nums; min-width: 2.6em; }
+.bm-time.bm-urgent { color: #f87171; }
+.bm-ff { white-space: nowrap; color: #fbbf24; font-weight: 700; font-size: .85em; letter-spacing: .06em; }
+.bm-mute { width: 2.2em; height: 2.2em; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); cursor: pointer; touch-action: manipulation; }
+
+/* player chips */
+.bm-chip { display: grid; gap: .1em; min-width: 8.5em; padding: .25em .6em .3em; border: 2px solid var(--c); border-radius: 9px; background: color-mix(in srgb, var(--c) 16%, rgba(9,13,26,.9)); line-height: 1.2; white-space: nowrap; }
+.bm-chip-top { display: flex; align-items: baseline; justify-content: space-between; gap: .6em; }
+.bm-chip-name { color: var(--cl); font-weight: 700; max-width: 8em; overflow: hidden; text-overflow: ellipsis; }
+.bm-chip-wins { color: #fde047; letter-spacing: .05em; }
+.bm-chip-wins .bm-no { color: rgba(253,224,71,.22); }
+.bm-chip-stats { display: flex; gap: .55em; font-size: .85em; color: #cbd5e1; font-variant-numeric: tabular-nums; }
+.bm-chip.bm-me { box-shadow: 0 0 0 2px rgba(255,255,255,.55); }
+.bm-chip.bm-dead { opacity: .45; }
+.bm-chip.bm-dead .bm-chip-name { text-decoration: line-through; }
+
+/* the board */
+.bm-stage { position: relative; flex: none; background: #0b1020; border-radius: 8px; overflow: hidden; box-shadow: 0 0 0 1px var(--line); }
+.bm-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.bm-hint { width: 100%; box-sizing: border-box; flex: none; min-height: 1.9em; display: flex; align-items: center; justify-content: center; text-align: center; color: #cbd5e1; font-size: .9em; padding: .15rem .5rem; overflow: hidden; }
+.bm-hint kbd { font: inherit; font-size: .9em; padding: 0 .35em; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--panel); }
+
+/* centre banner (never blocks input) */
+.bm-banner { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: max-content; max-width: 90%; box-sizing: border-box; text-align: center; pointer-events: none; opacity: 0; visibility: hidden;
+  background: rgba(9,13,26,.8); border: 1px solid rgba(255,255,255,.12); border-top: 4px solid var(--c, #e2e8f0); border-radius: 14px; padding: .6em 1.6em .8em; box-shadow: 0 10px 40px rgba(0,0,0,.55); }
+.bm-banner.bm-show { visibility: visible; animation: bm-banner var(--bm-ms, 2000ms) ease-out both; }
+.bm-banner-kicker { color: #94a3b8; font-size: .95em; letter-spacing: .14em; text-transform: uppercase; font-weight: 600; }
+.bm-banner-title { font: 700 3em/1.1 Palatino, Georgia, serif; color: #fff; text-shadow: 0 2px 14px rgba(0,0,0,.8); margin: .05em 0 .1em; }
+.bm-banner-sub { color: #e2e8f0; font-size: 1.1em; }
+.bm-tally { margin-top: .6em; display: grid; gap: .25em; }
+.bm-tally-row { display: grid; grid-template-columns: minmax(6em, auto) auto; gap: 1em; align-items: baseline; text-align: left; }
+.bm-tally-name { color: var(--cl); font-weight: 700; }
+.bm-tally-wins { color: #fde047; letter-spacing: .06em; }
+.bm-tally-wins .bm-no { color: rgba(253,224,71,.22); }
+
+.bm-banner.bm-final { animation: bm-final .5s ease-out both; visibility: visible; opacity: 1; background: rgba(9,13,26,.92); padding: 1em 2em 1.2em; min-width: 18em; }
+.bm-banner.bm-final .bm-banner-title { font-size: 3.6em; color: color-mix(in srgb, var(--c) 45%, #fff); }
+.bm-final-rows { margin-top: .9em; display: grid; gap: .35rem; }
+.bm-final-row { display: grid; grid-template-columns: 1.6em 1fr auto; align-items: baseline; gap: .7em; text-align: left; font-size: 1.1em; padding: .2em .5em; border-left: 4px solid var(--c); border-radius: 4px; background: rgba(255,255,255,.04); }
+.bm-final-row.bm-win { background: color-mix(in srgb, var(--c) 22%, transparent); }
+.bm-final-pos { color: #94a3b8; }
+.bm-final-name { color: var(--cl); font-weight: 700; }
+.bm-final-row b { font-variant-numeric: tabular-nums; }
+
+@keyframes bm-banner {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(.85); }
+  10% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes bm-final { from { opacity: 0; transform: translate(-50%, -50%) scale(.8); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+
+/* small messages at the top of the board */
+.bm-toasts { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); display: grid; gap: .3rem; justify-items: center; pointer-events: none; width: 90%; }
+.bm-toast { display: flex; align-items: center; gap: .5em; padding: .25em .7em; background: rgba(9,13,26,.82); border: 1px solid var(--line); border-radius: 999px; font-size: .85em; animation: bm-toast 2.6s ease-out both; }
+.bm-toast i { width: .65em; height: .65em; border-radius: 50%; flex: none; }
+@keyframes bm-toast { 0% { opacity: 0; transform: translateY(-6px); } 10% { opacity: 1; transform: none; } 80% { opacity: 1; } 100% { opacity: 0; } }
+
+/* touch controls: a stick on the left, the bomb button on the right. Shown after the first touch. */
+.bm-touch { position: absolute; inset: auto 0 0 0; height: 0; pointer-events: none; display: none; }
+.bm-root.bm-touching .bm-touch { display: block; }
+.bm-pad, .bm-bombbtn { position: absolute; bottom: 14px; pointer-events: auto; touch-action: none; border: 2px solid rgba(255,255,255,.28); background: rgba(9,13,26,.42); backdrop-filter: blur(2px); }
+.bm-pad { left: 14px; width: 132px; height: 132px; border-radius: 50%; }
+.bm-pad::before, .bm-pad::after { content: ""; position: absolute; left: 50%; top: 50%; background: rgba(255,255,255,.14); transform: translate(-50%, -50%); border-radius: 6px; }
+.bm-pad::before { width: 34px; height: 100px; }
+.bm-pad::after { width: 100px; height: 34px; }
+.bm-knob { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; background: rgba(255,255,255,.55); z-index: 1; transition: transform .05s; }
+.bm-bombbtn { right: 18px; width: 92px; height: 92px; border-radius: 50%; color: #fff; font: 700 1.05em system-ui, sans-serif; letter-spacing: .04em; }
+.bm-bombbtn:active, .bm-bombbtn.bm-pressed { background: rgba(239,68,68,.55); }
+
+@media (prefers-reduced-motion: reduce) {
+  .bm-banner.bm-show, .bm-banner.bm-final, .bm-toast { animation: none; }
+  .bm-banner.bm-show { opacity: 1; }
+}
+@container (max-width: 520px) {
+  .bm-side .bm-round { display: none; }
+  .bm-chip { min-width: 0; }
+  .bm-chip-stats { display: none; }
+}
