@@ -352,6 +352,9 @@ uniform float uWaterY;
 uniform float uCaus;
 uniform float uCausOn; // 0 = this block gets no caustics (it is held, or waits on the table)
 uniform float uCausInward;
+uniform float uRevealScale; // the look of the dissolve (tuning.reveal in definitions): size of the noise
+uniform float uRevealEdge; //  width of the pale rim
+uniform float uRevealGlow; //  how bright the rim is
 uniform float uReveal; // 1 = the block is whole; below 1 it is dissolving in (a block that just came out of its outline on the table)
 uniform vec2 uBowlHalf;
 uniform float uAA; // graphics setting (texture filtering): 0 = off, 1 = trilinear, 1.5 = anisotropic 4x, 2 = anisotropic 16x: how early fine patterns fade out
@@ -445,10 +448,10 @@ float gRough = 0.6; //    how rough it is: 0 = a small hard highlight, 1 = a wid
 vec4 finish(vec3 c, float a) {
   float dissolveEdge = 0.0;
   if (uReveal < 1.0) { // dissolve: the block appears out of noise, with a pale rim where it is just appearing
-    float d = fbm(vP3.xy * 0.9 + vP3.z * 0.7 + uSeed * 9.0);
+    float d = fbm(vP3.xy * uRevealScale + vP3.z * 0.7 + uSeed * 9.0);
     float k = uReveal * 1.12;
     if (d > k) discard;
-    dissolveEdge = smoothstep(k - 0.07, k, d);
+    dissolveEdge = smoothstep(k - uRevealEdge, k, d);
   }
   vec3 albedo = c;
   vec3 wn = normalize(vWN);
@@ -490,7 +493,7 @@ vec4 finish(vec3 c, float a) {
   c = mix(c, vec3(1.0, 0.2, 0.2), uBad * 0.55);
   c += uGlow * 0.28;
   c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, vDist)); // distant background models melt into the mist
-  c = mix(c, vec3(1.0, 0.98, 0.92), dissolveEdge * 0.85);
+  c = mix(c, vec3(1.0, 0.98, 0.92), dissolveEdge * uRevealGlow);
   return vec4(c, a);
 }
 #define vPos vP3 // (the shader studio calls the position glued to the mesh vPos)

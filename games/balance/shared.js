@@ -880,8 +880,19 @@ export function validateDefinitions(defs, extra = {}) {
   rect(t.view, 'tuning.view', ['w', 'h', 'cy']);
   if (t.shadows !== undefined) shadowErrors(t.shadows, 'tuning.shadows', err);
   rect(t.camera, 'tuning.camera', ['fov', 'pitch', 'targetY']);
-  for (const k of ['follow', 'headroom', 'slack']) if (t.camera?.[k] !== undefined && !isNum(t.camera[k])) err(`tuning.camera.${k} must be a number`);
+  for (const k of ['follow', 'headroom', 'slack', 'speed']) if (t.camera?.[k] !== undefined && !isNum(t.camera[k])) err(`tuning.camera.${k} must be a number`);
+  if (t.rowSpeed !== undefined && !(isNum(t.rowSpeed) && t.rowSpeed > 0 && t.rowSpeed <= 60)) err('tuning.rowSpeed must be from above 0 to 60');
+  if (t.reveal !== undefined) {
+    if (typeof t.reveal !== 'object' || t.reveal === null) err('tuning.reveal: not an object');
+    else {
+      for (const k of ['time', 'scale', 'edge', 'glow']) if (t.reveal[k] !== undefined && !isNum(t.reveal[k])) err(`tuning.reveal.${k}: not a number`);
+      if (isNum(t.reveal.time) && (t.reveal.time < 0.05 || t.reveal.time > 20)) err('tuning.reveal.time must be from 0.05 to 20 seconds');
+      if (isNum(t.reveal.scale) && (t.reveal.scale < 0.05 || t.reveal.scale > 10)) err('tuning.reveal.scale must be from 0.05 to 10');
+      if (isNum(t.reveal.edge) && (t.reveal.edge < 0 || t.reveal.edge > 1)) err('tuning.reveal.edge must be from 0 to 1');
+    }
+  }
   if (isNum(t.camera?.headroom) && t.camera.headroom < 0) err('tuning.camera.headroom must be 0 or more');
+  if (isNum(t.camera?.speed) && (t.camera.speed <= 0 || t.camera.speed > 20)) err('tuning.camera.speed must be from above 0 to 20');
   if (isNum(t.camera?.slack) && t.camera.slack < 0) err('tuning.camera.slack must be 0 or more');
   if (isNum(t.camera?.fov) && (t.camera.fov < 5 || t.camera.fov > 100)) err('tuning.camera.fov must be between 5 and 100');
   if (isNum(t.camera?.pitch) && (t.camera.pitch < 0 || t.camera.pitch > 85)) err('tuning.camera.pitch must be between 0 and 85');

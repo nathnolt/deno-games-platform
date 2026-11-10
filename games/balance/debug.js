@@ -52,7 +52,9 @@ const TUNING_HELP = {
   zone: 'Default sideways limits: a block whose centre leaves it loses the level.',
   drop: 'Default drop zone: let go inside it and the block falls into the bowl.',
   view: 'What the camera must always show.',
-  camera: 'fov = vertical field of view, pitch = degrees looking down, targetY = height it looks at, measured from the bottom of the bowl (every bowl then has the bottom of the picture at the same place). follow = 1 lets the camera zoom out when the stack nears the top of the picture (0 = never), headroom = free space it wants above the highest block, slack = how much extra room it makes each time, so it does not move for every block.',
+  rowSpeed: 'How fast the waiting blocks slide together after you took one (and the outlines of the next ones). 2 = calm, 4 = quick, 1 = very slow.',
+  reveal: 'The block that comes out of its outline dissolves in: time = seconds it takes, scale = size of the noise (bigger = finer), edge = width of the pale rim, glow = how bright the rim is.',
+  camera: 'fov = vertical field of view, pitch = degrees looking down, targetY = height it looks at, measured from the bottom of the bowl (every bowl then has the bottom of the picture at the same place). follow = 1 lets the camera zoom out when the stack nears the top of the picture (0 = never), headroom = free space it wants above the highest block, slack = how much extra room it makes each time (small = it moves more often), speed = how fast it moves (0.4 = about 6 s, 1.6 = about 1.5 s).',
 };
 
 const KEY = /^[A-Za-z][\w-]*$/;

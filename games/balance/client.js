@@ -1147,6 +1147,7 @@ class BalanceView {
   fogs = []; //      the mist colours of the world: { value, base }, tinted by the time of day
   mistNow = new THREE.Color('#e7e2d6');
   aaU = { value: 1 }; //       uAA of every block shader: how strongly fine patterns fade out where they get smaller than a pixel (the texture filtering setting)
+  revealU = { uRevealScale: { value: 0.9 }, uRevealEdge: { value: 0.07 }, uRevealGlow: { value: 0.85 } }; // the look of the dissolve of a block that comes out of its outline (tuning.reveal)
   qualityU = { value: 1 }; // uQuality of every block shader: the surface detail setting of the graphics menu (0 low, 1 roughness maps, 2 roughness + bump maps)
   gfx = null; //            the graphics settings (see GFX_PRESETS), kept in this browser
   gfxPanel = null;
@@ -3071,6 +3072,7 @@ void main() {
         uCausOn: { value: 1 },
         uCausInward: { value: 0 }, // 1 = only the inside of this surface gets caustics (the bowl)
         uReveal: { value: 1 }, //     below 1 the block dissolves in (see finish() in shaders.js)
+        ...this.revealU,
         uWaterColor: { value: rawColor(this.bowlDef?.water?.color ?? '#004585') }, // (the water block looks like the water of the bowl)
         uWaterOpacity: { value: this.bowlDef?.water?.opacity ?? 0.55 },
         uFogColor: fog?.uFogColor ?? { value: new THREE.Color(0, 0, 0) },
@@ -3183,7 +3185,7 @@ void main() {
   #animateGhosts(dt) {
     for (const g of this.ghosts) {
       const px = slotPos(g.spot, g.w, g.shapeKey, this.groundY).x; // slides along when the row closes up
-      g.group.position.x += (px - g.group.position.x) * (1 - Math.exp(-4 * dt));
+      g.group.position.x += (px - g.group.position.x) * (1 - Math.exp(-(tuning.rowSpeed ?? 2) * dt));
       g.t += dt;
       const reveal = g.out ? 1 - Math.min(1, g.t / GHOST_OUT) : smooth(g.t / GHOST_IN);
       g.mat.uniforms.uReveal.value = reveal;
@@ -3936,7 +3938,7 @@ void main() {
       else if (this.coverGoal > f.top && need < this.coverGoal - slack * 2.5) this.coverGoal = Math.max(f.top, need + slack);
     } else this.coverGoal = f.top;
     const goal = Math.max(0, (this.coverGoal - f.yBottom) / (f.Kt - f.K) - f.dist);
-    const k = 1 - Math.exp(-1.6 * dt); // a calm move: about 1.5 s
+    const k = 1 - Math.exp(-(cam.speed ?? 0.4) * dt); // a slow, calm move (tuning.camera.speed: 0.4 = about 6 s to get all the way there)
     this.zoomD = Math.abs(goal - this.zoomD) < 0.01 ? goal : this.zoomD + (goal - this.zoomD) * k;
     if (Math.abs(this.zoomD - this.zoomShown) > 0.001) {
       this.zoomShown = this.zoomD;
@@ -3961,6 +3963,10 @@ void main() {
     this.lastFrame = now;
     this.uTime.value += dt;
     if (this.stats) this.#statsBegin(now);
+    const rv = tuning.reveal ?? {};
+    this.revealU.uRevealScale.value = rv.scale ?? 0.9;
+    this.revealU.uRevealEdge.value = rv.edge ?? 0.07;
+    this.revealU.uRevealGlow.value = rv.glow ?? 0.85;
     if (this.freeCam) this.#applyFreeCam();
     else this.#followStack(dt);
 
@@ -3993,12 +3999,12 @@ void main() {
       const mineHeld = v.owner === this.ctx.me.slot && (v.st === BODY.HELD || v.st === BODY.HELD_BAD) && this.#carrying();
       draw(v, v.static ? 1 : mineHeld ? 45 : 24, mineHeld ? ROTATE_ANIM : undefined);
     }
-    for (const v of this.tableViews.values()) draw(v, 4, undefined, true); // (the row closing up: 95% of the way in about 0.75 s)
+    for (const v of this.tableViews.values()) draw(v, tuning.rowSpeed ?? 2, undefined, true); // (the row closing up: tuning.rowSpeed 2 = 95% of the way in about 1.5 s)
     this.#animateGhosts(dt);
     this.#animateExplosions(dt);
     for (const v of this.tableViews.values()) {
       if (v.reveal === undefined || v.reveal >= 1) continue; // a block that just came out of its outline dissolves in
-      v.reveal = Math.min(1, v.reveal + dt / 0.55);
+      v.reveal = Math.min(1, v.reveal + dt / Math.max(0.05, tuning.reveal?.time ?? 1.1));
       v.mats.forEach((m) => { m.uniforms.uReveal.value = v.reveal; });
     }
 

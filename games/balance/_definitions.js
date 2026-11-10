@@ -20,6 +20,8 @@ export const tuning = {
   gravity: 30, //          units / s²  (a bit heavy, so blocks feel chunky rather than floaty)
   waterDensity: 1, //      material density = weight / 10, so weight 10 == as dense as water
   countdown: 3, //         seconds of the countdown after the last block is placed (three green dots appear, one per third); then the level is cleared
+  rowSpeed: 2, //          how fast the waiting blocks close up after one was taken (4 = fast, 1 = very slow)
+  reveal: { time: 1.1, scale: 0.9, edge: 0.07, glow: 0.85 }, // the block that comes out of its outline dissolves in: seconds, size of the noise, width and brightness of the pale rim
   follow: 30, //           how quickly a held block chases its player's pointer
 
   depth: 2.4, //           thickness of every block along z
@@ -36,7 +38,7 @@ export const tuning = {
   zone: { x0: -30, x1: 30 }, //                       default sideways limit: a block whose centre leaves it loses the level
   drop: { x0: -30, x1: 30, y0: 1.5, y1: 100 }, //     default DROP ZONE (invisible): let go of a block inside it and it falls into the bowl
   view: { w: 40, h: 40, cy: 10 }, //                  what the camera must always show (width, height, centre height)
-  camera: { fov: 21, pitch: 8, targetY: 12.4, follow: 1, headroom: 10, slack: 10 }, // the camera zooms out (the bottom stays put) when the stack gets within `headroom` of the top of the picture, to headroom + slack (follow: 0 = never)
+  camera: { fov: 21, pitch: 8, targetY: 12.4, follow: 1, headroom: 10, slack: 3, speed: 0.4 }, // the camera zooms out (the bottom stays put) when the stack gets within `headroom` of the top of the picture, to headroom + slack (follow: 0 = never); speed = how fast it moves (0.4 = about 6 s)
   shadows: { on: true, size: 2048, range: 170, softness: 1, bias: 0.12, normalBias: 1.5 },
 };
 
