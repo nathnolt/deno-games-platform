@@ -1,7 +1,7 @@
 import { el } from '../../client/dom.js'; // the shell's tiny DOM helper
 import {
   ARENA_H, ARENA_W, COLORS, COLS, HIT_R, KEEPS, KEEP_AT, N, ROWS, TERRAIN, TILE,
-  ZONE_PAD, inForeignZone, meta, pieceCells, pieceSize, ringRect,
+  ZONE_PAD, inForeignZone, leaderOf, meta, pieceCells, pieceSize, ringRect, BOUNTY,
 } from './shared.js';
 import { Sfx } from './audio.js';
 
@@ -20,19 +20,12 @@ import { Sfx } from './audio.js';
  * The client never decides anything: the server validates every click.
  */
 
-const HEADER_H = 50; //   px: players + timer strip above the arena (see .rp-head in the CSS)
-const FOOTER_H = 30; //   px: the one-line hint below it
-const BANNER_MS = 2200;
+const BANNER_MS = 2600; //   phase banners; the round-over banner stays for the whole result pause
 const TOAST_MS = 2800;
 const FIRE_REPEAT_MS = 120; // while the button is held
 const MAX_PARTICLES = 320;
 
 const PHASE_NAME = { ready: 'Get ready', place: 'Place cannons', battle: 'Battle', build: 'Rebuild walls', result: 'Round over' };
-const PHASE_SUB = {
-  place: 'Drop your new cannons inside your walls',
-  battle: 'Break their walls. Keep yours closed.',
-  build: 'Close your castle with the falling pieces',
-};
 
 // ── small colour helpers ──
 const hex = (c) => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)];
@@ -46,14 +39,42 @@ const PAL = COLORS.map((c) => ({ base: c, light: mix(c, '#ffffff', 0.38), dark: 
 const hash = (x, y) => { let h = (x * 374761393 + y * 668265263) | 0; h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+/**
+ * The game's stylesheet lives next to this file (games/ramparts/ramparts.css; /games/ is served and .css is a known
+ * type), so nothing has to be pasted into client/style.css. It is added to <head> once and kept: every class is
+ * prefixed rp-, so it cannot affect other games. Resolves when the sheet has loaded (or failed).
+ */
+const STYLE_URL = new URL('./ramparts.css', import.meta.url).href;
+function loadStyle() {
+  let link = document.getElementById('rp-style');
+  if (!link) {
+    link = document.createElement('link');
+    link.id = 'rp-style';
+    link.rel = 'stylesheet';
+    link.href = STYLE_URL;
+    link.addEventListener('load', () => { link.dataset.ready = '1'; });
+    link.addEventListener('error', () => { link.dataset.ready = '1'; console.warn(`Ramparts: could not load ${STYLE_URL}`); });
+    document.head.append(link);
+  }
+  if (link.dataset.ready) return Promise.resolve();
+  return new Promise((done) => { link.addEventListener('load', done, { once: true }); link.addEventListener('error', done, { once: true }); });
+}
+
 class RampartsView {
   constructor(ctx) {
     this.ctx = ctx;
+    loadStyle().then(() => { if (!this.disposed) this.#resize(); }); // the strip's height is only right once the CSS is in
     this.me = ctx.me.slot;
     this.spectating = this.me < 0;
     this.maxHp = ctx.room.settings.cannonHp ?? 2;
     this.maxRounds = ctx.room.settings.maxRounds ?? 8;
     this.discardMode = ctx.room.settings.discard ?? 'any'; // 'any' | 'stuck' | 'never'
+    this.maxLives = ctx.room.settings.lives ?? 3;
+    this.buildTime = ctx.room.settings.buildTime ?? 25;
+    this.comeback = ctx.room.settings.comeback ?? 'normal';
+    this.buildDelayMs = (ctx.room.settings.buildDelay ?? 1) * 1000; // pause after each wall piece (the server enforces it too)
+    this.lastPieceAt = -1e9;
+    this.roomLoss = []; // slots that lost a life at the start of this round (no room for a cannon)
     this.hatch = null; //   lazily created pattern for other players' protected zones
     this.names = new Map(ctx.room.players.filter((p) => p.slot >= 0).map((p) => [p.slot, p.name]));
     this.sfx = new Sfx();
@@ -94,13 +115,14 @@ class RampartsView {
     this.timeEl = el('span', { class: 'rp-time' });
     this.roundEl = el('span', { class: 'rp-round' });
     this.muteBtn = el('button', { class: 'rp-mute', type: 'button', onclick: this.#toggleMute });
-    this.head = el('div', { class: 'rp-head' }, this.chips, el('div', { class: 'rp-clock' }, this.phaseName, this.timeEl), el('div', { class: 'rp-side' }, this.roundEl, this.muteBtn));
+    this.head = el('div', { class: 'rp-head' }, el('div', { class: 'rp-clock' }, this.phaseName, this.timeEl), this.chips, el('div', { class: 'rp-side' }, this.roundEl, this.muteBtn));
     this.canvas = el('canvas', { class: 'rp-canvas' });
     this.banner = el('div', { class: 'rp-banner' });
     this.toasts = el('div', { class: 'rp-toasts' });
     this.stage = el('div', { class: 'rp-stage' }, this.canvas, this.banner, this.toasts);
     this.hint = el('div', { class: 'rp-hint' });
     this.root = el('div', { class: 'rp-root' }, this.head, this.stage, this.hint);
+    ctx.container.style.position = 'relative'; // the root fills the container exactly, so its size never depends on ours
     ctx.container.append(this.root);
     this.g = this.canvas.getContext('2d');
     this.terrainCanvas = document.createElement('canvas');
@@ -110,13 +132,16 @@ class RampartsView {
 
     this.observer = new ResizeObserver(() => this.#resize());
     this.observer.observe(ctx.container);
+    this.observer.observe(this.head); // the player strip can wrap onto a second line: the board then shrinks to fit
     this.#resize();
 
-    this.canvas.addEventListener('pointerdown', this.#onDown);
-    this.canvas.addEventListener('contextmenu', this.#onContext);
-    this.canvas.addEventListener('wheel', this.#onWheel, { passive: false });
-    this.canvas.addEventListener('auxclick', this.#onContext);
-    this.canvas.addEventListener('mousedown', this.#onMouseDown);
+    // Listen on the whole view, not just the canvas: a click on the hint line under the board still counts
+    // (it is aimed at the nearest point of the board), so text never swallows a shot.
+    this.root.addEventListener('pointerdown', this.#onDown);
+    this.root.addEventListener('contextmenu', this.#onContext);
+    this.root.addEventListener('wheel', this.#onWheel, { passive: false });
+    this.root.addEventListener('auxclick', this.#onContext);
+    this.root.addEventListener('mousedown', this.#onMouseDown);
     window.addEventListener('pointermove', this.#onMove);
     window.addEventListener('pointerup', this.#onUp);
     window.addEventListener('pointercancel', this.#onUp);
@@ -135,18 +160,19 @@ class RampartsView {
     this.occ.fill(0);
     for (const c of this.cannons) for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) this.occ[(c.y + dy) * COLS + c.x + dx] = 1;
 
+    for (const ev of s.ev ?? []) this.#event(ev); // first, so the phase banner below can mention what just happened
     if (s.phase !== this.phase) {
       const first = this.phase === '';
       this.phase = s.phase;
       this.#setHint();
-      if (PHASE_NAME[s.phase] && s.phase !== 'result') this.#showBanner(PHASE_NAME[s.phase], s.phase === 'ready' ? `Round 1 of ${this.maxRounds}` : PHASE_SUB[s.phase] ?? '');
+      this.#phaseBanner(s);
       if (!first && s.phase !== 'ready') this.sfx.play('phase');
+      this.roomLoss = [];
     }
     if (!this.spectating && s.pi && s.pi[this.me] !== this.lastPi) { // a new piece: start unrotated
       this.lastPi = s.pi[this.me];
       this.rot = 0;
     }
-    for (const ev of s.ev ?? []) this.#event(ev);
     this.#updateHud(s);
   }
 
@@ -155,18 +181,28 @@ class RampartsView {
     this.holding = false;
     this.canvas.style.cursor = 'default';
     const order = [0, 1, 2, 3].filter((slot) => result.scores?.[slot] !== undefined && this.#isSeat(slot)).sort((a, b) => (result.winner === a ? -1 : result.winner === b ? 1 : result.scores[b] - result.scores[a]));
-    const title = result.reason === 'abandoned' ? 'Match ended' : result.winner >= 0 ? `${this.#name(result.winner)} wins!` : 'Match ended';
-    const why = { last: 'Last castle standing', rounds: 'Most points after the final round', 'humans-out': 'All human players are out', abandoned: 'Everyone left' }[result.reason] ?? '';
+    const won = result.winner >= 0 && result.winner === this.me;
+    const title = result.reason === 'abandoned' ? 'Match over' : won ? 'You win!' : result.winner >= 0 ? `${this.#name(result.winner, false)} wins!` : 'Match over';
+    const why = { last: 'Last castle standing', rounds: `Most points after ${result.rounds ?? this.maxRounds} rounds`, 'humans-out': 'All human players are out', abandoned: 'Everyone left' }[result.reason] ?? '';
+    clearTimeout(this.bannerTimer);
+    this.banner.className = 'rp-banner rp-show rp-final-show';
+    this.banner.style.removeProperty('--rp-ms');
+    if (result.winner >= 0) this.banner.style.setProperty('--c', COLORS[result.winner]);
     this.banner.replaceChildren(
+      el('div', { class: 'rp-banner-kicker' }, 'Game over'),
       el('div', { class: 'rp-banner-title' }, title),
       el('div', { class: 'rp-banner-sub' }, why),
-      el('div', { class: 'rp-final' }, ...order.map((slot) => el('div', { class: 'rp-final-row' }, el('i', { style: `background:${COLORS[slot]}` }), el('span', {}, this.#name(slot)), el('b', {}, String(result.scores[slot])), el('em', {}, result.alive?.[slot] ? 'standing' : 'out')))),
+      el('div', { class: 'rp-final' }, ...order.map((slot, n) => el('div', { class: `rp-final-row${slot === result.winner ? ' rp-final-win' : ''}`, style: `--c:${COLORS[slot]};--cl:${PAL[slot].light}` },
+        el('span', { class: 'rp-final-pos' }, `${n + 1}.`),
+        el('span', { class: 'rp-final-name' }, this.#name(slot)),
+        el('b', {}, String(result.scores[slot])),
+        el('em', {}, result.alive?.[slot] ? 'standing' : 'out')))),
     );
-    this.banner.classList.add('rp-show', 'rp-final-show');
     this.hint.textContent = 'Match over. Use "Back to setup" above to play again.';
   }
 
   dispose() {
+    this.disposed = true;
     cancelAnimationFrame(this.raf);
     this.observer.disconnect();
     for (const t of this.timers) clearTimeout(t);
@@ -176,11 +212,11 @@ class RampartsView {
     window.removeEventListener('pointercancel', this.#onUp);
     window.removeEventListener('blur', this.#onUp);
     window.removeEventListener('keydown', this.#onKey);
-    this.canvas.removeEventListener('pointerdown', this.#onDown);
-    this.canvas.removeEventListener('contextmenu', this.#onContext);
-    this.canvas.removeEventListener('auxclick', this.#onContext);
-    this.canvas.removeEventListener('mousedown', this.#onMouseDown);
-    this.canvas.removeEventListener('wheel', this.#onWheel);
+    this.root.removeEventListener('pointerdown', this.#onDown);
+    this.root.removeEventListener('contextmenu', this.#onContext);
+    this.root.removeEventListener('auxclick', this.#onContext);
+    this.root.removeEventListener('mousedown', this.#onMouseDown);
+    this.root.removeEventListener('wheel', this.#onWheel);
     this.sfx.dispose();
     this.root.remove();
   }
@@ -188,9 +224,9 @@ class RampartsView {
   // ── helpers ──
   #isSeat(slot) { return this.snap ? this.snap.active[slot] : true; }
 
-  #name(slot) {
+  #name(slot, you = true) {
     const n = this.names.get(slot) ?? `Bot ${slot + 1}`;
-    return slot === this.me ? `${n} (you)` : n;
+    return you && slot === this.me ? `${n} (you)` : n;
   }
 
   #alive() { return !this.spectating && !this.ended && this.snap?.alive[this.me]; }
@@ -200,16 +236,114 @@ class RampartsView {
     this.timers.add(t);
   }
 
-  #showBanner(title, sub) {
-    this.banner.classList.remove('rp-final-show');
-    this.banner.replaceChildren(el('div', { class: 'rp-banner-title' }, title), el('div', { class: 'rp-banner-sub' }, sub));
-    this.banner.classList.remove('rp-show');
+  /**
+   * Big centred message over the board. It never takes clicks (pointer-events: none), so you can keep playing under it.
+   * @param {{kicker?: string, title: string, sub?: string, subClass?: string, lines?: Node[], ms?: number, color?: string}} b
+   */
+  #showBanner({ kicker, title, sub, subClass, lines, ms = BANNER_MS, color }) {
+    if (this.ended) return;
+    this.banner.className = 'rp-banner';
+    this.banner.style.setProperty('--rp-ms', `${ms}ms`);
+    this.banner.style.setProperty('--c', color ?? '#e2e8f0');
+    this.banner.replaceChildren(
+      ...(kicker ? [el('div', { class: 'rp-banner-kicker' }, kicker)] : []),
+      el('div', { class: 'rp-banner-title' }, title),
+      ...(sub ? [el('div', { class: `rp-banner-sub${subClass ? ` ${subClass}` : ''}` }, sub)] : []),
+      ...(lines?.length ? [el('div', { class: 'rp-banner-lines' }, ...lines)] : []),
+    );
     void this.banner.offsetWidth; // restart the CSS animation
     this.banner.classList.add('rp-show');
     clearTimeout(this.bannerTimer);
     this.timers.delete(this.bannerTimer);
-    this.bannerTimer = setTimeout(() => { this.timers.delete(this.bannerTimer); if (!this.ended) this.banner.classList.remove('rp-show'); }, BANNER_MS);
+    this.bannerTimer = setTimeout(() => { this.timers.delete(this.bannerTimer); if (!this.ended) this.banner.classList.remove('rp-show'); }, ms);
     this.timers.add(this.bannerTimer);
+  }
+
+  #line(text, cls = '', color) {
+    return el('div', { class: `rp-line ${cls}`.trim(), ...(color ? { style: `--c:${color}` } : {}) }, text);
+  }
+
+  /** The big message for each phase: what just happened and what to do now. */
+  #phaseBanner(s) {
+    const me = this.me;
+    const playing = !this.spectating && s.alive[me];
+    const col = playing ? COLORS[me] : undefined;
+    const lines = [];
+    switch (s.phase) {
+      case 'ready':
+        this.#showBanner({
+          kicker: `${this.maxRounds} rounds · ${this.maxLives} ${this.maxLives === 1 ? 'life' : 'lives'}`, title: 'Get ready', color: col,
+          sub: 'Every round has three steps:',
+          lines: [
+            this.#line('1  Place cannons inside your walls'),
+            this.#line('2  Battle: shoot the other castles\' walls and cannons'),
+            this.#line('3  Rebuild: close your walls again, or lose a life'),
+          ],
+          ms: 3000,
+        });
+        break;
+      case 'place': {
+        for (const o of this.roomLoss) {
+          lines.push(o === me
+            ? this.#line('You had no room for a new cannon: you lost a life and your castle was rebuilt', 'rp-bad')
+            : this.#line(`${this.#name(o)} had no room for a cannon and lost a life`, 'rp-who', COLORS[o]));
+        }
+        if (playing) {
+          const n = s.allow[me];
+          lines.unshift(this.#line(n > 0 ? `You get ${n} new cannon${n === 1 ? '' : 's'}: click inside your walls to set ${n === 1 ? 'it' : 'them'} down` : 'No new cannons for you this round', n > 0 ? '' : 'rp-muted'));
+        }
+        this.#showBanner({ kicker: `Round ${s.round} of ${this.maxRounds}`, title: 'Place cannons', sub: 'Only cannons inside a closed wall can fire', lines, color: col });
+        break;
+      }
+      case 'battle': {
+        if (playing) {
+          const active = this.cannons.filter((c) => c.slot === me && c.act).length;
+          lines.push(active
+            ? this.#line(`${active} of your cannons can fire. Hold the button to keep shooting.`)
+            : this.#line('None of your cannons is inside your walls: you cannot fire this round', 'rp-bad'));
+        }
+        if (s.ld >= 0 && this.comeback !== 'off' && s.ld !== me) lines.push(this.#line(`👑 ${this.#name(s.ld)} is in the lead: hits on them score ×${BOUNTY[this.comeback]}`, 'rp-who', COLORS[s.ld]));
+        this.#showBanner({ kicker: `Round ${s.round}`, title: 'Battle!', sub: 'Aim and click to break their walls and cannons', lines, color: col });
+        break;
+      }
+      case 'build': {
+        if (playing) {
+          const closed = KEEPS.some((k, i) => s.ko[i] === me && this.terrOwner[k.y * COLS + k.x] === me);
+          lines.push(closed
+            ? this.#line('Your castle is still closed. Repair it, or wall in another castle to claim it.')
+            : this.#line('Your castle is open! Close the gap or lose a life.', 'rp-bad'));
+          lines.push(this.#line('Right click or scroll to rotate a piece', 'rp-muted'));
+        }
+        this.#showBanner({ kicker: `Round ${s.round}`, title: 'Rebuild!', sub: `Close a ring of walls around a castle within ${this.buildTime} seconds`, lines, color: col });
+        break;
+      }
+      case 'result': {
+        const sum = s.sum;
+        const lostMe = sum?.l.includes(me) && !this.spectating;
+        if (sum) {
+          for (let slot = 0; slot < 4; slot++) {
+            if (!s.active[slot]) continue;
+            const bits = [];
+            if (sum.l.includes(slot)) bits.push(s.alive[slot] ? 'lost a life' : 'lost their last life: out!');
+            if (sum.c[slot]) bits.push(`claimed ${sum.c[slot] === 1 ? 'a castle' : `${sum.c[slot]} castles`}`);
+            if (!s.alive[slot] && !sum.l.includes(slot)) bits.push('out');
+            const g = sum.g[slot];
+            lines.push(el('div', { class: 'rp-line rp-sum', style: `--c:${COLORS[slot]};--cl:${PAL[slot].light}` },
+              el('span', { class: 'rp-sum-name' }, this.#name(slot)),
+              el('b', {}, g > 0 ? `+${g}` : String(g)),
+              el('em', { class: sum.l.includes(slot) ? 'rp-bad' : '' }, bits.join(' · '))));
+          }
+        }
+        this.#showBanner({
+          kicker: s.over ? 'Final result coming up' : `Round ${s.round} of ${this.maxRounds}`,
+          title: s.over ? 'Match over' : 'Round over',
+          sub: lostMe ? (s.alive[me] ? 'You lost a life: no castle of yours was enclosed' : 'You are out of the match') : (s.over ? '' : 'Points this round'),
+          subClass: lostMe ? 'rp-bad' : '',
+          lines, ms: 3400, color: col,
+        });
+        break;
+      }
+    }
   }
 
   #toast(text, color) {
@@ -227,7 +361,7 @@ class RampartsView {
       t = {
         ready: 'Get ready. The mouse does everything.',
         place: 'Move the mouse and click to set a cannon inside your walls. Cannons outside the walls cannot fire.',
-        battle: 'Aim with the mouse, click to fire (hold to keep firing). One broken wall tile opens a castle. Keep yours closed.',
+        battle: 'Aim and click to fire (hold to keep firing). One broken wall tile opens a castle.',
         build: `Click to place wall pieces. Right click or scroll rotates.${{ any: ' Middle click or X throws a piece away.', stuck: ' Middle click or X throws a piece away if it fits nowhere.', never: '' }[this.discardMode] ?? ''} You cannot build in another player's castle.`,
         result: 'Round over.',
       }[this.phase] ?? '';
@@ -235,16 +369,28 @@ class RampartsView {
     this.hint.textContent = t;
   }
 
+  /**
+   * Fits the whole view (player strip + board + hint) inside the container, whatever its size: the board keeps its
+   * aspect ratio and takes whatever room the strip and hint leave. Runs on container resize (window, fullscreen)
+   * and when the player strip changes height.
+   */
   #resize() {
     const host = this.ctx.container;
-    const w = host.clientWidth || ARENA_W;
-    const h = host.clientHeight || ARENA_H + HEADER_H + FOOTER_H;
-    const scale = Math.max(0.2, Math.min((w - 4) / ARENA_W, (h - HEADER_H - FOOTER_H - 4) / ARENA_H));
-    const cw = Math.floor(ARENA_W * scale);
-    const ch = Math.floor(ARENA_H * scale);
-    this.root.style.width = `${cw}px`;
+    const w = host.clientWidth;
+    const h = host.clientHeight;
+    if (!w || !h) return;
+    const font = clamp(Math.min(w / 58, h / 36), 10, 18);
+    this.root.style.fontSize = `${font}px`;
+    const used = this.head.offsetHeight + this.hint.offsetHeight + 4;
+    const scale = Math.max(0.05, Math.min((w - 4) / ARENA_W, (h - used) / ARENA_H));
+    const cw = Math.max(40, Math.floor(ARENA_W * scale));
+    const ch = Math.max(28, Math.floor(ARENA_H * scale));
+    if (cw === this.cw && ch === this.ch && this.canvas.width) return; // nothing changed (e.g. only the strip re-rendered)
+    this.cw = cw;
+    this.ch = ch;
     this.stage.style.width = `${cw}px`;
     this.stage.style.height = `${ch}px`;
+    this.stage.style.fontSize = `${clamp(cw / 50, 9, 18)}px`; // banners scale with the board
     const dpr = window.devicePixelRatio || 1;
     this.canvas.width = Math.round(cw * dpr);
     this.canvas.height = Math.round(ch * dpr);
@@ -252,7 +398,6 @@ class RampartsView {
     for (const c of [this.terrainCanvas, this.layerCanvas]) { c.width = this.canvas.width; c.height = this.canvas.height; }
     this.#drawTerrain();
     this.layerDirty = true;
-    this.root.style.fontSize = `${clamp(cw / 62, 11, 17)}px`;
   }
 
   #parseGrid(str) {
@@ -270,22 +415,31 @@ class RampartsView {
     this.layerDirty = true;
   }
 
-  /** The pointer in arena units, or null while it is not over the board. */
-  #pointer(e) {
+  /** The pointer in arena units (may be outside the board). With `snap`, pulled onto the nearest point of the board. */
+  #pointer(e, snap = false) {
     const r = this.canvas.getBoundingClientRect();
     if (!r.width) return null;
-    return { x: ((e.clientX - r.left) / r.width) * ARENA_W, y: ((e.clientY - r.top) / r.height) * ARENA_H };
+    let x = ((e.clientX - r.left) / r.width) * ARENA_W;
+    let y = ((e.clientY - r.top) / r.height) * ARENA_H;
+    if (snap) { x = clamp(x, 0.5, ARENA_W - 0.5); y = clamp(y, 0.5, ARENA_H - 0.5); }
+    return { x, y };
+  }
+
+  /** Over the hint line or the margin around the board (not the player strip)? Then it acts as the board's edge. */
+  #overSurround(e) {
+    return e.target instanceof Node && this.root.contains(e.target) && !this.head.contains(e.target);
   }
 
   // ── input (all mouse) ──
   #onMove = (e) => {
-    const p = this.#pointer(e);
+    const p = this.#pointer(e, this.#overSurround(e) && e.target !== this.canvas);
     if (p) { this.mx = p.x; this.my = p.y; }
   };
 
   #onDown = (e) => {
     this.sfx.unlock();
-    const p = this.#pointer(e);
+    if (this.head.contains(e.target)) return; // mute button, player strip: not a game click
+    const p = this.#pointer(e, true);
     if (!p) return;
     this.mx = p.x;
     this.my = p.y;
@@ -311,7 +465,7 @@ class RampartsView {
   #onMouseDown = (e) => { if (e.button === 1) e.preventDefault(); }; // no middle-click autoscroll
 
   #onWheel = (e) => {
-    if (this.phase !== 'build' || !this.#alive()) return;
+    if (this.phase !== 'build' || !this.#alive() || this.head.contains(e.target)) return;
     e.preventDefault();
     this.#rotate(e.deltaY > 0 ? 1 : -1);
   };
@@ -395,9 +549,13 @@ class RampartsView {
     this.ctx.sendInput({ c: [x, y] });
   }
 
+  #pieceCooling(now = performance.now()) { return now - this.lastPieceAt < this.buildDelayMs; }
+
   #clickPiece() {
+    if (this.#pieceCooling()) return; // short pause after each piece: clicks in it are ignored (the server checks too)
     const spot = this.#pieceSpot();
     if (!spot || !this.#pieceOk(spot)) { this.sfx.play('deny'); return; }
+    this.lastPieceAt = performance.now();
     this.ctx.sendInput({ p: [spot.x, spot.y, this.rot] });
   }
 
@@ -458,13 +616,12 @@ class RampartsView {
         this.rings.push({ x: ev.x, y: ev.y, t0: performance.now(), color: COLORS[ev.o], r1: 34, ms: 380 });
         this.#dust(ev.x, ev.y, 8);
         break;
-      case 'l':
+      case 'l': // shown in the big round banner (see #phaseBanner)
         this.sfx.play('life');
-        this.#toast(`${this.#name(ev.o)} ${ev.r === 'room' ? 'had no room for a cannon' : 'could not close a castle'} and lost a life`, COLORS[ev.o]);
-        if (ev.o === this.me) this.#showBanner('Lost a life', ev.r === 'room' ? 'No room left in your castle for a new cannon' : 'Your walls did not enclose a castle');
+        if (ev.r === 'room') this.roomLoss.push(ev.o);
         break;
       case 'kc':
-        if (ev.o >= 0) { this.sfx.play('claim'); this.#toast(`${this.#name(ev.o)} claimed a castle`, COLORS[ev.o]); }
+        if (ev.o >= 0) this.sfx.play('claim');
         break;
       case 'x':
         this.#toast(`${this.#name(ev.o)} is out of the match`, COLORS[ev.o]);
@@ -509,7 +666,8 @@ class RampartsView {
     this.timeEl.classList.toggle('rp-urgent', s.phase !== 'ready' && s.phase !== 'result' && s.timer <= 5 && !s.cease);
     this.phaseName.textContent = s.cease && s.phase === 'battle' ? 'Cease fire' : PHASE_NAME[s.phase] ?? '';
     this.roundEl.textContent = s.round ? `Round ${s.round}/${this.maxRounds}` : '';
-    const key = JSON.stringify([s.active, s.alive, s.lives, s.score, s.allow, s.tc, s.ko, s.phase, this.cannons.map((c) => c.slot + ':' + (c.act ? 1 : 0))]);
+    const leader = s.ld ?? leaderOf(s.score, s.alive);
+    const key = JSON.stringify([s.active, s.alive, s.lives, s.score, s.allow, s.ko, s.phase, leader, this.cannons.map((c) => c.slot + ':' + (c.act ? 1 : 0))]);
     if (key === this.chipKey) return;
     this.chipKey = key;
     const rows = [];
@@ -518,13 +676,22 @@ class RampartsView {
       const owned = this.cannons.filter((c) => c.slot === slot).length;
       const castles = s.ko.filter((o) => o === slot).length;
       const extra = s.phase === 'place' && s.allow[slot] > 0 ? ` +${s.allow[slot]}` : '';
-      rows.push(el('div', { class: `rp-chip${s.alive[slot] ? '' : ' rp-out'}${slot === this.me ? ' rp-me' : ''}`, style: `--c:${COLORS[slot]}` },
-        el('i', {}),
-        el('span', { class: 'rp-chip-name' }, this.#name(slot)),
-        el('span', { class: 'rp-chip-lives', title: 'Lives' }, '♥'.repeat(Math.max(0, s.lives[slot])) || '✕'),
-        el('span', { class: 'rp-chip-stat', title: 'Castles held' }, `♜${castles}`),
-        el('span', { class: 'rp-chip-stat', title: 'Cannons (and new ones to place)' }, `◉${owned}${extra}`),
-        el('b', { title: 'Score' }, String(s.score[slot])),
+      const lives = Math.max(0, s.lives[slot]);
+      const hearts = el('span', { class: 'rp-chip-lives', title: `${lives} of ${this.maxLives} lives` },
+        el('span', {}, '♥'.repeat(lives)), el('span', { class: 'rp-lost' }, '♥'.repeat(Math.max(0, this.maxLives - lives))));
+      const lead = slot === leader && s.alive[slot];
+      rows.push(el('div', {
+        class: `rp-chip${s.alive[slot] ? '' : ' rp-out'}${slot === this.me ? ' rp-me' : ''}${lead ? ' rp-lead' : ''}`,
+        style: `--c:${COLORS[slot]};--cl:${PAL[slot].light}`,
+        title: lead && this.comeback !== 'off' ? `In the lead: hits on this player score ×${BOUNTY[this.comeback]}` : '',
+      },
+        el('div', { class: 'rp-chip-top' },
+          el('span', { class: 'rp-chip-name' }, `${lead ? '👑 ' : ''}${this.#name(slot)}`),
+          el('b', { class: 'rp-chip-score', title: 'Score' }, String(s.score[slot]))),
+        el('div', { class: 'rp-chip-bottom' },
+          s.alive[slot] ? hearts : el('span', { class: 'rp-chip-outtxt' }, 'OUT'),
+          el('span', { class: 'rp-chip-stat', title: 'Castles held' }, `♜ ${castles}`),
+          el('span', { class: 'rp-chip-stat', title: 'Cannons (and new ones to place)' }, `◉ ${owned}${extra}`)),
       ));
     }
     this.chips.replaceChildren(...rows);
@@ -688,7 +855,7 @@ class RampartsView {
   #drawPops(g, now) {
     this.pops = this.pops.filter((p) => now - p.t0 < 320);
     for (const p of this.pops) {
-      const a = 1 - (now - p.t0) / 320;
+      const a = clamp(1 - (now - p.t0) / 320, 0, 1);
       g.fillStyle = `rgba(255,255,255,${0.55 * a})`;
       g.fillRect((p.i % COLS) * TILE, ((p.i / COLS) | 0) * TILE, TILE, TILE);
     }
@@ -850,7 +1017,7 @@ class RampartsView {
   #drawRings(g, now) {
     this.rings = this.rings.filter((r) => now - r.t0 < r.ms);
     for (const r of this.rings) {
-      const a = (now - r.t0) / r.ms;
+      const a = clamp((now - r.t0) / r.ms, 0, 1); // the frame time can be a little older than the event that made the ring
       g.strokeStyle = rgba(r.color.length === 7 ? r.color : '#ffffff', 1 - a);
       g.lineWidth = 2.5 * (1 - a) + 0.5;
       g.beginPath(); g.arc(r.x, r.y, 4 + r.r1 * a, 0, Math.PI * 2); g.stroke();
@@ -895,6 +1062,7 @@ class RampartsView {
       const spot = this.#pieceSpot();
       if (!spot) return;
       const ok = this.#pieceOk(spot);
+      g.globalAlpha = this.#pieceCooling(now) ? 0.35 : 1; // faded while the anti-spam pause runs
       for (const [cx, cy] of spot.cells) {
         const px = (spot.x + cx) * TILE;
         const py = (spot.y + cy) * TILE;
@@ -905,6 +1073,7 @@ class RampartsView {
         g.strokeRect(px + 0.75, py + 0.75, TILE - 1.5, TILE - 1.5);
         if (!ok) this.#cross(g, px + TILE / 2, py + TILE / 2, 4);
       }
+      g.globalAlpha = 1;
     } else if (this.phase === 'battle' && !s.cease) {
       const ready = this.cannons.filter((c) => c.slot === this.me && c.act && c.ready >= 1);
       const anyAct = this.cannons.some((c) => c.slot === this.me && c.act);

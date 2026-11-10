@@ -8,6 +8,23 @@
 // Walls can only go on open ground, and never inside another player's castle zone or enclosed territory.
 // You lose a life if no castle of yours is enclosed when the build phase ends, or if you are owed new cannons
 // but your territory has no room for even one.
+// Comeback help (setting): the current points leader is worth more to hit, trailing players get extra cannons.
+
+/**
+ * The points leader: the living player with the highest score, if that score is strictly higher than everyone else's
+ * and above zero. -1 when nobody is clearly ahead. Used by the server (comeback rules) and the client (crown, bounty).
+ */
+export function leaderOf(score, alive) {
+  let best = -1;
+  let tie = false;
+  for (let s = 0; s < score.length; s++) {
+    if (!alive[s]) continue;
+    if (best < 0 || score[s] > score[best]) { best = s; tie = false; } else if (score[s] === score[best]) tie = true;
+  }
+  return best >= 0 && !tie && score[best] > 0 ? best : -1;
+}
+/** Points multiplier for hitting the leader's walls and cannons, per comeback setting. */
+export const BOUNTY = { off: 1, normal: 2, strong: 3 };
 
 // ── meta ──
 /** @type {import('../../shared/settings.js').GameMeta} */
@@ -22,41 +39,52 @@ export const meta = {
   tickRate: 30,
   soloSettings: {}, // Play solo = you + bots in the other seats
   settingGroups: [
-    { id: 'match', label: 'Match' },
-    { id: 'timing', label: 'Phase timers' },
+    // Keep field labels short: the setup form puts them in a narrow column. Explanations go in the group descriptions.
+    { id: 'match', label: 'Match', description: 'You lose a life when no castle of yours is enclosed after the build phase. When the rounds run out, the best score wins.' },
+    { id: 'comeback', label: 'Comeback help', description: 'Keeps the leader from running away with it. Normal: hits on the leader score ×2, players behind get +1 cannon, bots often target the leader. Strong: ×3, players far behind get +2 cannons, bots gang up on the leader.' },
+    { id: 'timing', label: 'Phase timers', description: 'In seconds.' },
     { id: 'battle', label: 'Cannons & battle' },
-    { id: 'building', label: 'Wall building' },
-    { id: 'castles', label: 'Castles & cannon rewards', collapsed: true },
+    { id: 'building', label: 'Wall building', description: 'Discarding throws your current piece away (1 second cooldown). Pause between pieces stops click spamming.' },
+    { id: 'castles', label: 'Castles & cannon rewards', description: 'New cannons you get each round, per castle you hold.', collapsed: true },
   ],
   settings: [
     // Match
-    { type: 'number', key: 'lives', label: 'Lives (lost when no castle is enclosed after the build phase)', min: 1, max: 5, step: 1, default: 3, group: 'match' },
-    { type: 'number', key: 'maxRounds', label: 'Max rounds (the best score wins when they run out)', min: 3, max: 20, step: 1, default: 8, group: 'match' },
+    { type: 'number', key: 'lives', label: 'Lives', min: 1, max: 5, step: 1, default: 3, group: 'match' },
+    { type: 'number', key: 'maxRounds', label: 'Max rounds', min: 3, max: 20, step: 1, default: 8, group: 'match' },
     {
       type: 'select', key: 'botSkill', label: 'Bot skill', default: 'normal', group: 'match',
       options: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }],
     },
+    {
+      type: 'select', key: 'comeback', label: 'Comeback help', default: 'normal', group: 'comeback',
+      options: [
+        { value: 'off', label: 'Off' },
+        { value: 'normal', label: 'Normal' },
+        { value: 'strong', label: 'Strong' },
+      ],
+    },
     // Timing
-    { type: 'number', key: 'placeTime', label: 'Seconds to place cannons', min: 5, max: 30, step: 1, default: 12, group: 'timing' },
-    { type: 'number', key: 'battleTime', label: 'Seconds of battle', min: 8, max: 40, step: 1, default: 18, group: 'timing' },
-    { type: 'number', key: 'buildTime', label: 'Seconds to rebuild walls', min: 10, max: 60, step: 1, default: 25, group: 'timing' },
+    { type: 'number', key: 'placeTime', label: 'Place cannons', min: 5, max: 30, step: 1, default: 12, group: 'timing' },
+    { type: 'number', key: 'battleTime', label: 'Battle', min: 8, max: 40, step: 1, default: 18, group: 'timing' },
+    { type: 'number', key: 'buildTime', label: 'Rebuild walls', min: 10, max: 60, step: 1, default: 25, group: 'timing' },
     // Battle
-    { type: 'number', key: 'reload', label: 'Cannon reload time (seconds)', min: 0.8, max: 6, step: 0.1, default: 2.4, group: 'battle' },
-    { type: 'number', key: 'ballSpeed', label: 'Cannonball speed (pixels per second)', min: 200, max: 900, step: 10, default: 420, group: 'battle' },
-    { type: 'number', key: 'cannonHp', label: 'Hits a cannon survives (1 = destroyed by one hit)', min: 1, max: 4, step: 1, default: 2, group: 'battle' },
+    { type: 'number', key: 'reload', label: 'Reload (seconds)', min: 0.8, max: 6, step: 0.1, default: 2.4, group: 'battle' },
+    { type: 'number', key: 'ballSpeed', label: 'Cannonball speed', min: 200, max: 900, step: 10, default: 420, group: 'battle' },
+    { type: 'number', key: 'cannonHp', label: 'Cannon hit points', min: 1, max: 4, step: 1, default: 2, group: 'battle' },
     // Wall building
     {
-      type: 'select', key: 'discard', label: 'Throwing away a wall piece ("block cancelling")', default: 'any', group: 'building',
+      type: 'select', key: 'discard', label: 'Discard pieces', default: 'any', group: 'building',
       options: [
-        { value: 'any', label: 'Any time (1 second cooldown)' },
-        { value: 'stuck', label: 'Only when it fits nowhere' },
+        { value: 'any', label: 'Any time' },
+        { value: 'stuck', label: 'Only when stuck' },
         { value: 'never', label: 'Never' },
       ],
     },
+    { type: 'number', key: 'buildDelay', label: 'Pause between pieces (s)', min: 0, max: 3, step: 0.05, default: 1, group: 'building' },
     // Castles
-    { type: 'number', key: 'cannonsHome', label: 'New cannons per round for your home castle', min: 1, max: 4, step: 1, default: 2, group: 'castles' },
-    { type: 'number', key: 'cannonsPerKeep', label: 'New cannons per round for each other castle you hold', min: 0, max: 3, step: 1, default: 1, group: 'castles' },
-    { type: 'number', key: 'maxCannons', label: 'Most cannons one player can own', min: 4, max: 20, step: 1, default: 12, group: 'castles' },
+    { type: 'number', key: 'cannonsHome', label: 'Home castle', min: 1, max: 4, step: 1, default: 2, group: 'castles' },
+    { type: 'number', key: 'cannonsPerKeep', label: 'Each other castle', min: 0, max: 3, step: 1, default: 1, group: 'castles' },
+    { type: 'number', key: 'maxCannons', label: 'Max cannons each', min: 4, max: 20, step: 1, default: 12, group: 'castles' },
   ],
 };
 

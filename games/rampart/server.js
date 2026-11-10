@@ -1,6 +1,6 @@
 import {
   COLS, ROWS, TILE, N, ARENA_W, ARENA_H, HIT_R, TERRAIN, KEEPS, KEEP_AT, RING_TILES, ringRect, isRingCorner,
-  PIECES, PIECE_WEIGHTS, pieceCells, idx, inb, inForeignZone, meta,
+  PIECES, PIECE_WEIGHTS, pieceCells, idx, inb, inForeignZone, leaderOf, BOUNTY, meta,
 } from './shared.js';
 
 const SLOTS = [0, 1, 2, 3];
@@ -8,6 +8,8 @@ const READY_TIME = 3;
 const RESULT_TIME = 3.5;
 const MAX_FLIGHT_WAIT = 3; //   s: after the battle timer ends, wait this long at most for balls in the air
 const SKIP_COOLDOWN = 1; //     s between discarded pieces
+const BUILD_SLACK = 0.04; //    s: the server's piece cooldown is this much shorter than the setting, so network jitter
+//                               never rejects a click the client (which waits the full delay) thought was allowed
 const SEQ_LEN = 400;
 const MIN_CANNONS = 2; //       a player holding a castle is always topped up to this many cannons
 const SCORE_WALL = 5;
@@ -44,6 +46,9 @@ class RampartsGame {
     this.allow = [0, 0, 0, 0]; //       cannons still to place this round
     this.pieceIdx = [0, 0, 0, 0]; //    position in the piece sequence
     this.skipCool = [0, 0, 0, 0];
+    this.buildCool = [0, 0, 0, 0]; //   pause after a wall piece (anti-spam)
+    this.roundStart = [0, 0, 0, 0]; //  scores when the round began (for the "round over" summary)
+    this.summary = null; //             { g: points gained, l: slots that lost a life, c: castles claimed } of the last round
     this.botState = [null, null, null, null];
 
     this.wall = new Int8Array(N).fill(-1); //  tile -> slot that owns the wall on it, or -1
@@ -130,7 +135,10 @@ class RampartsGame {
     if (this.finished) return;
     this.tick++;
     this.events = [];
-    for (const slot of SLOTS) this.skipCool[slot] = Math.max(0, this.skipCool[slot] - dt);
+    for (const slot of SLOTS) {
+      this.skipCool[slot] = Math.max(0, this.skipCool[slot] - dt);
+      this.buildCool[slot] = Math.max(0, this.buildCool[slot] - dt);
+    }
     switch (this.phase) {
       case 'ready':
         this.timer -= dt;
@@ -188,9 +196,12 @@ class RampartsGame {
       bots: [...this.bot],
       tc: [...this.terrCount],
       pi: [...this.pieceIdx],
+      ld: leaderOf(this.score, this.alive),
+      over: this.final ? 1 : 0,
       pq: SLOTS.map((s) => (this.phase === 'build' && this.alive[s] ? [this.#pieceAt(this.pieceIdx[s]), this.#pieceAt(this.pieceIdx[s] + 1), this.#pieceAt(this.pieceIdx[s] + 2)] : [])),
       ev: this.events.slice(0, 60),
     };
+    if (this.phase === 'result' && this.summary) snap.sum = this.summary;
     if (this.gridDirty || this.tick % 30 === 0) { // the wall / territory map is big: only sent when it changed (and once a second for late joiners)
       snap.grid = this.#gridString();
       this.gridDirty = false;
@@ -203,6 +214,9 @@ class RampartsGame {
     this.round++;
     this.phase = 'place';
     this.timer = this.s.placeTime;
+    this.roundStart = [...this.score];
+    this.summary = null;
+    const leader = leaderOf(this.score, this.alive);
     for (const slot of SLOTS) {
       this.allow[slot] = 0;
       if (!this.alive[slot]) continue;
@@ -211,6 +225,7 @@ class RampartsGame {
         if (this.keepOwner[i] === slot && this.terr[slot][k.y * COLS + k.x]) a += i === slot ? this.s.cannonsHome : this.s.cannonsPerKeep;
       });
       if (a > 0) a = Math.max(a, MIN_CANNONS - this.#cannonCount(slot)); // catch-up: a player who still holds a castle can always get back to 2 cannons
+      if (a > 0) a += this.#comebackCannons(slot, leader); // comeback: trailing players get extra cannons
       a = Math.min(a, this.s.maxCannons - this.#cannonCount(slot));
       if (a > 0 && !this.#hasCannonSpot(slot)) a = this.#noRoom(slot); // owed cannons but nowhere to put even one: lose a life
       this.allow[slot] = this.alive[slot] ? Math.max(0, a) : 0;
@@ -245,6 +260,14 @@ class RampartsGame {
     return Math.min(this.s.cannonsHome, this.s.maxCannons);
   }
 
+  /** Extra cannons for a player who trails the points leader (comeback setting). */
+  #comebackCannons(slot, leader) {
+    const mode = this.s.comeback;
+    if (mode === 'off' || leader < 0 || slot === leader || this.score[slot] >= this.score[leader]) return 0;
+    if (mode === 'strong' && this.score[slot] < this.score[leader] * 0.5) return 2;
+    return 1;
+  }
+
   #startBattle() {
     this.phase = 'battle';
     this.timer = this.s.battleTime;
@@ -267,12 +290,15 @@ class RampartsGame {
     this.#newSeq();
     this.pieceIdx = [0, 0, 0, 0];
     this.skipCool = [0, 0, 0, 0];
+    this.buildCool = [0, 0, 0, 0];
     for (const slot of SLOTS) { const bs = this.botState[slot]; if (bs) bs.t = rnd(0.6, 1.2); }
     this.events.push({ k: 'p', n: 'build' });
   }
 
   #finishBuild() {
     for (const slot of SLOTS) if (this.alive[slot]) this.#recomputeTerr(slot);
+    const claimed = [0, 0, 0, 0];
+    const lost = [];
     // 1. who holds which castle: the old owner keeps it while it stays enclosed, otherwise an enclosing player takes it
     KEEPS.forEach((k, i) => {
       const t = k.y * COLS + k.x;
@@ -281,6 +307,7 @@ class RampartsGame {
       if (old >= 0 && this.alive[old] && this.terr[old][t]) owner = old;
       else for (const s of SLOTS) if (this.alive[s] && this.terr[s][t]) { owner = s; break; }
       if (owner !== old) this.events.push({ k: 'kc', i, o: owner });
+      if (owner >= 0 && owner !== old) claimed[owner]++;
       this.keepOwner[i] = owner;
     });
     // 2. lives, scores
@@ -289,6 +316,7 @@ class RampartsGame {
       const held = this.keepOwner.filter((o) => o === slot).length;
       if (held === 0) {
         this.lives[slot]--;
+        lost.push(slot);
         this.events.push({ k: 'l', o: slot });
         if (this.lives[slot] <= 0) this.#eliminate(slot);
         else this.#resetHome(slot); // the castle gets a fresh ring of walls, like at the start of the game
@@ -296,6 +324,7 @@ class RampartsGame {
         this.score[slot] += this.terrCount[slot] + held * SCORE_KEEP;
       }
     }
+    this.summary = { g: SLOTS.map((s) => this.score[s] - this.roundStart[s]), l: lost, c: claimed };
     // 3. is the match over?
     const reason = this.#endReason(true);
     if (reason) this.final = this.#result(reason);
@@ -479,6 +508,8 @@ class RampartsGame {
     let walls = 0;
     let hurt = 0;
     let killed = 0;
+    const leader = leaderOf(this.score, this.alive); // comeback: hitting the leader pays more (never for the leader itself)
+    const bounty = (victim) => (victim === leader && owner !== leader ? BOUNTY[this.s.comeback] ?? 1 : 1);
     for (let ty = ty0; ty <= ty1; ty++) {
       for (let tx = tx0; tx <= tx1; tx++) {
         if (!inb(tx, ty)) continue;
@@ -491,14 +522,14 @@ class RampartsGame {
           this.wall[i] = -1;
           dirty.add(w);
           walls++;
-          this.score[owner] += SCORE_WALL;
+          this.score[owner] += SCORE_WALL * bounty(w);
         }
         const cid = this.occ[i];
         if (cid && !damaged.has(cid)) {
           const c = this.cannons.get(cid);
           if (c && c.slot !== owner) {
             damaged.add(cid);
-            if (--c.hp <= 0) { this.#removeCannon(c); killed++; this.score[owner] += SCORE_CANNON; }
+            if (--c.hp <= 0) { this.#removeCannon(c); killed++; this.score[owner] += SCORE_CANNON * bounty(c.slot); }
             else hurt++;
           }
         }
@@ -561,6 +592,7 @@ class RampartsGame {
   }
 
   #placePiece(slot, x, y, rot) {
+    if (this.buildCool[slot] > 0) return false; // anti-spam pause after the previous piece
     const cells = pieceCells(this.#pieceAt(this.pieceIdx[slot]), rot);
     const tiles = [];
     for (const [cx, cy] of cells) {
@@ -571,6 +603,7 @@ class RampartsGame {
     }
     for (const i of tiles) this.wall[i] = slot;
     this.pieceIdx[slot]++;
+    this.buildCool[slot] = Math.max(0, this.s.buildDelay - BUILD_SLACK);
     this.#recomputeTerr(slot);
     this.events.push({ k: 'w', o: slot, x: (x + 0.5) * TILE, y: (y + 0.5) * TILE, n: tiles.length });
     return true;
@@ -620,7 +653,10 @@ class RampartsGame {
     for (const c of this.cannons.values()) if (c.slot === slot && c.active && c.cd <= 0) { ready = true; break; }
     if (!ready) return;
     const enemies = SLOTS.filter((s) => s !== slot && this.alive[s]);
-    const enemy = enemies[Math.floor(Math.random() * enemies.length)];
+    let enemy = enemies[Math.floor(Math.random() * enemies.length)];
+    const leader = leaderOf(this.score, this.alive); // comeback: bots prefer to shoot at whoever is ahead
+    const focus = { off: 0, normal: 0.45, strong: 0.75 }[this.s.comeback] ?? 0;
+    if (leader >= 0 && leader !== slot && Math.random() < focus) enemy = leader;
     let tx = -1;
     let ty = -1;
     const cannons = [...this.cannons.values()].filter((c) => c.slot === enemy);
@@ -652,7 +688,7 @@ class RampartsGame {
   #botBuild(slot, dt) {
     const bs = this.botState[slot];
     bs.t -= dt;
-    if (bs.t > 0) return;
+    if (bs.t > 0 || this.buildCool[slot] > 0) return;
     const skill = SKILL[this.s.botSkill] ?? SKILL.normal;
     bs.t = skill.build * rnd(0.8, 1.2);
     const want = this.#botWant(slot, skill);
