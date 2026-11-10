@@ -180,6 +180,7 @@ export const models = {
 //                 grassDensity (default 1 = 9000 tufts sticking out of the lawn, one draw call) and grassWind (default 1) are optional
 //   bowlHeight  how high the bowl stands above the floor (the thickness of the table), default 4
 //   box     the plain table: { w, d, z, shader, radius, show } = width (x), depth (z), z of its centre, shader, corner radius (default 0 = square corners),
+//           fit: true = w / d / z come from the bowl: as wide as the bowl plus marginX on each side, from marginBack behind it to marginFront in front of it (default false, 30, 10, 15)
 //           show: false = no table at all, the bowl stands on the floor (default 110, 52, 2, floorwood, 0, true). Without a table w / d / z are only the free space where no grass grows
 //   table   optional: a model for the table top instead of the plain wooden box { model, scale, rotation, translate } (translate y = 0 is the floor)
 //   models  [{ model, scale, rotation: [x, y, z] in degrees, translate: [x, y, z] }]
