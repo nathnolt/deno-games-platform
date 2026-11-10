@@ -8,7 +8,7 @@
  * (wav, mp3, ogg, m4a and flac are all served). A file that is missing or can't be decoded falls back
  * to the synthesized sound.
  *
- * Names: drop, boom, crate, pick, kick, die, wall, go, sd, win, count.
+ * Names: drop, boom, crate, pick, kick, die, wall, go, sd, win, count, curse, pop, oneup, open.
  * Entry: a URL string, or { url, volume (default 1), rate (default 1 = original pitch), jitter (random pitch spread, default 0.04) }.
  * To play only a part of a longer file, add start / end in seconds: { url: '.../sfx.wav', start: 0.4, end: 0.74 }.
  */
@@ -108,7 +108,7 @@ export class Sfx {
   }
 
   /**
-   * @param {'drop'|'boom'|'crate'|'pick'|'kick'|'die'|'wall'|'go'|'sd'|'win'|'count'} kind
+   * @param {'drop'|'boom'|'crate'|'pick'|'kick'|'die'|'wall'|'go'|'sd'|'win'|'count'|'curse'|'pop'|'oneup'|'open'} kind
    * @param {{pan?: number, power?: number}} opts pan -1..1 (where on the board), power 0..1 (how big it should sound)
    */
   play(kind, { pan = 0, power = 0.5 } = {}) {
@@ -177,6 +177,25 @@ export class Sfx {
         for (let k = 0; k < 3; k++) {
           this.#tone(out, 'square', 880, 660, 0.18, 0.1, t + k * 0.22);
         }
+        break;
+      }
+      case 'curse': { // the skull: wobbling, sinking tones
+        this.#tone(out, 'square', 330, 160, 0.35, 0.09, t);
+        this.#tone(out, 'square', 311, 150, 0.35, 0.07, t + 0.05);
+        this.#tone(out, 'triangle', 200, 90, 0.5, 0.15, t + 0.15);
+        break;
+      }
+      case 'pop': { // a monster is blown up
+        this.#tone(out, 'square', 880 * j, 220, 0.12, 0.1, t);
+        this.#hiss(out, 'bandpass', 2600, 0.08, 0.2, t);
+        break;
+      }
+      case 'oneup': { // extra life
+        [659, 784, 1319, 1047, 1175, 1568].forEach((f, k) => this.#tone(out, 'square', f, f, 0.08, 0.07, t + k * 0.07));
+        break;
+      }
+      case 'open': { // the exit opens
+        [392, 523, 659, 784].forEach((f, k) => this.#tone(out, 'triangle', f, f, 0.18, 0.18, t + k * 0.08));
         break;
       }
       case 'win': { // round won: little fanfare
